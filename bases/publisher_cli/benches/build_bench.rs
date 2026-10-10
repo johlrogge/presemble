@@ -1,6 +1,6 @@
 mod site_gen;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::time::Duration;
 
 fn bench_full_build(c: &mut Criterion) {
@@ -22,16 +22,12 @@ fn bench_full_build(c: &mut Criterion) {
         };
         let dir = site_gen::generate_site(&config);
 
-        group.bench_with_input(
-            BenchmarkId::new("pages", pages),
-            &dir,
-            |b, dir| {
-                b.iter(|| {
-                    publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
-                        .expect("build should succeed")
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("pages", pages), &dir, |b, dir| {
+            b.iter(|| {
+                publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
+                    .expect("build should succeed")
+            })
+        });
     }
     group.finish();
 }
@@ -51,16 +47,12 @@ fn bench_cross_links(c: &mut Criterion) {
         };
         let dir = site_gen::generate_site(&config);
 
-        group.bench_with_input(
-            BenchmarkId::new("links", links),
-            &dir,
-            |b, dir| {
-                b.iter(|| {
-                    publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
-                        .expect("build should succeed")
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("links", links), &dir, |b, dir| {
+            b.iter(|| {
+                publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
+                    .expect("build should succeed")
+            })
+        });
     }
     group.finish();
 }
@@ -80,16 +72,12 @@ fn bench_link_expressions(c: &mut Criterion) {
         };
         let dir = site_gen::generate_site(&config);
 
-        group.bench_with_input(
-            BenchmarkId::new("expressions", exprs),
-            &dir,
-            |b, dir| {
-                b.iter(|| {
-                    publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
-                        .expect("build should succeed")
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("expressions", exprs), &dir, |b, dir| {
+            b.iter(|| {
+                publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
+                    .expect("build should succeed")
+            })
+        });
     }
     group.finish();
 }
@@ -119,26 +107,28 @@ fn bench_rebuild(c: &mut Criterion) {
         };
         let dir = site_gen::generate_site(&config);
 
-        group.bench_with_input(
-            BenchmarkId::new("pages", pages),
-            &dir,
-            |b, dir| {
-                // Warm up: one clean build to ensure the site is valid.
-                publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
-                    .expect("warm-up build should succeed");
+        group.bench_with_input(BenchmarkId::new("pages", pages), &dir, |b, dir| {
+            // Warm up: one clean build to ensure the site is valid.
+            publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
+                .expect("warm-up build should succeed");
 
-                // Each iteration is a fresh Conductor (clean build).
-                // This measures build_all_pages cost after inject_collections
-                // has already been applied once — idempotency keeps it stable.
-                b.iter(|| {
-                    publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
-                        .expect("rebuild should succeed")
-                })
-            },
-        );
+            // Each iteration is a fresh Conductor (clean build).
+            // This measures build_all_pages cost after inject_collections
+            // has already been applied once — idempotency keeps it stable.
+            b.iter(|| {
+                publisher_cli::build_for_serve(dir, &publisher_cli::UrlConfig::default())
+                    .expect("rebuild should succeed")
+            })
+        });
     }
     group.finish();
 }
 
-criterion_group!(benches, bench_full_build, bench_cross_links, bench_link_expressions, bench_rebuild);
+criterion_group!(
+    benches,
+    bench_full_build,
+    bench_cross_links,
+    bench_link_expressions,
+    bench_rebuild
+);
 criterion_main!(benches);

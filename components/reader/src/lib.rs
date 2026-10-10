@@ -471,10 +471,7 @@ mod tests {
     #[test]
     fn read_string_utf8_with_escape() {
         let form = read("\"line1 \u{2014}\\nline2 \u{20ac}\"").unwrap();
-        assert_eq!(
-            form,
-            Form::Str("line1 \u{2014}\nline2 \u{20ac}".into())
-        );
+        assert_eq!(form, Form::Str("line1 \u{2014}\nline2 \u{20ac}".into()));
     }
 
     #[test]
@@ -537,10 +534,7 @@ mod tests {
 
     #[test]
     fn read_symbol() {
-        assert_eq!(
-            read("sort-by").unwrap(),
-            Form::Symbol("sort-by".into())
-        );
+        assert_eq!(read("sort-by").unwrap(), Form::Symbol("sort-by".into()));
     }
 
     #[test]

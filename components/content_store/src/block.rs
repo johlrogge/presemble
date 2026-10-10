@@ -3,8 +3,8 @@
 
 use crate::access::{
     add_bool_attr, add_child_element, add_child_text, add_int_attr, add_text_attr, child_text,
-    element_name_of, find_attr_int, find_attr_node, find_attr_text,
-    find_child_by_name, make_element,
+    element_name_of, find_attr_int, find_attr_node, find_attr_text, find_child_by_name,
+    make_element,
 };
 use crate::inline_store::{inlines_from_store, inlines_to_store};
 use content::inline::InlineContext;
@@ -27,7 +27,11 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
     match element {
         // `level`, an optional `marker`, and the inline nodes as children
         // (ADR-059 §6).
-        ContentElement::Heading { level, content, marker } => {
+        ContentElement::Heading {
+            level,
+            content,
+            marker,
+        } => {
             let node = make_element(store, "heading");
             add_int_attr(store, node, "level", level.value() as i64);
             if let Some(marker) = marker {
@@ -98,7 +102,12 @@ pub fn content_element_to_store(element: &ContentElement, store: &mut NodeStore)
         // `_trivia-end`. There is no trivia between items.
         ContentElement::List { list } => {
             let node = make_element(store, "list");
-            add_bool_attr(store, node, "ordered", matches!(list.kind, ListKind::Ordered { .. }));
+            add_bool_attr(
+                store,
+                node,
+                "ordered",
+                matches!(list.kind, ListKind::Ordered { .. }),
+            );
             if let ListKind::Ordered { start } = list.kind
                 && start != 1
             {
@@ -325,7 +334,11 @@ pub enum BlockDecodeError {
     /// A child that must be `Text` is something else.
     NonTextChild { kind: String },
     /// An attribute holds an unrecognised value.
-    InvalidAttribute { kind: String, attr: String, value: String },
+    InvalidAttribute {
+        kind: String,
+        attr: String,
+        value: String,
+    },
     /// A tree payload contains `NodeTree::Existing`.
     ExistingNode,
     /// A tree payload root is not a payload block kind.
@@ -398,10 +411,16 @@ impl std::fmt::Display for BlockDecodeError {
                 write!(f, "{kind} does not take a '{attr}' attribute")
             }
             BlockDecodeError::RowWidth { expected, found } => {
-                write!(f, "a table row has {found} cell(s); the table has {expected} column(s)")
+                write!(
+                    f,
+                    "a table row has {found} cell(s); the table has {expected} column(s)"
+                )
             }
             BlockDecodeError::InvalidComment(text) => {
-                write!(f, "comment trivia holds something that is not an HTML comment: {text}")
+                write!(
+                    f,
+                    "comment trivia holds something that is not an HTML comment: {text}"
+                )
             }
             BlockDecodeError::UnknownInline { kind } => {
                 write!(f, "'{kind}' is not an inline element")
@@ -413,7 +432,11 @@ impl std::fmt::Display for BlockDecodeError {
                 write!(f, "inline content of node {} is not in normal form", node.0)
             }
             BlockDecodeError::NotWritable { node } => {
-                write!(f, "inline content of node {} cannot be written as markdown", node.0)
+                write!(
+                    f,
+                    "inline content of node {} cannot be written as markdown",
+                    node.0
+                )
             }
         }
     }
@@ -468,7 +491,11 @@ pub(crate) fn try_child_by_name(
 
 /// The children of `parent` (a table's `head` or a `row`), all `cell`
 /// elements: nothing else sits there.
-fn cells_of(store: &NodeStore, parent: NodeId, kind: &str) -> Result<Vec<NodeId>, BlockDecodeError> {
+fn cells_of(
+    store: &NodeStore,
+    parent: NodeId,
+    kind: &str,
+) -> Result<Vec<NodeId>, BlockDecodeError> {
     elements_named(store, parent, kind, "cell")
 }
 
@@ -528,13 +555,15 @@ fn slot_marker(
     kind: &str,
 ) -> Result<Option<SlotMarker>, BlockDecodeError> {
     match find_attr_text(store, node, "marker") {
-        Some(name) => SlotMarker::new(&name).map(Some).ok_or_else(|| {
-            BlockDecodeError::InvalidAttribute {
-                kind: kind.to_string(),
-                attr: "marker".to_string(),
-                value: name,
-            }
-        }),
+        Some(name) => {
+            SlotMarker::new(&name)
+                .map(Some)
+                .ok_or_else(|| BlockDecodeError::InvalidAttribute {
+                    kind: kind.to_string(),
+                    attr: "marker".to_string(),
+                    value: name,
+                })
+        }
         None => Ok(None),
     }
 }
@@ -557,13 +586,25 @@ fn blocks_from_node(store: &NodeStore, id: NodeId, kind: &str) -> Result<Blocks,
             }
         }
         for comment in decode_trivia(store, child, ned::trivia::ATTR_TRIVIA_BEFORE)? {
-            blocks.comments.push_back((blocks.elements.len(), Spanned { node: comment, span: zero }));
+            blocks.comments.push_back((
+                blocks.elements.len(),
+                Spanned {
+                    node: comment,
+                    span: zero,
+                },
+            ));
         }
         let node = block_from_node(store, child)?;
         blocks.elements.push_back(Spanned { node, span: zero });
     }
     for comment in decode_trivia(store, id, ned::trivia::ATTR_TRIVIA_END)? {
-        blocks.comments.push_back((blocks.elements.len(), Spanned { node: comment, span: zero }));
+        blocks.comments.push_back((
+            blocks.elements.len(),
+            Spanned {
+                node: comment,
+                span: zero,
+            },
+        ));
     }
     Ok(blocks)
 }
@@ -625,7 +666,11 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
             let level = heading_level(store, id)?;
             let marker = slot_marker(store, id, kind)?;
             let content = inlines_from_store(store, id, InlineContext::Heading)?;
-            Ok(ContentElement::Heading { level, content, marker })
+            Ok(ContentElement::Heading {
+                level,
+                content,
+                marker,
+            })
         }
         "paragraph" => {
             let marker = slot_marker(store, id, kind)?;
@@ -690,7 +735,9 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
         }),
         // The quote's children, all blocks, each with its leading comments;
         // the old shape (one Text child) and any other child is refused.
-        "blockquote" => Ok(ContentElement::Blockquote { blocks: blocks_from_node(store, id, kind)? }),
+        "blockquote" => Ok(ContentElement::Blockquote {
+            blocks: blocks_from_node(store, id, kind)?,
+        }),
         // `ordered` and `tight` are required, `start` only on an ordered list;
         // every child is an `item`, which holds blocks like a quote does. The
         // old shape (one Text child) is refused. A tight list whose items
@@ -714,8 +761,16 @@ pub fn block_from_node(store: &NodeStore, id: NodeId) -> Result<ContentElement, 
             let tight = bool_attr(store, id, kind, "tight")?;
             let start = list_start(store, id, ordered)?;
             let list = List {
-                kind: if ordered { ListKind::Ordered { start } } else { ListKind::Bullet },
-                spacing: if tight { Spacing::Tight } else { Spacing::Loose },
+                kind: if ordered {
+                    ListKind::Ordered { start }
+                } else {
+                    ListKind::Bullet
+                },
+                spacing: if tight {
+                    Spacing::Tight
+                } else {
+                    Spacing::Loose
+                },
                 items,
             };
             if tight && !list.can_be_tight() {
@@ -837,7 +892,12 @@ pub fn tree_to_block(tree: &ned::NodeTree) -> Result<ContentElement, BlockDecode
 /// What the decoder would drop or misread in the payload block `tree`, refused
 /// instead; a quote's children are checked as payload blocks themselves.
 fn check_payload_tree(tree: &ned::NodeTree) -> Result<(), BlockDecodeError> {
-    let ned::NodeTree::Element { name, attrs, children } = tree else {
+    let ned::NodeTree::Element {
+        name,
+        attrs,
+        children,
+    } = tree
+    else {
         return Err(BlockDecodeError::NotAnElement);
     };
     if !PAYLOAD_BLOCK_KINDS.contains(&name.as_str()) {
@@ -871,7 +931,11 @@ fn check_payload_tree(tree: &ned::NodeTree) -> Result<(), BlockDecodeError> {
     if name == "list" {
         for child in children {
             match child {
-                ned::NodeTree::Element { name: item, attrs, children: blocks } if item == "item" => {
+                ned::NodeTree::Element {
+                    name: item,
+                    attrs,
+                    children: blocks,
+                } if item == "item" => {
                     if let Some((attr, _)) = attrs.first() {
                         return Err(unexpected_attribute("item", attr));
                     }
@@ -922,7 +986,10 @@ fn unexpected_child(kind: &str, child: &ned::NodeTree) -> BlockDecodeError {
 
 /// An attribute `kind` does not take.
 fn unexpected_attribute(kind: &str, attr: &str) -> BlockDecodeError {
-    BlockDecodeError::UnexpectedAttribute { kind: kind.to_string(), attr: attr.to_string() }
+    BlockDecodeError::UnexpectedAttribute {
+        kind: kind.to_string(),
+        attr: attr.to_string(),
+    }
 }
 
 /// A table payload is exactly `head` then `rows`; `head` holds only `cell`
@@ -934,15 +1001,13 @@ fn check_table_children(children: &[ned::NodeTree]) -> Result<(), BlockDecodeErr
     use ned::NodeTree as T;
     let unexpected = |child: &T| unexpected_child("table", child);
     // Each cell: an element named `cell`; attributes only where `allowed`.
-    fn check_cells(
-        kind: &str,
-        cells: &[T],
-        allowed: &[&str],
-    ) -> Result<(), BlockDecodeError> {
+    fn check_cells(kind: &str, cells: &[T], allowed: &[&str]) -> Result<(), BlockDecodeError> {
         for cell in cells {
             match cell {
                 T::Element { name, attrs, .. } if name == "cell" => {
-                    if let Some((attr, _)) = attrs.iter().find(|(a, _)| !allowed.contains(&a.as_str())) {
+                    if let Some((attr, _)) =
+                        attrs.iter().find(|(a, _)| !allowed.contains(&a.as_str()))
+                    {
                         return Err(unexpected_attribute("cell", attr));
                     }
                 }
@@ -955,21 +1020,33 @@ fn check_table_children(children: &[ned::NodeTree]) -> Result<(), BlockDecodeErr
     let mut seen_rows = false;
     for child in children {
         match child {
-            T::Element { name, attrs, children: cells } if name == "head" && !seen_head && !seen_rows => {
+            T::Element {
+                name,
+                attrs,
+                children: cells,
+            } if name == "head" && !seen_head && !seen_rows => {
                 seen_head = true;
                 if let Some((attr, _)) = attrs.first() {
                     return Err(unexpected_attribute("head", attr));
                 }
                 check_cells("head", cells, &["align"])?;
             }
-            T::Element { name, attrs, children: rows } if name == "rows" && seen_head && !seen_rows => {
+            T::Element {
+                name,
+                attrs,
+                children: rows,
+            } if name == "rows" && seen_head && !seen_rows => {
                 seen_rows = true;
                 if let Some((attr, _)) = attrs.first() {
                     return Err(unexpected_attribute("rows", attr));
                 }
                 for row in rows {
                     match row {
-                        T::Element { name, attrs, children: cells } if name == "row" => {
+                        T::Element {
+                            name,
+                            attrs,
+                            children: cells,
+                        } if name == "row" => {
                             if let Some((attr, _)) = attrs.first() {
                                 return Err(unexpected_attribute("row", attr));
                             }
@@ -1000,11 +1077,16 @@ fn link_text_from_node(store: &NodeStore, node: NodeId) -> Result<LinkText, Bloc
     }
 }
 
-pub fn link_target_from_node(store: &NodeStore, node: NodeId) -> Result<LinkTarget, BlockDecodeError> {
+pub fn link_target_from_node(
+    store: &NodeStore,
+    node: NodeId,
+) -> Result<LinkTarget, BlockDecodeError> {
     const KIND: &str = "link-target";
     let kind = try_attr_text(store, node, KIND, "kind")?;
     match kind.as_str() {
-        "path-ref" => Ok(LinkTarget::PathRef(try_attr_text(store, node, KIND, "value")?)),
+        "path-ref" => Ok(LinkTarget::PathRef(try_attr_text(
+            store, node, KIND, "value",
+        )?)),
         "thread-expr" => {
             let source = try_attr_keyword(store, node, KIND, "source")?;
             let mut operations: Vec<LinkOp> = Vec::new();
@@ -1023,7 +1105,10 @@ pub fn link_target_from_node(store: &NodeStore, node: NodeId) -> Result<LinkTarg
     }
 }
 
-pub(crate) fn link_op_from_node(store: &NodeStore, node: NodeId) -> Result<Option<LinkOp>, BlockDecodeError> {
+pub(crate) fn link_op_from_node(
+    store: &NodeStore,
+    node: NodeId,
+) -> Result<Option<LinkOp>, BlockDecodeError> {
     let Some(tag) = element_name_of(store, node) else {
         return Ok(None);
     };
@@ -1065,7 +1150,9 @@ pub(crate) fn link_op_from_node(store: &NodeStore, node: NodeId) -> Result<Optio
         }
         "refs-to" => match try_attr_text(store, node, kind, "target-kind")?.as_str() {
             "self" => LinkOp::RefsTo(RefsToTarget::SelfRef),
-            "url" => LinkOp::RefsTo(RefsToTarget::Url(try_attr_text(store, node, kind, "target")?)),
+            "url" => LinkOp::RefsTo(RefsToTarget::Url(try_attr_text(
+                store, node, kind, "target",
+            )?)),
             other => {
                 return Err(BlockDecodeError::InvalidAttribute {
                     kind: kind.to_string(),

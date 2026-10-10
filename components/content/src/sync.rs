@@ -49,7 +49,10 @@ pub fn container_parts(blocks: &Blocks) -> Vec<Spanned<Part>> {
             comments.next();
         }
         if let (Some((_, first)), Some((_, last))) = (group.first(), group.last()) {
-            let span = Span { start: first.start, end: last.end };
+            let span = Span {
+                start: first.start,
+                end: last.end,
+            };
             out.push(Spanned {
                 node: Part::Comments(group.into_iter().map(|(c, _)| c).collect()),
                 span,
@@ -58,7 +61,10 @@ pub fn container_parts(blocks: &Blocks) -> Vec<Spanned<Part>> {
     };
     for (at, element) in blocks.elements.iter().enumerate() {
         take_comments(&mut out, Some(at));
-        out.push(Spanned { node: Part::Block(element.node.clone()), span: element.span });
+        out.push(Spanned {
+            node: Part::Block(element.node.clone()),
+            span: element.span,
+        });
     }
     take_comments(&mut out, None);
     out
@@ -73,13 +79,21 @@ pub fn document_containers(doc: &Document) -> Vec<(Container, Blocks)> {
             .iter()
             .filter_map(|c| match &c.anchor {
                 CommentAnchor::Before(of, at) if *of == container => Some((*at, c.comment.clone())),
-                CommentAnchor::End(of) if *of == container => Some((elements.len(), c.comment.clone())),
+                CommentAnchor::End(of) if *of == container => {
+                    Some((elements.len(), c.comment.clone()))
+                }
                 _ => None,
             })
             .collect();
         // Stable: comments at one index stay in source order.
         comments.sort_by_key(|(at, _)| *at);
-        (container, Blocks { elements: elements.clone(), comments: comments.into_iter().collect() })
+        (
+            container,
+            Blocks {
+                elements: elements.clone(),
+                comments: comments.into_iter().collect(),
+            },
+        )
     };
     let mut out: Vec<(Container, Blocks)> = doc
         .preamble
@@ -156,7 +170,10 @@ pub fn regions(base: &[Spanned<Part>], new: &[Spanned<Part>]) -> Vec<Region> {
     let Some(pairs) = pairs else {
         // Too large to align: the middle is one region.
         if prefix < base_end || prefix < new_end {
-            out.push(Region { base: prefix..base_end, new: prefix..new_end });
+            out.push(Region {
+                base: prefix..base_end,
+                new: prefix..new_end,
+            });
         }
         return out;
     };
@@ -167,7 +184,10 @@ pub fn regions(base: &[Spanned<Part>], new: &[Spanned<Part>]) -> Vec<Region> {
         .chain(std::iter::once((base_end, new_end)));
     for (i, j) in ends {
         if i > b || j > n {
-            out.push(Region { base: b..i, new: n..j });
+            out.push(Region {
+                base: b..i,
+                new: n..j,
+            });
         }
         b = i + 1;
         n = j + 1;
@@ -200,7 +220,11 @@ pub enum Step {
     /// Into a blockquote.
     Quote { base: usize, new: usize },
     /// Into item `item` of a list.
-    Item { base: usize, new: usize, item: usize },
+    Item {
+        base: usize,
+        new: usize,
+        item: usize,
+    },
 }
 
 /// A region and the path down to the container it is in. An empty path is a
@@ -248,8 +272,10 @@ fn compare(base: &Blocks, new: &Blocks) -> (Vec<Located>, Vec<ListSite>) {
     ) {
         let (base_parts, new_parts) = (container_parts(base), container_parts(new));
         for region in regions(&base_parts, &new_parts) {
-            if let ([b], [n]) = (&base_parts[region.base.clone()], &new_parts[region.new.clone()])
-                && let (Part::Block(b_el), Part::Block(n_el)) = (&b.node, &n.node)
+            if let ([b], [n]) = (
+                &base_parts[region.base.clone()],
+                &new_parts[region.new.clone()],
+            ) && let (Part::Block(b_el), Part::Block(n_el)) = (&b.node, &n.node)
             {
                 let (bi, ni) = (region.base.start, region.new.start);
                 match (b_el, n_el) {
@@ -265,10 +291,20 @@ fn compare(base: &Blocks, new: &Blocks) -> (Vec<Located>, Vec<ListSite>) {
                     (ContentElement::List { list: lb }, ContentElement::List { list: ln })
                         if lb.kind == ln.kind && lb.items.len() == ln.items.len() =>
                     {
-                        lists.push(ListSite { path: path.clone(), base: bi, new: ni });
-                        for (item, (item_base, item_new)) in lb.items.iter().zip(&ln.items).enumerate() {
+                        lists.push(ListSite {
+                            path: path.clone(),
+                            base: bi,
+                            new: ni,
+                        });
+                        for (item, (item_base, item_new)) in
+                            lb.items.iter().zip(&ln.items).enumerate()
+                        {
                             if item_base != item_new {
-                                path.push(Step::Item { base: bi, new: ni, item });
+                                path.push(Step::Item {
+                                    base: bi,
+                                    new: ni,
+                                    item,
+                                });
                                 go(item_base, item_new, path, out, lists);
                                 path.pop();
                             }
@@ -278,7 +314,10 @@ fn compare(base: &Blocks, new: &Blocks) -> (Vec<Located>, Vec<ListSite>) {
                     _ => {}
                 }
             }
-            out.push(Located { path: path.clone(), region });
+            out.push(Located {
+                path: path.clone(),
+                region,
+            });
         }
     }
     let (mut out, mut lists) = (Vec::new(), Vec::new());
@@ -306,11 +345,15 @@ pub fn document_regions(base: &Document, new: &Document) -> Vec<ContainerRegions
     let mut compare = |container: &Container, b: &Blocks, n: &Blocks| {
         let regions = block_regions(b, n);
         if !regions.is_empty() {
-            out.push(ContainerRegions { container: container.clone(), regions });
+            out.push(ContainerRegions {
+                container: container.clone(),
+                regions,
+            });
         }
     };
     for (container, new_blocks) in &new_containers {
-        let base_blocks = find(&base_containers, container).map_or(&empty, |i| &base_containers[i].1);
+        let base_blocks =
+            find(&base_containers, container).map_or(&empty, |i| &base_containers[i].1);
         compare(container, base_blocks, new_blocks);
     }
     for (container, base_blocks) in &base_containers {
@@ -343,7 +386,11 @@ pub fn align(base: &[ContentElement], model: &[ContentElement]) -> Vec<Option<us
     }
     let (base_end, model_end) = (base.len() - suffix, model.len() - suffix);
     // Too large even so for the table: the prefix and suffix alone are aligned.
-    if let Some(pairs) = lcs_pairs(&base[prefix..base_end], &model[prefix..model_end], |a, b| a == b) {
+    if let Some(pairs) = lcs_pairs(
+        &base[prefix..base_end],
+        &model[prefix..model_end],
+        |a, b| a == b,
+    ) {
         for (i, j) in pairs {
             out[prefix + i] = Some(prefix + j);
         }
@@ -380,8 +427,13 @@ pub fn path_prefixes(text: &str, root: &Blocks, path: &[Step]) -> Vec<Prefix> {
         if !matches!(parts.get(part).map(|p| &p.node), Some(Part::Block(_))) {
             break;
         }
-        let at = parts[..part].iter().filter(|p| matches!(p.node, Part::Block(_))).count();
-        let Some(element) = current.elements.get(at).map(|e| &e.node) else { break };
+        let at = parts[..part]
+            .iter()
+            .filter(|p| matches!(p.node, Part::Block(_)))
+            .count();
+        let Some(element) = current.elements.get(at).map(|e| &e.node) else {
+            break;
+        };
         let inner = match (element, item) {
             (ContentElement::Blockquote { blocks }, None) => blocks,
             (ContentElement::List { list }, Some(i)) => match list.items.get(i) {
@@ -498,9 +550,10 @@ fn closes_fence(line: &str, mark: char, length: usize) -> bool {
 fn html_block_start(line: &str) -> Option<HtmlBlockKind> {
     let lower = line.to_ascii_lowercase();
     let tag = |name: &str| {
-        lower.strip_prefix('<').and_then(|r| r.strip_prefix(name)).is_some_and(|after| {
-            after.is_empty() || after.starts_with([' ', '\t', '>'])
-        })
+        lower
+            .strip_prefix('<')
+            .and_then(|r| r.strip_prefix(name))
+            .is_some_and(|after| after.is_empty() || after.starts_with([' ', '\t', '>']))
     };
     if ["script", "pre", "style", "textarea"].into_iter().any(tag) {
         Some(HtmlBlockKind::RawText)
@@ -510,7 +563,10 @@ fn html_block_start(line: &str) -> Option<HtmlBlockKind> {
         Some(HtmlBlockKind::ProcessingInstruction)
     } else if lower.starts_with("<![cdata[") {
         Some(HtmlBlockKind::Cdata)
-    } else if lower.strip_prefix("<!").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic())) {
+    } else if lower
+        .strip_prefix("<!")
+        .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic()))
+    {
         Some(HtmlBlockKind::Declaration)
     } else {
         None
@@ -521,9 +577,9 @@ fn html_block_start(line: &str) -> Option<HtmlBlockKind> {
 fn html_block_ends(kind: HtmlBlockKind, line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     match kind {
-        HtmlBlockKind::RawText => {
-            ["</script>", "</pre>", "</style>", "</textarea>"].iter().any(|end| lower.contains(end))
-        }
+        HtmlBlockKind::RawText => ["</script>", "</pre>", "</style>", "</textarea>"]
+            .iter()
+            .any(|end| lower.contains(end)),
         HtmlBlockKind::Comment => lower.contains("-->"),
         HtmlBlockKind::ProcessingInstruction => lower.contains("?>"),
         HtmlBlockKind::Declaration => lower.contains('>'),
@@ -570,12 +626,16 @@ pub fn apply_edits(buffer: &str, edits: &[BufferEdit]) -> String {
 /// reached in practice. It is kept so that a text that cannot be read is
 /// replaced rather than half-edited.
 pub fn changed_block_edits(buffer: &str, model: &str) -> Vec<BufferEdit> {
-    let (Ok(base_doc), Ok(new_doc)) = (crate::parse_document(buffer), crate::parse_document(model)) else {
+    let (Ok(base_doc), Ok(new_doc)) = (crate::parse_document(buffer), crate::parse_document(model))
+    else {
         // Not readable as markdown: the whole text is the one change.
         return if buffer == model {
             Vec::new()
         } else {
-            vec![BufferEdit { range: 0..buffer.len(), text: model.to_string() }]
+            vec![BufferEdit {
+                range: 0..buffer.len(),
+                text: model.to_string(),
+            }]
         };
     };
     let (base, new) = (container_parts(&base_doc), container_parts(&new_doc));
@@ -595,10 +655,17 @@ pub fn changed_block_edits(buffer: &str, model: &str) -> Vec<BufferEdit> {
             // parts and what separates them, a list separator included. The
             // buffer is rewritten between the same two parts.
             let from = |text: &str, parts: &[Spanned<Part>], before: usize| {
-                before.checked_sub(1).map_or(0, |i| trimmed(text, parts, i).end).min(text.len())
+                before
+                    .checked_sub(1)
+                    .map_or(0, |i| trimmed(text, parts, i).end)
+                    .min(text.len())
             };
             let to = |text: &str, parts: &[Spanned<Part>], after: usize| {
-                if after < parts.len() { trimmed(text, parts, after).start } else { text.len() }
+                if after < parts.len() {
+                    trimmed(text, parts, after).start
+                } else {
+                    text.len()
+                }
             };
             let (buffer_range, model_range) = (
                 from(buffer, &base, region.base.start)..to(buffer, &base, region.base.end),
@@ -618,13 +685,22 @@ pub fn changed_block_edits(buffer: &str, model: &str) -> Vec<BufferEdit> {
 /// The length in bytes of the longest common prefix of `a` and `b`, at a
 /// character boundary.
 fn common_prefix(a: &str, b: &str) -> usize {
-    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).map(|(x, _)| x.len_utf8()).sum()
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf8())
+        .sum()
 }
 
 /// The length in bytes of the longest common suffix of `a` and `b`, at a
 /// character boundary.
 fn common_suffix(a: &str, b: &str) -> usize {
-    a.chars().rev().zip(b.chars().rev()).take_while(|(x, y)| x == y).map(|(x, _)| x.len_utf8()).sum()
+    a.chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf8())
+        .sum()
 }
 
 /// The minimal line diff that turns `buffer` into `canonical`, exactly: the
@@ -643,7 +719,11 @@ pub fn format_edits(buffer: &str, canonical: &str) -> Vec<BufferEdit> {
     };
     let (base, new) = (lines(buffer), lines(canonical));
     let same = |a: &(usize, usize), b: &(usize, usize)| buffer[a.0..a.1] == canonical[b.0..b.1];
-    let prefix = base.iter().zip(&new).take_while(|(a, b)| same(a, b)).count();
+    let prefix = base
+        .iter()
+        .zip(&new)
+        .take_while(|(a, b)| same(a, b))
+        .count();
     let suffix = base[prefix..]
         .iter()
         .rev()
@@ -652,10 +732,12 @@ pub fn format_edits(buffer: &str, canonical: &str) -> Vec<BufferEdit> {
         .count();
     let (base_end, new_end) = (base.len() - suffix, new.len() - suffix);
     // The byte offset where line `i` of `lines` starts (the text's end past the last).
-    let start_of = |lines: &[(usize, usize)], i: usize, len: usize| lines.get(i).map_or(len, |l| l.0);
+    let start_of =
+        |lines: &[(usize, usize)], i: usize, len: usize| lines.get(i).map_or(len, |l| l.0);
     let edit = |b: Range<usize>, n: Range<usize>| BufferEdit {
         range: start_of(&base, b.start, buffer.len())..start_of(&base, b.end, buffer.len()),
-        text: canonical[start_of(&new, n.start, canonical.len())..start_of(&new, n.end, canonical.len())]
+        text: canonical
+            [start_of(&new, n.start, canonical.len())..start_of(&new, n.end, canonical.len())]
             .to_string(),
     };
     let Some(pairs) = lcs_pairs(&base[prefix..base_end], &new[prefix..new_end], same) else {
@@ -699,7 +781,10 @@ mod tests {
     }
 
     fn located(path: Vec<Step>, base: Range<usize>, new: Range<usize>) -> Located {
-        Located { path, region: region(base, new) }
+        Located {
+            path,
+            region: region(base, new),
+        }
     }
 
     // ── regions ─────────────────────────────────────────────────────────────
@@ -729,9 +814,15 @@ mod tests {
         // Several apart.
         let base = parts("a\n\nb\n\nc\n\nd\n");
         let new = parts("a\n\nX\n\nc\n\nd\n\ne\n");
-        assert_eq!(regions(&base, &new), vec![region(1..2, 1..2), region(4..4, 4..5)]);
+        assert_eq!(
+            regions(&base, &new),
+            vec![region(1..2, 1..2), region(4..4, 4..5)]
+        );
         // Everything replaced, nothing common.
-        assert_eq!(regions(&parts("a\n\nb\n"), &parts("x\n\ny\n\nz\n")), vec![region(0..2, 0..3)]);
+        assert_eq!(
+            regions(&parts("a\n\nb\n"), &parts("x\n\ny\n\nz\n")),
+            vec![region(0..2, 0..3)]
+        );
         // Nothing on either side.
         assert_eq!(regions(&[], &[]), vec![]);
         assert_eq!(regions(&[], &parts("a\n")), vec![region(0..0, 0..1)]);
@@ -741,9 +832,20 @@ mod tests {
     fn comment_changes_are_regions() {
         let base = parts("a\n\n<!-- x -->\n\nb\n");
         assert_eq!(base.len(), 3);
-        assert_eq!(regions(&base, &parts("a\n\n<!-- y -->\n\nb\n")), vec![region(1..2, 1..2)]);
-        assert_eq!(regions(&base, &parts("a\n\nb\n")), vec![region(1..2, 1..1)], "removed");
-        assert_eq!(regions(&parts("a\n\nb\n"), &base), vec![region(1..1, 1..2)], "added");
+        assert_eq!(
+            regions(&base, &parts("a\n\n<!-- y -->\n\nb\n")),
+            vec![region(1..2, 1..2)]
+        );
+        assert_eq!(
+            regions(&base, &parts("a\n\nb\n")),
+            vec![region(1..2, 1..1)],
+            "removed"
+        );
+        assert_eq!(
+            regions(&parts("a\n\nb\n"), &base),
+            vec![region(1..1, 1..2)],
+            "added"
+        );
         // At the end of the container.
         assert_eq!(
             regions(&parts("a\n"), &parts("a\n\n<!-- end -->\n")),
@@ -788,7 +890,15 @@ mod tests {
         let (base, new) = (blocks("- a\n- b\n- c\n"), blocks("- a\n- bX\n- c\n"));
         assert_eq!(
             block_regions(&base, &new),
-            vec![located(vec![Step::Item { base: 0, new: 0, item: 1 }], 0..1, 0..1)]
+            vec![located(
+                vec![Step::Item {
+                    base: 0,
+                    new: 0,
+                    item: 1
+                }],
+                0..1,
+                0..1
+            )]
         );
     }
 
@@ -808,7 +918,14 @@ mod tests {
         assert_eq!(
             block_regions(&base, &new),
             vec![located(
-                vec![Step::Item { base: 0, new: 0, item: 0 }, Step::Quote { base: 1, new: 1 }],
+                vec![
+                    Step::Item {
+                        base: 0,
+                        new: 0,
+                        item: 0
+                    },
+                    Step::Quote { base: 1, new: 1 }
+                ],
                 1..2,
                 1..2
             )]
@@ -824,8 +941,24 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                located(vec![Step::Item { base: 0, new: 0, item: 0 }], 0..1, 0..1),
-                located(vec![Step::Item { base: 0, new: 0, item: 2 }], 0..1, 0..1),
+                located(
+                    vec![Step::Item {
+                        base: 0,
+                        new: 0,
+                        item: 0
+                    }],
+                    0..1,
+                    0..1
+                ),
+                located(
+                    vec![Step::Item {
+                        base: 0,
+                        new: 0,
+                        item: 2
+                    }],
+                    0..1,
+                    0..1
+                ),
             ]
         );
         assert_eq!(block_regions(&base, &base), vec![]);
@@ -849,19 +982,33 @@ mod tests {
         // A paragraph and a code block in an item makes the list loose: the other
         // items are not part of the change.
         assert_eq!(
-            block_regions(&blocks("- a\n- b\n- c\n"), &blocks("- a\n- b\n  ```\n  x\n  ```\n- c\n")),
+            block_regions(
+                &blocks("- a\n- b\n- c\n"),
+                &blocks("- a\n- b\n  ```\n  x\n  ```\n- c\n")
+            ),
             vec![located(vec![item(0, 0, 1)], 1..1, 1..2)]
         );
         // Only the spacing changed: no item differs, so no region; the list is
         // reported as one compared by its items.
         let (base, new) = (blocks("- a\n- b\n"), blocks("- a\n\n- b\n"));
         assert_eq!(block_regions(&base, &new), vec![]);
-        assert_eq!(compared_lists(&base, &new), vec![ListSite { path: vec![], base: 0, new: 0 }]);
+        assert_eq!(
+            compared_lists(&base, &new),
+            vec![ListSite {
+                path: vec![],
+                base: 0,
+                new: 0
+            }]
+        );
         // Inside a quote too.
         let (base, new) = (blocks("> - a\n> - b\n"), blocks("> - a\n>\n> - b\n"));
         assert_eq!(
             compared_lists(&base, &new),
-            vec![ListSite { path: vec![Step::Quote { base: 0, new: 0 }], base: 0, new: 0 }]
+            vec![ListSite {
+                path: vec![Step::Quote { base: 0, new: 0 }],
+                base: 0,
+                new: 0
+            }]
         );
     }
 
@@ -871,16 +1018,30 @@ mod tests {
     fn a_list_whose_kind_or_item_count_changed_is_a_replace() {
         let base = blocks("- a\n- b\n");
         for new in ["- a\n- b\n- c\n", "1. a\n2. b\n", "- a\n\n- b\n\n- c\n"] {
-            assert_eq!(block_regions(&base, &blocks(new)), vec![located(vec![], 0..1, 0..1)], "{new:?}");
-            assert_eq!(compared_lists(&base, &blocks(new)), vec![], "{new:?}: not compared item by item");
+            assert_eq!(
+                block_regions(&base, &blocks(new)),
+                vec![located(vec![], 0..1, 0..1)],
+                "{new:?}"
+            );
+            assert_eq!(
+                compared_lists(&base, &blocks(new)),
+                vec![],
+                "{new:?}: not compared item by item"
+            );
         }
     }
 
     /// Guard: a paragraph that became a list, and a quote that became a paragraph.
     #[test]
     fn a_block_that_changed_kind_is_a_region_of_its_container() {
-        assert_eq!(block_regions(&blocks("a\n"), &blocks("- a\n")), vec![located(vec![], 0..1, 0..1)]);
-        assert_eq!(block_regions(&blocks("> a\n"), &blocks("a\n")), vec![located(vec![], 0..1, 0..1)]);
+        assert_eq!(
+            block_regions(&blocks("a\n"), &blocks("- a\n")),
+            vec![located(vec![], 0..1, 0..1)]
+        );
+        assert_eq!(
+            block_regions(&blocks("> a\n"), &blocks("a\n")),
+            vec![located(vec![], 0..1, 0..1)]
+        );
     }
 
     #[test]
@@ -942,7 +1103,13 @@ mod tests {
         let base = doc("# T\n\nSum.\n\n----\n\nOne.\n\nTwo.\n");
         let new = doc("# T\n\nSum.\n\n----\n\nOne.\n\nTwo!\n");
         let got = document_regions(&base, &new);
-        assert_eq!(got, vec![ContainerRegions { container: Container::Body, regions: vec![located(vec![], 1..2, 1..2)] }]);
+        assert_eq!(
+            got,
+            vec![ContainerRegions {
+                container: Container::Body,
+                regions: vec![located(vec![], 1..2, 1..2)]
+            }]
+        );
         assert_eq!(document_regions(&base, &base), vec![]);
         // A comment at the end of the preamble is the unassigned end.
         let with = doc("# T\n\nSum.\n\n<!-- end -->\n\n----\n\nOne.\n\nTwo.\n");
@@ -953,7 +1120,10 @@ mod tests {
         let renamed = doc("# T\n\nSummary.\n\n----\n\nOne.\n\nTwo.\n");
         let got = document_regions(&base, &renamed);
         assert_eq!(got.len(), 1, "{got:?}");
-        assert!(matches!(&got[0].container, Container::Slot(s) if s.as_str() == "summary"), "{got:?}");
+        assert!(
+            matches!(&got[0].container, Container::Slot(s) if s.as_str() == "summary"),
+            "{got:?}"
+        );
     }
 
     // ── alignment ───────────────────────────────────────────────────────────
@@ -968,9 +1138,15 @@ mod tests {
         let model = elements("a\n\nX\n\nb\n\nY\n\nc\n");
         assert_eq!(align(&base, &model), vec![Some(0), Some(2), Some(4)]);
         // A block gone from the model.
-        assert_eq!(align(&elements("a\n\nb\n\nc\n"), &elements("a\n\nc\n")), vec![Some(0), None, Some(1)]);
+        assert_eq!(
+            align(&elements("a\n\nb\n\nc\n"), &elements("a\n\nc\n")),
+            vec![Some(0), None, Some(1)]
+        );
         // Repeats keep their order.
-        assert_eq!(align(&elements("a\n\na\n"), &elements("a\n\nz\n\na\n")), vec![Some(0), Some(2)]);
+        assert_eq!(
+            align(&elements("a\n\na\n"), &elements("a\n\nz\n\na\n")),
+            vec![Some(0), Some(2)]
+        );
         assert_eq!(align(&[], &model), Vec::<Option<usize>>::new());
     }
 
@@ -1013,19 +1189,41 @@ mod tests {
 
     #[test]
     fn an_open_fence_is_unterminated() {
-        assert_eq!(unterminated("```rust\nlet x = 1;\n"), Some(Unterminated::Fence));
+        assert_eq!(
+            unterminated("```rust\nlet x = 1;\n"),
+            Some(Unterminated::Fence)
+        );
         assert_eq!(unterminated("text\n\n~~~\ncode"), Some(Unterminated::Fence));
-        assert_eq!(unterminated("````\n```\ninner\n```\n"), Some(Unterminated::Fence), "a longer fence is not closed by a shorter");
+        assert_eq!(
+            unterminated("````\n```\ninner\n```\n"),
+            Some(Unterminated::Fence),
+            "a longer fence is not closed by a shorter"
+        );
     }
 
     #[test]
     fn an_open_html_comment_is_unterminated() {
         use HtmlBlockKind::*;
-        assert_eq!(unterminated("a\n\n<!-- open\n\nmore"), Some(Unterminated::HtmlBlock(Comment)));
-        assert_eq!(unterminated("<script>\nlet x;\n"), Some(Unterminated::HtmlBlock(RawText)));
-        assert_eq!(unterminated("<?php\necho 1;"), Some(Unterminated::HtmlBlock(ProcessingInstruction)));
-        assert_eq!(unterminated("<!DOCTYPE html"), Some(Unterminated::HtmlBlock(Declaration)));
-        assert_eq!(unterminated("<![CDATA[\nx"), Some(Unterminated::HtmlBlock(Cdata)));
+        assert_eq!(
+            unterminated("a\n\n<!-- open\n\nmore"),
+            Some(Unterminated::HtmlBlock(Comment))
+        );
+        assert_eq!(
+            unterminated("<script>\nlet x;\n"),
+            Some(Unterminated::HtmlBlock(RawText))
+        );
+        assert_eq!(
+            unterminated("<?php\necho 1;"),
+            Some(Unterminated::HtmlBlock(ProcessingInstruction))
+        );
+        assert_eq!(
+            unterminated("<!DOCTYPE html"),
+            Some(Unterminated::HtmlBlock(Declaration))
+        );
+        assert_eq!(
+            unterminated("<![CDATA[\nx"),
+            Some(Unterminated::HtmlBlock(Cdata))
+        );
     }
 
     /// Guard (green on the stub): closed constructs, and constructs inside a
@@ -1058,7 +1256,11 @@ mod tests {
         ];
         for (buffer, canonical) in cases {
             let edits = format_edits(buffer, canonical);
-            assert_eq!(apply_edits(buffer, &edits), canonical, "{buffer:?} -> {canonical:?}: {edits:?}");
+            assert_eq!(
+                apply_edits(buffer, &edits),
+                canonical,
+                "{buffer:?} -> {canonical:?}: {edits:?}"
+            );
         }
     }
 
@@ -1067,7 +1269,14 @@ mod tests {
         let buffer = "# T\n\n* a\nkeep\n\nlast\n";
         let canonical = "# T\n\n- a\nkeep\n\nlast\n";
         let edits = format_edits(buffer, canonical);
-        assert_eq!(edits, vec![BufferEdit { range: 5..9, text: "- a\n".to_string() }], "{edits:?}");
+        assert_eq!(
+            edits,
+            vec![BufferEdit {
+                range: 5..9,
+                text: "- a\n".to_string()
+            }],
+            "{edits:?}"
+        );
         assert!(format_edits("same\ntext\n", "same\ntext\n").is_empty());
         // Two apart changes are two edits, and the line between is untouched.
         let edits = format_edits("a\nm\nb\n", "A\nm\nB\n");
@@ -1106,7 +1315,11 @@ mod tests {
         let edits = changed_block_edits(buffer, model);
         let got = apply_edits(buffer, &edits);
         assert_eq!(got, model, "{edits:?}");
-        assert_eq!(blocks(&got).elements.len(), 2, "two lists, not one: {got:?}");
+        assert_eq!(
+            blocks(&got).elements.len(),
+            2,
+            "two lists, not one: {got:?}"
+        );
 
         // Before a list of the same kind, and between two.
         for (buffer, model) in [

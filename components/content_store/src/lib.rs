@@ -21,10 +21,9 @@ pub use access::{
 };
 pub use block::{
     BLOCK_CONTAINER_KINDS, BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS,
-    PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS,
-    add_trivia,
-    block_from_node, block_to_store, block_to_tree, content_element_to_store, decode_trivia,
-    inline_context_of, link_target_from_node, tree_to_block,
+    PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS, add_trivia, block_from_node, block_to_store,
+    block_to_tree, content_element_to_store, decode_trivia, inline_context_of,
+    link_target_from_node, tree_to_block,
 };
 pub use inline_store::{inlines_from_store, inlines_from_tree, inlines_to_store, inlines_to_tree};
 
@@ -47,10 +46,7 @@ pub fn heading_inlines(
 
 /// The plain text of the heading node `id` (ADR-059 §8): what readers that
 /// need text (addresses, link text, `input.title`) see.
-pub fn heading_plain_text(
-    store: &node_store::NodeStore,
-    id: node_store::NodeId,
-) -> Option<String> {
+pub fn heading_plain_text(store: &node_store::NodeStore, id: node_store::NodeId) -> Option<String> {
     use content::AsPlainText;
     heading_inlines(store, id).map(|content| content.plain_text())
 }
@@ -100,9 +96,7 @@ pub fn sole_inline(
     id: node_store::NodeId,
 ) -> Option<(StoredShape, node_store::NodeId)> {
     use node_store::Node;
-    let is_element = |node: node_store::NodeId, wanted: &str| {
-        matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == wanted)
-    };
+    let is_element = |node: node_store::NodeId, wanted: &str| matches!(store.get(node), Some(Node::Element(name)) if store.resolve_name(*name) == wanted);
     if !is_element(id, "paragraph") {
         return None;
     }
@@ -212,7 +206,9 @@ mod tests {
             let el = ContentElement::paragraph_from_markdown(chunk);
             let mut store = NodeStore::new();
             let id = block_to_store(&el, &mut store);
-            let Some(decoded) = paragraph_inlines(&store, id) else { continue };
+            let Some(decoded) = paragraph_inlines(&store, id) else {
+                continue;
+            };
             let expected = match content::BlockShape::of(&decoded) {
                 content::BlockShape::SoleLink(_) => StoredShape::SoleLink,
                 content::BlockShape::SoleImage(_) => StoredShape::SoleImage,

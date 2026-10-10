@@ -181,7 +181,10 @@ pub fn recognise_paragraph(source: &str) -> Option<Candidate<'_>> {
     match split_marker(line) {
         Some((expression, name)) => {
             let candidate = recognise_expression(expression)?;
-            Keyword::is_valid(name).then_some(Candidate { slot: Some(name), ..candidate })
+            Keyword::is_valid(name).then_some(Candidate {
+                slot: Some(name),
+                ..candidate
+            })
         }
         None => recognise_expression(line),
     }
@@ -217,11 +220,17 @@ fn recognise_expression(line: &str) -> Option<Candidate<'_>> {
     if text.contains('[') {
         return None;
     }
-    let dest = after_open[close + 1..].strip_prefix('(')?.strip_suffix(')')?;
+    let dest = after_open[close + 1..]
+        .strip_prefix('(')?
+        .strip_suffix(')')?;
     if !(dest.starts_with("->") || dest.starts_with("(->")) {
         return None;
     }
-    parens_never_negative(dest).then_some(Candidate { text, dest, slot: None })
+    parens_never_negative(dest).then_some(Candidate {
+        text,
+        dest,
+        slot: None,
+    })
 }
 
 /// Whether the depth of parentheses in `dest` (outside quoted strings) never
@@ -283,7 +292,10 @@ impl fmt::Display for LinkExpressionDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(LinkExpressionError::ThreadFirst) => {
-                write!(f, "thread-first `->` is not supported in link expressions; use `->>`")
+                write!(
+                    f,
+                    "thread-first `->` is not supported in link expressions; use `->>`"
+                )
             }
             Self::Malformed(e) => write!(f, "malformed link expression: {e}"),
             Self::MustStandAlone => write!(f, "link expressions must stand alone (ADR-058)"),
@@ -527,7 +539,11 @@ impl Cursor<'_> {
                 if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
                     return Err(LinkExpressionError::ExpectedCount);
                 }
-                LinkOp::Take(digits.parse().map_err(|_| LinkExpressionError::ExpectedCount)?)
+                LinkOp::Take(
+                    digits
+                        .parse()
+                        .map_err(|_| LinkExpressionError::ExpectedCount)?,
+                )
             }
             "filter" => {
                 self.require_ws()?;
@@ -565,7 +581,10 @@ mod tests {
     }
 
     fn thread(source: &str, operations: Vec<LinkOp>) -> LinkTarget {
-        LinkTarget::ThreadExpr { source: kw(source), operations }
+        LinkTarget::ThreadExpr {
+            source: kw(source),
+            operations,
+        }
     }
 
     fn ops(dest: &str) -> Vec<LinkOp> {
@@ -587,15 +606,24 @@ mod tests {
     fn sort_by_defaults_to_ascending() {
         assert_eq!(
             ops("->> :post (sort-by :title)"),
-            vec![LinkOp::SortBy { field: kw("title"), direction: SortDirection::Ascending }]
+            vec![LinkOp::SortBy {
+                field: kw("title"),
+                direction: SortDirection::Ascending
+            }]
         );
         assert_eq!(
             ops("->> :post (sort-by :title :asc)"),
-            vec![LinkOp::SortBy { field: kw("title"), direction: SortDirection::Ascending }]
+            vec![LinkOp::SortBy {
+                field: kw("title"),
+                direction: SortDirection::Ascending
+            }]
         );
         assert_eq!(
             ops("->> :post (sort-by :title :desc)"),
-            vec![LinkOp::SortBy { field: kw("title"), direction: SortDirection::Descending }]
+            vec![LinkOp::SortBy {
+                field: kw("title"),
+                direction: SortDirection::Descending
+            }]
         );
     }
 
@@ -609,13 +637,19 @@ mod tests {
     fn filter() {
         assert_eq!(
             ops(r#"->> :post (filter :status "pinned")"#),
-            vec![LinkOp::Filter { field: kw("status"), value: "pinned".to_string() }]
+            vec![LinkOp::Filter {
+                field: kw("status"),
+                value: "pinned".to_string()
+            }]
         );
     }
 
     #[test]
     fn refs_to_self_and_quoted_self() {
-        assert_eq!(ops("->> :post (refs-to self)"), vec![LinkOp::RefsTo(RefsToTarget::SelfRef)]);
+        assert_eq!(
+            ops("->> :post (refs-to self)"),
+            vec![LinkOp::RefsTo(RefsToTarget::SelfRef)]
+        );
         assert_eq!(
             ops(r#"->> :post (refs-to "self")"#),
             vec![LinkOp::RefsTo(RefsToTarget::Url("self".to_string()))]
@@ -673,28 +707,49 @@ mod tests {
 
     #[test]
     fn error_expected_whitespace() {
-        assert_eq!(parse_thread("->>:post"), Err(E::ExpectedWhitespace { at: 3 }));
+        assert_eq!(
+            parse_thread("->>:post"),
+            Err(E::ExpectedWhitespace { at: 3 })
+        );
         assert_eq!(parse_thread("->>"), Err(E::ExpectedWhitespace { at: 3 }));
-        assert_eq!(parse_thread("->> :p (take)"), Err(E::ExpectedWhitespace { at: 12 }));
+        assert_eq!(
+            parse_thread("->> :p (take)"),
+            Err(E::ExpectedWhitespace { at: 12 })
+        );
     }
 
     #[test]
     fn error_expected_keyword() {
         assert_eq!(parse_thread("->> post"), Err(E::ExpectedKeyword { at: 4 }));
         assert_eq!(parse_thread("->> :"), Err(E::ExpectedKeyword { at: 4 }));
-        assert_eq!(parse_thread("->> :p (sort-by title)"), Err(E::ExpectedKeyword { at: 16 }));
+        assert_eq!(
+            parse_thread("->> :p (sort-by title)"),
+            Err(E::ExpectedKeyword { at: 16 })
+        );
     }
 
     #[test]
     fn error_invalid_keyword() {
-        assert_eq!(parse_thread("->> :po$t"), Err(E::InvalidKeyword("po$t".to_string())));
-        assert_eq!(parse_thread("->> ::post"), Err(E::InvalidKeyword(":post".to_string())));
+        assert_eq!(
+            parse_thread("->> :po$t"),
+            Err(E::InvalidKeyword("po$t".to_string()))
+        );
+        assert_eq!(
+            parse_thread("->> ::post"),
+            Err(E::InvalidKeyword(":post".to_string()))
+        );
     }
 
     #[test]
     fn error_unknown_op() {
-        assert_eq!(parse_thread("->> :post (map :title)"), Err(E::UnknownOp("map".to_string())));
-        assert_eq!(parse_thread("->> :post ()"), Err(E::UnknownOp(String::new())));
+        assert_eq!(
+            parse_thread("->> :post (map :title)"),
+            Err(E::UnknownOp("map".to_string()))
+        );
+        assert_eq!(
+            parse_thread("->> :post ()"),
+            Err(E::UnknownOp(String::new()))
+        );
     }
 
     #[test]
@@ -717,14 +772,26 @@ mod tests {
 
     #[test]
     fn error_expected_string() {
-        assert_eq!(parse_thread("->> :p (filter :f news)"), Err(E::ExpectedString { at: 18 }));
-        assert_eq!(parse_thread("->> :p (refs-to /a/b)"), Err(E::ExpectedString { at: 16 }));
+        assert_eq!(
+            parse_thread("->> :p (filter :f news)"),
+            Err(E::ExpectedString { at: 18 })
+        );
+        assert_eq!(
+            parse_thread("->> :p (refs-to /a/b)"),
+            Err(E::ExpectedString { at: 16 })
+        );
     }
 
     #[test]
     fn error_unterminated_string() {
-        assert_eq!(parse_thread(r#"->> :p (filter :f "abc)"#), Err(E::UnterminatedString));
-        assert_eq!(parse_thread(r#"->> :p (filter :f "abc\"#), Err(E::UnterminatedString));
+        assert_eq!(
+            parse_thread(r#"->> :p (filter :f "abc)"#),
+            Err(E::UnterminatedString)
+        );
+        assert_eq!(
+            parse_thread(r#"->> :p (filter :f "abc\"#),
+            Err(E::UnterminatedString)
+        );
     }
 
     #[test]
@@ -737,16 +804,31 @@ mod tests {
 
     #[test]
     fn error_expected_close_paren() {
-        assert_eq!(parse_thread("->> :p (take 4"), Err(E::ExpectedCloseParen { at: 14 }));
-        assert_eq!(parse_thread("->> :p (take 4 5)"), Err(E::ExpectedCloseParen { at: 14 }));
-        assert_eq!(parse_destination("(->> :p"), Err(E::ExpectedCloseParen { at: 7 }));
+        assert_eq!(
+            parse_thread("->> :p (take 4"),
+            Err(E::ExpectedCloseParen { at: 14 })
+        );
+        assert_eq!(
+            parse_thread("->> :p (take 4 5)"),
+            Err(E::ExpectedCloseParen { at: 14 })
+        );
+        assert_eq!(
+            parse_destination("(->> :p"),
+            Err(E::ExpectedCloseParen { at: 7 })
+        );
     }
 
     #[test]
     fn error_trailing_input() {
-        assert_eq!(parse_thread("->> :post extra"), Err(E::TrailingInput { at: 9 }));
+        assert_eq!(
+            parse_thread("->> :post extra"),
+            Err(E::TrailingInput { at: 9 })
+        );
         assert_eq!(parse_thread("->> :post "), Err(E::TrailingInput { at: 9 }));
-        assert_eq!(parse_thread("->> :post(take 1)"), Err(E::TrailingInput { at: 9 }));
+        assert_eq!(
+            parse_thread("->> :post(take 1)"),
+            Err(E::TrailingInput { at: 9 })
+        );
     }
 
     #[test]
@@ -777,25 +859,52 @@ mod tests {
 
     #[test]
     fn destination_dispatch() {
-        assert_eq!(parse_destination(":a/b"), Ok(LinkTarget::PathRef("a/b".to_string())));
-        assert_eq!(parse_destination("->> :post (take 4)"), Ok(thread("post", vec![LinkOp::Take(4)])));
-        assert_eq!(parse_destination("(->> :post (take 4))"), Ok(thread("post", vec![LinkOp::Take(4)])));
+        assert_eq!(
+            parse_destination(":a/b"),
+            Ok(LinkTarget::PathRef("a/b".to_string()))
+        );
+        assert_eq!(
+            parse_destination("->> :post (take 4)"),
+            Ok(thread("post", vec![LinkOp::Take(4)]))
+        );
+        assert_eq!(
+            parse_destination("(->> :post (take 4))"),
+            Ok(thread("post", vec![LinkOp::Take(4)]))
+        );
         // `%20` is not decoded here; only the legacy pulldown path does that.
-        assert_eq!(parse_destination("->>%20:post"), Err(E::ExpectedWhitespace { at: 3 }));
+        assert_eq!(
+            parse_destination("->>%20:post"),
+            Err(E::ExpectedWhitespace { at: 3 })
+        );
     }
 
     // ── Paragraph recognition ───────────────────────────────────────────────
 
     #[test]
     fn recognises_whole_paragraph_candidates() {
-        let c = |text, dest| Some(Candidate { text, dest, slot: None });
-        assert_eq!(recognise_paragraph("[x](->> :post (take 4))"), c("x", "->> :post (take 4)"));
+        let c = |text, dest| {
+            Some(Candidate {
+                text,
+                dest,
+                slot: None,
+            })
+        };
+        assert_eq!(
+            recognise_paragraph("[x](->> :post (take 4))"),
+            c("x", "->> :post (take 4)")
+        );
         assert_eq!(recognise_paragraph("  [](->> :post)  "), c("", "->> :post"));
-        assert_eq!(recognise_paragraph("[x]((->> :post))"), c("x", "(->> :post)"));
+        assert_eq!(
+            recognise_paragraph("[x]((->> :post))"),
+            c("x", "(->> :post)")
+        );
         assert_eq!(recognise_paragraph("[x](-> :post)"), c("x", "-> :post"));
         assert_eq!(recognise_paragraph("[x](->>)"), c("x", "->>"));
         // Unbalanced at the end is still a candidate (the parse reports it).
-        assert_eq!(recognise_paragraph("[x](->> :p (take 4)"), c("x", "->> :p (take 4"));
+        assert_eq!(
+            recognise_paragraph("[x](->> :p (take 4)"),
+            c("x", "->> :p (take 4")
+        );
         // Parentheses in strings do not count.
         assert_eq!(
             recognise_paragraph(r#"[x](->> :p (filter :f ")"))"#),
@@ -826,7 +935,9 @@ mod tests {
         assert_eq!(diagnose_paragraph("plain text"), None);
         assert_eq!(
             diagnose_paragraph("[x](->> :post (map :title))"),
-            Some(LinkExpressionDiagnostic::Malformed(E::UnknownOp("map".to_string())))
+            Some(LinkExpressionDiagnostic::Malformed(E::UnknownOp(
+                "map".to_string()
+            )))
         );
         assert_eq!(
             diagnose_paragraph("[x](-> :post)"),
@@ -859,7 +970,13 @@ mod tests {
 
     #[test]
     fn recognises_a_slot_marker_after_spaces_or_tabs() {
-        let marked = |text, dest, slot| Some(Candidate { text, dest, slot: Some(slot) });
+        let marked = |text, dest, slot| {
+            Some(Candidate {
+                text,
+                dest,
+                slot: Some(slot),
+            })
+        };
         assert_eq!(
             recognise_paragraph("[Latest posts](->> :post (take 4)) {#latest}"),
             marked("Latest posts", "->> :post (take 4)", "latest")
@@ -918,16 +1035,22 @@ mod tests {
         assert_eq!(diagnose_paragraph("[x](->> :post) {#news}"), None);
         assert_eq!(
             diagnose_paragraph("[x](->> :post) {#a b}"),
-            Some(LinkExpressionDiagnostic::InvalidSlotMarker("a b".to_string()))
+            Some(LinkExpressionDiagnostic::InvalidSlotMarker(
+                "a b".to_string()
+            ))
         );
         assert_eq!(
             diagnose_paragraph("[x](->> :post (map :t)) {#news}"),
-            Some(LinkExpressionDiagnostic::Malformed(E::UnknownOp("map".to_string())))
+            Some(LinkExpressionDiagnostic::Malformed(E::UnknownOp(
+                "map".to_string()
+            )))
         );
         let own_line = diagnose_paragraph("[x](->> :post)\n{#news}");
         assert_eq!(
             own_line,
-            Some(LinkExpressionDiagnostic::MarkerOnOwnLine("news".to_string()))
+            Some(LinkExpressionDiagnostic::MarkerOnOwnLine(
+                "news".to_string()
+            ))
         );
         assert!(
             own_line
@@ -939,7 +1062,9 @@ mod tests {
         // (ADR-060 P1): the marker is not on a link expression.
         assert_eq!(
             diagnose_paragraph("\\[x](->> :post) {#news}"),
-            Some(LinkExpressionDiagnostic::MarkerNotOnLinkExpression("news".to_string()))
+            Some(LinkExpressionDiagnostic::MarkerNotOnLinkExpression(
+                "news".to_string()
+            ))
         );
         let all = [
             LinkExpressionDiagnostic::InvalidSlotMarker("a b".to_string()),

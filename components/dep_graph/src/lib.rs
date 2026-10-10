@@ -11,14 +11,19 @@ pub struct DependencyGraph {
 }
 
 impl DependencyGraph {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Record that `output` was built from `sources`.
     /// Replaces any previous registration for `output`.
     pub fn register(&mut self, output: PathBuf, sources: HashSet<PathBuf>) {
         self.remove_output(&output);
         for source in &sources {
-            self.reverse.entry(source.clone()).or_default().insert(output.clone());
+            self.reverse
+                .entry(source.clone())
+                .or_default()
+                .insert(output.clone());
         }
         self.forward.insert(output, sources);
     }

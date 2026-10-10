@@ -16,10 +16,19 @@ fn article_for(name: &str) -> &'static str {
     let starts = |prefix: &str| lower.starts_with(prefix);
     let vowel = lower.starts_with(['a', 'e', 'i', 'o', 'u']);
     // Vowel letters read as a consonant: "you", "won".
-    let consonant_sound = starts("uni") || starts("use") || starts("usa") || starts("ur") || starts("one") || starts("eu");
+    let consonant_sound = starts("uni")
+        || starts("use")
+        || starts("usa")
+        || starts("ur")
+        || starts("one")
+        || starts("eu");
     // Consonant letters read as a vowel: letter-by-letter "aitch", silent `h`.
     let vowel_sound = starts("html") || starts("hour") || starts("honest");
-    if (vowel && !consonant_sound) || vowel_sound { "an" } else { "a" }
+    if (vowel && !consonant_sound) || vowel_sound {
+        "an"
+    } else {
+        "a"
+    }
 }
 
 #[cfg(test)]

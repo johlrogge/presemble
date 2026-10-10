@@ -126,24 +126,30 @@ impl SiteGraph {
 
     /// All page nodes.
     pub fn iter_pages(&self) -> impl Iterator<Item = &SiteNode> + '_ {
-        self.entries.values().filter(|n| matches!(n.role, NodeRole::Page(_)))
+        self.entries
+            .values()
+            .filter(|n| matches!(n.role, NodeRole::Page(_)))
     }
 
     /// All page nodes with a given page kind.
     pub fn iter_pages_by_kind(&self, kind: PageKind) -> impl Iterator<Item = &SiteNode> + '_ {
-        self.entries.values().filter(move |n| {
-            matches!(&n.role, NodeRole::Page(pd) if pd.page_kind == kind)
-        })
+        self.entries
+            .values()
+            .filter(move |n| matches!(&n.role, NodeRole::Page(pd) if pd.page_kind == kind))
     }
 
     /// All stylesheet nodes.
     pub fn iter_stylesheets(&self) -> impl Iterator<Item = &SiteNode> + '_ {
-        self.entries.values().filter(|n| matches!(n.role, NodeRole::Stylesheet(_)))
+        self.entries
+            .values()
+            .filter(|n| matches!(n.role, NodeRole::Stylesheet(_)))
     }
 
     /// All leaf asset nodes.
     pub fn iter_leaf_assets(&self) -> impl Iterator<Item = &SiteNode> + '_ {
-        self.entries.values().filter(|n| matches!(n.role, NodeRole::LeafAsset))
+        self.entries
+            .values()
+            .filter(|n| matches!(n.role, NodeRole::LeafAsset))
     }
 
     /// All item nodes for a given schema stem.
@@ -217,7 +223,11 @@ mod tests {
         assert_eq!(items.len(), 2, "should return 2 items");
 
         let collections: Vec<_> = graph.iter_pages_by_kind(PageKind::Collection).collect();
-        assert_eq!(collections.len(), 2, "should return 2 collections (post + root)");
+        assert_eq!(
+            collections.len(),
+            2,
+            "should return 2 collections (post + root)"
+        );
     }
 
     #[test]
@@ -230,13 +240,19 @@ mod tests {
 
         let post_stem = SchemaStem::new("post");
         let items = graph.items_for_stem(&post_stem);
-        assert_eq!(items.len(), 2, "should return 2 post items (not the collection)");
+        assert_eq!(
+            items.len(),
+            2,
+            "should return 2 post items (not the collection)"
+        );
         assert!(items.iter().all(|n| {
             matches!(&n.role, NodeRole::Page(pd) if pd.schema_stem.as_str() == "post")
         }));
-        assert!(items.iter().all(|n| {
-            matches!(&n.role, NodeRole::Page(pd) if pd.page_kind == PageKind::Item)
-        }));
+        assert!(
+            items.iter().all(|n| {
+                matches!(&n.role, NodeRole::Page(pd) if pd.page_kind == PageKind::Item)
+            })
+        );
     }
 
     #[test]
@@ -280,7 +296,9 @@ mod tests {
     #[test]
     fn page_data_accessor_works() {
         let node = make_page_node(PageKind::Item, "post", "/post/a");
-        let pd = node.page_data().expect("page_data should be Some for Page node");
+        let pd = node
+            .page_data()
+            .expect("page_data should be Some for Page node");
         assert_eq!(pd.schema_stem.as_str(), "post");
         assert_eq!(pd.page_kind, PageKind::Item);
     }

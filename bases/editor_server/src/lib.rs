@@ -1,6 +1,13 @@
 use conductor::{
-    socket_url, Command, CommandResult, Conductor, ConductorEvent, Plan, ProgramError,
-    ProgramOutcome, Response, // Response kept for parse-error path
+    Command,
+    CommandResult,
+    Conductor,
+    ConductorEvent,
+    Plan,
+    ProgramError,
+    ProgramOutcome,
+    Response, // Response kept for parse-error path
+    socket_url,
 };
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -28,8 +35,14 @@ fn prim_reg(
 
 fn edge_to_value(edge: &site_index::Edge) -> template::Value {
     let mut record = template::DataGraph::new();
-    record.insert("source", template::Value::Text(edge.source.as_str().to_string()));
-    record.insert("target", template::Value::Text(edge.target.as_str().to_string()));
+    record.insert(
+        "source",
+        template::Value::Text(edge.source.as_str().to_string()),
+    );
+    record.insert(
+        "target",
+        template::Value::Text(edge.target.as_str().to_string()),
+    );
     template::Value::Record(record)
 }
 
@@ -43,117 +56,164 @@ fn edge_to_value(edge: &site_index::Edge) -> template::Value {
 ///
 /// Moved from `evaluator` to break the evaluator ↔ conductor circular dep.
 pub fn register_conductor_builtins(root: &evaluator::RootEnv, conductor: &Arc<Conductor>) {
-
     {
         let cond = Arc::clone(conductor);
-        prim_reg(root, "query", "(query :stem)", "Query all content items for the given schema stem.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("query requires 1 argument: a keyword or string".into());
-            }
-            let stem = match &args[0] {
-                template::Value::Keyword { name, .. } => name.clone(),
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("query expects a keyword or string".into()),
-            };
-            let items = cond.query_items_for_stem(&stem);
-            let values: Vec<template::Value> = items
-                .into_iter()
-                .map(|(url, mut graph)| {
-                    graph.insert("url", template::Value::Text(url));
-                    template::Value::Record(graph)
-                })
-                .collect();
-            Ok(template::Value::List(values))
-        });
+        prim_reg(
+            root,
+            "query",
+            "(query :stem)",
+            "Query all content items for the given schema stem.",
+            move |args: Vec<template::Value>| {
+                if args.is_empty() {
+                    return Err("query requires 1 argument: a keyword or string".into());
+                }
+                let stem = match &args[0] {
+                    template::Value::Keyword { name, .. } => name.clone(),
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("query expects a keyword or string".into()),
+                };
+                let items = cond.query_items_for_stem(&stem);
+                let values: Vec<template::Value> = items
+                    .into_iter()
+                    .map(|(url, mut graph)| {
+                        graph.insert("url", template::Value::Text(url));
+                        template::Value::Record(graph)
+                    })
+                    .collect();
+                Ok(template::Value::List(values))
+            },
+        );
     }
 
     {
         let cond = Arc::clone(conductor);
-        prim_reg(root, "get-content", "(get-content path)", "Get the raw text of a content file by path.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("get-content requires 1 argument".into());
-            }
-            let path_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("get-content path must be a string".into()),
-            };
-            let content_path = editorial_types::ContentPath::parse(&path_str)
-                .map_err(|e| format!("get-content: {path_str}: {e}"))?;
-            match cond.document_text(content_path.as_site_path()) {
-                Some(text) => Ok(template::Value::Text(text)),
-                None => Err(format!("file not found: {path_str}")),
-            }
-        });
+        prim_reg(
+            root,
+            "get-content",
+            "(get-content path)",
+            "Get the raw text of a content file by path.",
+            move |args: Vec<template::Value>| {
+                if args.is_empty() {
+                    return Err("get-content requires 1 argument".into());
+                }
+                let path_str = match &args[0] {
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("get-content path must be a string".into()),
+                };
+                let content_path = editorial_types::ContentPath::parse(&path_str)
+                    .map_err(|e| format!("get-content: {path_str}: {e}"))?;
+                match cond.document_text(content_path.as_site_path()) {
+                    Some(text) => Ok(template::Value::Text(text)),
+                    None => Err(format!("file not found: {path_str}")),
+                }
+            },
+        );
     }
 
     {
         let cond = Arc::clone(conductor);
-        prim_reg(root, "get-schema", "(get-schema :stem)", "Get the raw schema source for a stem.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("get-schema requires 1 argument".into());
-            }
-            let stem = match &args[0] {
-                template::Value::Keyword { name, .. } => name.clone(),
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("get-schema argument must be a keyword".into()),
-            };
-            match cond.schema_source(&stem) {
-                Some(src) => Ok(template::Value::Text(src)),
-                None => Err(format!("no schema for: {stem}")),
-            }
-        });
+        prim_reg(
+            root,
+            "get-schema",
+            "(get-schema :stem)",
+            "Get the raw schema source for a stem.",
+            move |args: Vec<template::Value>| {
+                if args.is_empty() {
+                    return Err("get-schema requires 1 argument".into());
+                }
+                let stem = match &args[0] {
+                    template::Value::Keyword { name, .. } => name.clone(),
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("get-schema argument must be a keyword".into()),
+                };
+                match cond.schema_source(&stem) {
+                    Some(src) => Ok(template::Value::Text(src)),
+                    None => Err(format!("no schema for: {stem}")),
+                }
+            },
+        );
     }
 
     {
         let cond = Arc::clone(conductor);
-        prim_reg(root, "list-content", "(list-content)", "List all content item URL paths.", move |_args| {
-            let urls: Vec<template::Value> = cond.list_content_urls()
-                .into_iter()
-                .map(template::Value::Text)
-                .collect();
-            Ok(template::Value::List(urls))
-        });
+        prim_reg(
+            root,
+            "list-content",
+            "(list-content)",
+            "List all content item URL paths.",
+            move |_args| {
+                let urls: Vec<template::Value> = cond
+                    .list_content_urls()
+                    .into_iter()
+                    .map(template::Value::Text)
+                    .collect();
+                Ok(template::Value::List(urls))
+            },
+        );
     }
 
     {
         let cond = Arc::clone(conductor);
-        prim_reg(root, "list-schemas", "(list-schemas)", "List all unique schema stems in the site.", move |_args| {
-            let mut stems: Vec<String> = cond.list_schemas();
-            stems.sort();
-            Ok(template::Value::List(stems.into_iter().map(template::Value::Text).collect()))
-        });
+        prim_reg(
+            root,
+            "list-schemas",
+            "(list-schemas)",
+            "List all unique schema stems in the site.",
+            move |_args| {
+                let mut stems: Vec<String> = cond.list_schemas();
+                stems.sort();
+                Ok(template::Value::List(
+                    stems.into_iter().map(template::Value::Text).collect(),
+                ))
+            },
+        );
     }
 
     {
         let cond = Arc::clone(conductor);
-        prim_reg(root, "refs-to", "(refs-to url)", "Returns all edges pointing TO the given URL.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("refs-to requires 1 argument: a URL path string".into());
-            }
-            let url_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("refs-to: argument must be a string URL path".into()),
-            };
-            let edges = cond.query_edges_to(&url_str);
-            Ok(template::Value::List(edges.iter().map(edge_to_value).collect()))
-        });
+        prim_reg(
+            root,
+            "refs-to",
+            "(refs-to url)",
+            "Returns all edges pointing TO the given URL.",
+            move |args: Vec<template::Value>| {
+                if args.is_empty() {
+                    return Err("refs-to requires 1 argument: a URL path string".into());
+                }
+                let url_str = match &args[0] {
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("refs-to: argument must be a string URL path".into()),
+                };
+                let edges = cond.query_edges_to(&url_str);
+                Ok(template::Value::List(
+                    edges.iter().map(edge_to_value).collect(),
+                ))
+            },
+        );
     }
 
     {
         let cond = Arc::clone(conductor);
-        prim_reg(root, "refs-from", "(refs-from url)", "Returns all edges originating FROM the given URL.", move |args: Vec<template::Value>| {
-            if args.is_empty() {
-                return Err("refs-from requires 1 argument: a URL path string".into());
-            }
-            let url_str = match &args[0] {
-                template::Value::Text(s) => s.clone(),
-                _ => return Err("refs-from: argument must be a string URL path".into()),
-            };
-            let edges = cond.query_edges_from(&url_str);
-            Ok(template::Value::List(edges.iter().map(edge_to_value).collect()))
-        });
+        prim_reg(
+            root,
+            "refs-from",
+            "(refs-from url)",
+            "Returns all edges originating FROM the given URL.",
+            move |args: Vec<template::Value>| {
+                if args.is_empty() {
+                    return Err("refs-from requires 1 argument: a URL path string".into());
+                }
+                let url_str = match &args[0] {
+                    template::Value::Text(s) => s.clone(),
+                    _ => return Err("refs-from: argument must be a string URL path".into()),
+                };
+                let edges = cond.query_edges_from(&url_str);
+                Ok(template::Value::List(
+                    edges.iter().map(edge_to_value).collect(),
+                ))
+            },
+        );
     }
-
 }
 
 /// What an eval changed, for the nREPL's `out`: `None` when it changed and
@@ -209,23 +269,24 @@ fn writer_loop(
                 let CommandResult { response, events } = conductor.handle_command(cmd);
                 // The requester gets its answer before the subscribers get the
                 // events, as before.
-                let _ = reply.send(CommandResult { response, events: vec![] });
+                let _ = reply.send(CommandResult {
+                    response,
+                    events: vec![],
+                });
                 events.iter().for_each(&mut *publish);
                 if is_shutdown {
                     break;
                 }
             }
-            Job::Plan(plan, reply) => {
-                match conductor.execute_plan(plan) {
-                    Ok((outcome, events)) => {
-                        let _ = reply.send(Ok(outcome));
-                        events.iter().for_each(&mut *publish);
-                    }
-                    Err(refused) => {
-                        let _ = reply.send(Err(refused));
-                    }
+            Job::Plan(plan, reply) => match conductor.execute_plan(plan) {
+                Ok((outcome, events)) => {
+                    let _ = reply.send(Ok(outcome));
+                    events.iter().for_each(&mut *publish);
                 }
-            }
+                Err(refused) => {
+                    let _ = reply.send(Err(refused));
+                }
+            },
         }
     }
 }
@@ -287,7 +348,10 @@ impl nrepl::NreplHandler for PresembleNreplHandler {
                 out: Some(text),
             });
         }
-        Ok(nrepl::EvalResult { value: edn_str, out: applied })
+        Ok(nrepl::EvalResult {
+            value: edn_str,
+            out: applied,
+        })
     }
 
     fn completions(&self, _session: &str, prefix: &str) -> Vec<nrepl::CompletionEntry> {
@@ -459,8 +523,7 @@ mod tests {
 
     const SCHEMA: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
-    const TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
+    const TEMPLATE: &str = r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const FILE: &str = "content/post/first.md";
 
     fn site() -> tempfile::TempDir {
@@ -499,7 +562,13 @@ mod tests {
                     })
                 })
             };
-            Harness { conductor, jobs, published, writer: Some(writer), _site: site }
+            Harness {
+                conductor,
+                jobs,
+                published,
+                writer: Some(writer),
+                _site: site,
+            }
         }
 
         fn handler(&self) -> PresembleNreplHandler {
@@ -539,7 +608,11 @@ mod tests {
             path: editorial_types::SitePath::parse(FILE).expect("valid"),
             consent: Default::default(),
         });
-        assert!(matches!(saved.response, Response::Ok), "{:?}", saved.response);
+        assert!(
+            matches!(saved.response, Response::Ok),
+            "{:?}",
+            saved.response
+        );
         std::fs::read_to_string(harness._site.path().join(FILE)).unwrap()
     }
 
@@ -547,9 +620,15 @@ mod tests {
     fn nrepl_plan_runs_on_the_writer_and_publishes_its_events() {
         let harness = Harness::start();
 
-        let result = harness.handler().eval("s", &set_title("Via nREPL")).expect("evals");
+        let result = harness
+            .handler()
+            .eval("s", &set_title("Via nREPL"))
+            .expect("evals");
         assert!(
-            result.out.as_deref().is_some_and(|m| m.contains("1 edit(s) applied")),
+            result
+                .out
+                .as_deref()
+                .is_some_and(|m| m.contains("1 edit(s) applied")),
             "{:?}",
             result.out
         );
@@ -572,9 +651,17 @@ mod tests {
         let site = harness._site.path().display().to_string();
 
         // The plain path reads (so the refusals below are about the path).
-        let read = handler.eval("s", &format!(r#"(get-content "{FILE}")"#)).expect("reads");
+        let read = handler
+            .eval("s", &format!(r#"(get-content "{FILE}")"#))
+            .expect("reads");
         // Multi-line text comes back as the nREPL "out".
-        assert!(read.out.as_deref().is_some_and(|o| o.contains("First Post")), "{:?}", read.out);
+        assert!(
+            read.out
+                .as_deref()
+                .is_some_and(|o| o.contains("First Post")),
+            "{:?}",
+            read.out
+        );
 
         for bad in [
             // Stays inside the site, but is not a plain site path.
@@ -586,7 +673,11 @@ mod tests {
             "../outside.md".to_string(),
         ] {
             let result = handler.eval("s", &format!(r#"(get-content "{bad}")"#));
-            assert!(result.is_err(), "{bad} must be refused, got {:?}", result.ok().map(|r| r.out));
+            assert!(
+                result.is_err(),
+                "{bad} must be refused, got {:?}",
+                result.ok().map(|r| r.out)
+            );
         }
         harness.finish();
     }
@@ -599,11 +690,17 @@ mod tests {
         // An nREPL edit, then an IPC save that must see it, then another edit.
         handler.eval("s", &set_title("One")).expect("evals");
         let on_disk = saved_text(&harness);
-        assert!(on_disk.starts_with("# One"), "the save saw the earlier edit: {on_disk}");
+        assert!(
+            on_disk.starts_with("# One"),
+            "the save saw the earlier edit: {on_disk}"
+        );
 
         handler.eval("s", &set_title("Two")).expect("evals");
         let on_disk = saved_text(&harness);
-        assert!(on_disk.starts_with("# Two"), "the later edit came after: {on_disk}");
+        assert!(
+            on_disk.starts_with("# Two"),
+            "the later edit came after: {on_disk}"
+        );
         harness.finish();
     }
 
@@ -612,7 +709,11 @@ mod tests {
         let harness = Harness::start();
         // Two steps that change what the same node holds: refused as a whole.
         let program = format!("(do {} {})", set_title("A"), set_title("B"));
-        let error = harness.handler().eval("s", &program).err().expect("refused");
+        let error = harness
+            .handler()
+            .eval("s", &program)
+            .err()
+            .expect("refused");
         assert!(error.contains("step 2"), "{error}");
         assert!(harness.finish().is_empty());
     }
@@ -620,9 +721,18 @@ mod tests {
     #[test]
     fn the_writer_ends_when_every_sender_is_gone() {
         let harness = Harness::start();
-        let Harness { conductor: _c, jobs, published: _p, writer, _site } = harness;
+        let Harness {
+            conductor: _c,
+            jobs,
+            published: _p,
+            writer,
+            _site,
+        } = harness;
         drop(jobs);
-        writer.unwrap().join().expect("the writer ends on a closed queue");
+        writer
+            .unwrap()
+            .join()
+            .expect("the writer ends on a closed queue");
         drop(_site);
     }
 }

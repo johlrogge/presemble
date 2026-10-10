@@ -8,8 +8,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Form,
-    Router,
+    Form, Router,
     extract::{FromRef, Path, Query, State},
     http::{HeaderValue, StatusCode},
     response::{Html, IntoResponse, Response},
@@ -379,7 +378,10 @@ async fn get_dashboard(
     let account_id = match session.principal() {
         Principal::Account { account } => account.clone(),
         Principal::Dev { .. } => {
-            return (StatusCode::FORBIDDEN, "Dev principals cannot use the dashboard")
+            return (
+                StatusCode::FORBIDDEN,
+                "Dev principals cannot use the dashboard",
+            )
                 .into_response();
         }
     };
@@ -483,7 +485,10 @@ async fn open_editor(
     let account_id = match session.principal() {
         Principal::Account { account } => account.clone(),
         Principal::Dev { .. } => {
-            return (StatusCode::FORBIDDEN, "Dev principals cannot open hosted sites")
+            return (
+                StatusCode::FORBIDDEN,
+                "Dev principals cannot open hosted sites",
+            )
                 .into_response();
         }
     };
@@ -604,8 +609,7 @@ mod tests {
         let login_tokens = LoginTokenStore::with_key(
             SessionKey::try_from("test-login-key-32-bytes-padded!!").unwrap(),
         );
-        let account_store: Arc<dyn accounts::AccountStore> =
-            Arc::new(InMemoryAccountStore::new());
+        let account_store: Arc<dyn accounts::AccountStore> = Arc::new(InMemoryAccountStore::new());
         let mail: Arc<dyn accounts::MailSender> =
             Arc::new(accounts::ConsoleMailSender::with_sink(move |msg| {
                 captured_clone.lock().unwrap().push(msg);
@@ -613,10 +617,9 @@ mod tests {
 
         // A temporary file-backed registry — shared between provisioner and AppState.
         let dir = TempDir::new().expect("tempdir for test registry");
-        let registry = site_registry::SiteRegistry::new(
-            FileSiteStore::new(dir.path().join("registry.json")),
-        )
-        .expect("test registry");
+        let registry =
+            site_registry::SiteRegistry::new(FileSiteStore::new(dir.path().join("registry.json")))
+                .expect("test registry");
 
         // FakeProvisioner holds a clone of the shared registry Arc.
         let fake_provisioner = FakeProvisioner::new(Arc::clone(&registry));
@@ -713,10 +716,7 @@ mod tests {
 
     // ── Helper: do a POST /login and extract the token from the captured mail ──
 
-    async fn issue_token(
-        state: &ControlPlaneState,
-        captured: &Arc<Mutex<Vec<String>>>,
-    ) -> String {
+    async fn issue_token(state: &ControlPlaneState, captured: &Arc<Mutex<Vec<String>>>) -> String {
         let app = router(state.clone());
         let req = axum::http::Request::builder()
             .method("POST")
@@ -755,7 +755,11 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
 
-        assert_eq!(resp.status(), StatusCode::FOUND, "verify must redirect (302)");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FOUND,
+            "verify must redirect (302)"
+        );
         assert_eq!(
             resp.headers().get("location").map(|v| v.as_bytes()),
             Some(b"/".as_ref()),
@@ -859,8 +863,7 @@ mod tests {
         let cookie = session_cookie_for(&account_id);
 
         let app = router(state);
-        let resp =
-            post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
+        let resp = post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
 
         assert_eq!(
             resp.status(),
@@ -890,10 +893,13 @@ mod tests {
 
         // FakeProvisioner must have recorded one provision call with correct template.
         let provisions = fake_provisioner.provisions().await;
-        assert_eq!(provisions.len(), 1, "exactly one provision call must be recorded");
         assert_eq!(
-            provisions[0].starter.template_name,
-            "personal",
+            provisions.len(),
+            1,
+            "exactly one provision call must be recorded"
+        );
+        assert_eq!(
+            provisions[0].starter.template_name, "personal",
             "starter.template_name must match form input"
         );
     }
@@ -909,8 +915,7 @@ mod tests {
         // First creation — must succeed.
         {
             let app = router(state.clone());
-            let resp =
-                post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
+            let resp = post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
             assert_eq!(
                 resp.status(),
                 StatusCode::SEE_OTHER,
@@ -921,8 +926,7 @@ mod tests {
         // Second creation with same subdomain — must be 409.
         {
             let app = router(state.clone());
-            let resp =
-                post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
+            let resp = post_create_site(app, &cookie, "subdomain=demo&template=personal").await;
             assert_eq!(
                 resp.status(),
                 StatusCode::CONFLICT,
@@ -941,8 +945,7 @@ mod tests {
 
         let app = router(state);
         // Uppercase is invalid per Subdomain rules.
-        let resp =
-            post_create_site(app, &cookie, "subdomain=UPPER_CASE&template=personal").await;
+        let resp = post_create_site(app, &cookie, "subdomain=UPPER_CASE&template=personal").await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -959,8 +962,7 @@ mod tests {
         let cookie = session_cookie_for(&account_id);
 
         let app = router(state);
-        let resp =
-            post_create_site(app, &cookie, "subdomain=mysite&template=nope").await;
+        let resp = post_create_site(app, &cookie, "subdomain=mysite&template=nope").await;
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
@@ -1043,14 +1045,24 @@ mod tests {
 
         let app = router(state);
         let resp = get_with_cookie(app, "/", Some(&cookie)).await;
-        assert_eq!(resp.status(), StatusCode::OK, "authenticated GET / must return 200");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "authenticated GET / must return 200"
+        );
 
         let body = to_bytes(resp.into_body(), 32_768).await.unwrap();
         let html = std::str::from_utf8(&body).unwrap();
 
         // Both subdomains appear in the page.
-        assert!(html.contains("mysite"), "Ready site subdomain must appear in dashboard");
-        assert!(html.contains("pending"), "Provisioning site subdomain must appear in dashboard");
+        assert!(
+            html.contains("mysite"),
+            "Ready site subdomain must appear in dashboard"
+        );
+        assert!(
+            html.contains("pending"),
+            "Provisioning site subdomain must appear in dashboard"
+        );
 
         // Ready site shows "Open editor" link; Provisioning site must NOT.
         assert!(

@@ -16,7 +16,9 @@ pub enum PathError {
     Empty,
     Absolute,
     /// A component that is not a plain name (`..`, `.`).
-    NotNormal { component: String },
+    NotNormal {
+        component: String,
+    },
     Nul,
     /// A content path must be under `content/`.
     NotContent,
@@ -52,7 +54,9 @@ pub fn canonical_deepest(path: &Path) -> Result<PathBuf, PathError> {
     let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
     loop {
         if existing.symlink_metadata().is_ok() {
-            let mut resolved = existing.canonicalize().map_err(|_| PathError::OutsideSite)?;
+            let mut resolved = existing
+                .canonicalize()
+                .map_err(|_| PathError::OutsideSite)?;
             for name in tail.iter().rev() {
                 resolved.push(name);
             }
@@ -78,13 +82,17 @@ pub fn plain_url_segments(url: &str) -> Result<Vec<&str>, PathError> {
     let mut names = Vec::new();
     for segment in url.split('/').filter(|s| !s.is_empty()) {
         if segment == "." || segment == ".." {
-            return Err(PathError::NotNormal { component: segment.to_string() });
+            return Err(PathError::NotNormal {
+                component: segment.to_string(),
+            });
         }
         if segment.contains('\0') {
             return Err(PathError::Nul);
         }
         if segment.contains('\\') {
-            return Err(PathError::NotNormal { component: segment.to_string() });
+            return Err(PathError::NotNormal {
+                component: segment.to_string(),
+            });
         }
         names.push(segment);
     }
@@ -95,7 +103,11 @@ pub fn plain_url_segments(url: &str) -> Result<Vec<&str>, PathError> {
 pub fn ensure_within(base: &Path, path: &Path) -> Result<(), PathError> {
     let base = canonical_deepest(base)?;
     let target = canonical_deepest(path)?;
-    if target.starts_with(&base) { Ok(()) } else { Err(PathError::OutsideSite) }
+    if target.starts_with(&base) {
+        Ok(())
+    } else {
+        Err(PathError::OutsideSite)
+    }
 }
 
 /// A path inside the site directory, written relative to it.
@@ -114,7 +126,11 @@ impl SitePath {
             return Err(PathError::Nul);
         }
         let path = Path::new(s);
-        if path.has_root() || path.components().any(|c| matches!(c, Component::Prefix(_) | Component::RootDir)) {
+        if path.has_root()
+            || path
+                .components()
+                .any(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+        {
             return Err(PathError::Absolute);
         }
         for component in path.components() {
@@ -132,7 +148,9 @@ impl SitePath {
         // spelling that differs from it.
         let normalised: PathBuf = path.components().collect();
         if normalised.to_string_lossy() != s {
-            return Err(PathError::NotNormal { component: s.to_string() });
+            return Err(PathError::NotNormal {
+                component: s.to_string(),
+            });
         }
         Ok(SitePath(s.to_string()))
     }
@@ -149,7 +167,9 @@ impl SitePath {
         }
         let site = canonical_deepest(site_dir)?;
         let target = canonical_deepest(abs)?;
-        let rel = target.strip_prefix(&site).map_err(|_| PathError::OutsideSite)?;
+        let rel = target
+            .strip_prefix(&site)
+            .map_err(|_| PathError::OutsideSite)?;
         SitePath::parse(&rel.to_string_lossy())
     }
 
@@ -244,7 +264,11 @@ mod tests {
 
     #[test]
     fn site_path_refuses_parent_segments() {
-        for bad in ["../outside.md", "content/../../x.md", "content/a/../../../x"] {
+        for bad in [
+            "../outside.md",
+            "content/../../x.md",
+            "content/a/../../../x",
+        ] {
             assert!(
                 matches!(SitePath::parse(bad), Err(PathError::NotNormal { .. })),
                 "{bad} must be refused, got {:?}",
@@ -294,7 +318,8 @@ mod tests {
     #[test]
     fn site_path_from_absolute_strips_the_site_dir_and_refuses_outsiders() {
         let site = Path::new("/srv/site");
-        let inside = SitePath::from_absolute(site, Path::new("/srv/site/content/a.md")).expect("inside");
+        let inside =
+            SitePath::from_absolute(site, Path::new("/srv/site/content/a.md")).expect("inside");
         assert_eq!(inside.as_str(), "content/a.md");
         assert_eq!(
             SitePath::from_absolute(site, Path::new("/srv/other/a.md")),
@@ -322,7 +347,9 @@ mod tests {
         let got = SitePath::from_absolute(&site, &through_link).expect("inside the site");
         assert_eq!(got.as_str(), "content/a.md");
         // A file that does not exist yet is accepted the same way.
-        assert!(SitePath::from_absolute(&site, &tmp.path().join("link/site/content/new/b.md")).is_ok());
+        assert!(
+            SitePath::from_absolute(&site, &tmp.path().join("link/site/content/new/b.md")).is_ok()
+        );
     }
 
     /// GUARD: a path that reaches outside the site through a symlink stays
@@ -375,15 +402,24 @@ mod tests {
     #[test]
     fn content_path_requires_content_dir_and_md() {
         assert!(ContentPath::parse("content/post/hello.md").is_ok());
-        assert_eq!(ContentPath::parse("schemas/bad.md"), Err(PathError::NotContent));
-        assert_eq!(ContentPath::parse("content/post/bad.txt"), Err(PathError::NotMarkdown));
+        assert_eq!(
+            ContentPath::parse("schemas/bad.md"),
+            Err(PathError::NotContent)
+        );
+        assert_eq!(
+            ContentPath::parse("content/post/bad.txt"),
+            Err(PathError::NotMarkdown)
+        );
         // Ported from content_editor::validate_content_path (`..` rule).
         assert!(matches!(
             ContentPath::parse("content/../etc/passwd.md"),
             Err(PathError::NotNormal { .. })
         ));
         assert!(ContentPath::parse("/content/post/a.md").is_err());
-        assert_eq!(ContentPath::parse("contents/a.md"), Err(PathError::NotContent));
+        assert_eq!(
+            ContentPath::parse("contents/a.md"),
+            Err(PathError::NotContent)
+        );
     }
 
     #[test]
@@ -394,6 +430,9 @@ mod tests {
         assert!(bad_site.is_err(), "an absolute path must fail to decode");
         let good: ContentPath = serde_json::from_str("\"content/a.md\"").expect("valid");
         assert_eq!(good.as_str(), "content/a.md");
-        assert_eq!(serde_json::to_string(&good).expect("serialize"), "\"content/a.md\"");
+        assert_eq!(
+            serde_json::to_string(&good).expect("serialize"),
+            "\"content/a.md\""
+        );
     }
 }

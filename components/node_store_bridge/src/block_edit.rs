@@ -136,17 +136,20 @@ fn refuse(cause: BlockEditCause, message: impl Into<String>) -> BlockEditError {
 /// as block markdown. A block inside a quote or a list item is edited under
 /// the projection of the block it is in.
 fn projection_for(store: &NodeStore, block: NodeId) -> Option<Projection> {
-    store.parents(block).into_iter().find_map(|p| match store.get(p)? {
-        Node::Element(name) => match store.resolve_name(*name) {
-            "slot" => Some(Projection::Content),
-            "body" | "unassigned" => Some(Projection::Block),
-            // The parent of a block in a quote is the quote, of a block in an
-            // item the item, whose parent is the list.
-            "blockquote" | "item" | "list" => projection_for(store, p),
+    store
+        .parents(block)
+        .into_iter()
+        .find_map(|p| match store.get(p)? {
+            Node::Element(name) => match store.resolve_name(*name) {
+                "slot" => Some(Projection::Content),
+                "body" | "unassigned" => Some(Projection::Block),
+                // The parent of a block in a quote is the quote, of a block in an
+                // item the item, whose parent is the list.
+                "blockquote" | "item" | "list" => projection_for(store, p),
+                _ => None,
+            },
             _ => None,
-        },
-        _ => None,
-    })
+        })
 }
 
 /// A block as it is edited now: its projection, its decoded element and its
@@ -168,9 +171,16 @@ impl Current {
         let el = block_from_node(store, block)
             .map_err(|e| refuse(BlockEditCause::NotEditable, e.to_string()))?;
         let text = project_markdown(&el, projection).ok_or_else(|| {
-            refuse(BlockEditCause::NotEditable, "this kind of block cannot be edited")
+            refuse(
+                BlockEditCause::NotEditable,
+                "this kind of block cannot be edited",
+            )
         })?;
-        Ok(Current { projection, el, text })
+        Ok(Current {
+            projection,
+            el,
+            text,
+        })
     }
 
     /// Whether `md` reads as this block. Node equality is the primary check;
@@ -200,7 +210,10 @@ fn payload_refusal(e: BlockDecodeError) -> BlockEditError {
     match e {
         BlockDecodeError::NotPayloadKind(name) => refuse(
             BlockEditCause::Invalid,
-            format!("{} cannot be written through a block edit", schema::with_article(&name)),
+            format!(
+                "{} cannot be written through a block edit",
+                schema::with_article(&name)
+            ),
         ),
         other => refuse(BlockEditCause::Invalid, other.to_string()),
     }
@@ -316,7 +329,10 @@ pub fn lower(
         .iter()
         .map(|el| {
             project_markdown(el, projection).ok_or_else(|| {
-                refuse(BlockEditCause::Invalid, "this kind of block has no markdown")
+                refuse(
+                    BlockEditCause::Invalid,
+                    "this kind of block has no markdown",
+                )
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -335,12 +351,25 @@ pub fn lower(
     //   set as inline trees.
     let same_container = match (elements.as_slice(), current_el) {
         (
-            [ContentElement::Heading { level, content, marker }],
-            ContentElement::Heading { level: l0, content: current, marker: m0 },
+            [
+                ContentElement::Heading {
+                    level,
+                    content,
+                    marker,
+                },
+            ],
+            ContentElement::Heading {
+                level: l0,
+                content: current,
+                marker: m0,
+            },
         ) if level == l0 && marker == m0 => Some((content, current, InlineContext::Heading)),
         (
             [ContentElement::Paragraph { content, marker }],
-            ContentElement::Paragraph { content: current, marker: m0 },
+            ContentElement::Paragraph {
+                content: current,
+                marker: m0,
+            },
         ) if marker == m0 => Some((content, current, InlineContext::Paragraph)),
         _ => None,
     };
@@ -360,12 +389,14 @@ pub fn lower(
     // Text-only change: one block that differs from the current one in its
     // text alone.
     if let [new] = elements.as_slice()
-        && !matches!(current_el, ContentElement::Heading { .. } | ContentElement::Paragraph { .. })
+        && !matches!(
+            current_el,
+            ContentElement::Heading { .. } | ContentElement::Paragraph { .. }
+        )
         && let (Some(old_text), Some(new_text)) = (current_el.text(), new.text())
         && current_el.with_text(&new_text).as_ref() == Some(new)
     {
-        check_block_round_trip(new)
-            .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?;
+        check_block_round_trip(new).map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?;
         let mutation = match minimal_unique_diff(&old_text, &new_text) {
             Some(TextDiff::SetText(text)) => NedMutation::SetText(text),
             Some(TextDiff::SearchReplace { search, replace }) => {
@@ -441,7 +472,10 @@ pub fn lower_into_empty_slot(
         .iter()
         .map(|el| {
             project_markdown(el, Projection::Content).ok_or_else(|| {
-                refuse(BlockEditCause::Invalid, "this kind of block has no markdown")
+                refuse(
+                    BlockEditCause::Invalid,
+                    "this kind of block has no markdown",
+                )
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -489,9 +523,11 @@ fn normalize_newlines(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content_bridge::{PAYLOAD_BLOCK_KINDS, block_to_store, block_to_tree, tree_to_block};
-    use schema::HeadingLevel;
+    use crate::content_bridge::{
+        PAYLOAD_BLOCK_KINDS, block_to_store, block_to_tree, tree_to_block,
+    };
     use node_store::Edge;
+    use schema::HeadingLevel;
 
     fn md(s: &str) -> BlockText {
         BlockText::Markdown(s.to_string())
@@ -597,12 +633,18 @@ mod tests {
     }
 
     /// A small vocabulary so that words repeat; includes multi-byte words.
-    const VOCAB: &[&str] = &["the", "cat", "sat", "on", "mat", "a", "blå", "bär", "日本", "ö"];
+    const VOCAB: &[&str] = &[
+        "the", "cat", "sat", "on", "mat", "a", "blå", "bär", "日本", "ö",
+    ];
 
     fn gen_pair(seed: u64) -> (String, String) {
         let mut rng = Rng::new(seed);
         let word = |rng: &mut Rng| VOCAB[rng.below(VOCAB.len())].to_string();
-        let n = if seed.is_multiple_of(25) { 0 } else { 1 + rng.below(12) };
+        let n = if seed.is_multiple_of(25) {
+            0
+        } else {
+            1 + rng.below(12)
+        };
         let mut words: Vec<String> = (0..n).map(|_| word(&mut rng)).collect();
         let sep = |rng: &mut Rng| if rng.below(8) == 0 { "\n" } else { " " };
         let join = |words: &[String], rng: &mut Rng| {
@@ -721,26 +763,48 @@ mod tests {
     /// is set as inline trees (a text search could not change formatting).
     #[test]
     fn formatting_change_in_heading_lowers_to_set_inlines() {
-        let l = expect_lowered(lowered("slot", &title("Hello *World*"), "Hello *World*", "Hello **World**"));
+        let l = expect_lowered(lowered(
+            "slot",
+            &title("Hello *World*"),
+            "Hello *World*",
+            "Hello **World**",
+        ));
         assert_eq!(l.selection, SEL);
-        let ContentElement::Heading { content, .. } = title("Hello **World**") else { unreachable!() };
-        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
+        let ContentElement::Heading { content, .. } = title("Hello **World**") else {
+            unreachable!()
+        };
+        assert_eq!(
+            l.mutation,
+            NedMutation::SetInlines(content_store::inlines_to_tree(&content))
+        );
     }
 
     /// Only text differs: a search over the heading's whole text, addressed
     /// by the block selection itself (not by `ned/text-in`).
     #[test]
     fn text_change_in_formatted_heading_lowers_to_container_search_replace() {
-        let l = expect_lowered(lowered("slot", &title("Hello *World*"), "Hello *World*", "Hello *Presemble*"));
+        let l = expect_lowered(lowered(
+            "slot",
+            &title("Hello *World*"),
+            "Hello *World*",
+            "Hello *Presemble*",
+        ));
         assert_eq!(l.selection, SEL);
         assert_eq!(
             l.mutation,
-            NedMutation::SearchReplace { search: "World".to_string(), replace: "Presemble".to_string() }
+            NedMutation::SearchReplace {
+                search: "World".to_string(),
+                replace: "Presemble".to_string()
+            }
         );
         // The same, across formatting: the text changes where it meets emphasis.
         let l = expect_lowered(lowered("slot", &title("a *bc* d"), "a *bc* d", "a *bX* d"));
         assert_eq!(l.selection, SEL);
-        assert!(matches!(l.mutation, NedMutation::SearchReplace { .. }), "{:?}", l.mutation);
+        assert!(
+            matches!(l.mutation, NedMutation::SearchReplace { .. }),
+            "{:?}",
+            l.mutation
+        );
     }
 
     /// Guard: a level change is a structural edit.
@@ -750,7 +814,10 @@ mod tests {
         let h3 = ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "Title");
         let l = expect_lowered(lowered("body", &h2, "## Title", "### Title"));
         assert_eq!(l.selection, SEL);
-        assert_eq!(l.mutation, NedMutation::Replace(vec![block_to_tree(&h3).unwrap()]));
+        assert_eq!(
+            l.mutation,
+            NedMutation::Replace(vec![block_to_tree(&h3).unwrap()])
+        );
     }
 
     /// A change that a text search cannot reproduce (two text nodes change
@@ -763,7 +830,11 @@ mod tests {
             "a ![i](p.png) b",
             "x ![i](p.png) y",
         ));
-        assert!(matches!(l.mutation, NedMutation::SetInlines(_)), "{:?}", l.mutation);
+        assert!(
+            matches!(l.mutation, NedMutation::SetInlines(_)),
+            "{:?}",
+            l.mutation
+        );
     }
 
     /// An empty base cannot be searched: the content is set as inline trees.
@@ -771,8 +842,13 @@ mod tests {
     fn lower_empty_base_paragraph_sets_inlines() {
         let l = expect_lowered(lowered("body", &paragraph(""), "", "hello"));
         assert_eq!(l.selection, SEL);
-        let ContentElement::Paragraph { content, .. } = paragraph("hello") else { unreachable!() };
-        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
+        let ContentElement::Paragraph { content, .. } = paragraph("hello") else {
+            unreachable!()
+        };
+        assert_eq!(
+            l.mutation,
+            NedMutation::SetInlines(content_store::inlines_to_tree(&content))
+        );
     }
 
     /// The proposed markdown is never written as text: typing `**fox**` makes
@@ -786,10 +862,14 @@ mod tests {
             "The quick brown **fox**.",
         ));
         assert_eq!(l.selection, SEL);
-        let ContentElement::Paragraph { content, .. } = paragraph("The quick brown **fox**.") else {
+        let ContentElement::Paragraph { content, .. } = paragraph("The quick brown **fox**.")
+        else {
             unreachable!()
         };
-        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
+        assert_eq!(
+            l.mutation,
+            NedMutation::SetInlines(content_store::inlines_to_tree(&content))
+        );
     }
 
     /// Only the text differs in a formatted paragraph: a search over its whole
@@ -808,7 +888,10 @@ mod tests {
         assert_eq!(l.selection, SEL);
         assert_eq!(
             l.mutation,
-            NedMutation::SearchReplace { search: "ot".to_string(), replace: "ever".to_string() }
+            NedMutation::SearchReplace {
+                search: "ot".to_string(),
+                replace: "ever".to_string()
+            }
         );
     }
 
@@ -827,7 +910,10 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(l.mutation, NedMutation::SetInlines(content_store::inlines_to_tree(&content)));
+        assert_eq!(
+            l.mutation,
+            NedMutation::SetInlines(content_store::inlines_to_tree(&content))
+        );
     }
 
     /// A lone link is a paragraph, so adding text after it changes the content
@@ -836,11 +922,16 @@ mod tests {
     /// file would give it.
     #[test]
     fn block_edit_adding_text_to_a_link_is_accepted() {
-        let link = content::parse_document("[a](/x)\n").unwrap().elements[0].node.clone();
+        let link = content::parse_document("[a](/x)\n").unwrap().elements[0]
+            .node
+            .clone();
         let l = expect_lowered(lowered("body", &link, "[a](/x)", "[a](/x) and more"));
         assert_eq!(l.selection, SEL);
         assert!(
-            matches!(l.mutation, NedMutation::SearchReplace { .. } | NedMutation::SetInlines(_)),
+            matches!(
+                l.mutation,
+                NedMutation::SearchReplace { .. } | NedMutation::SetInlines(_)
+            ),
             "{:?}",
             l.mutation
         );
@@ -862,14 +953,20 @@ mod tests {
         ));
         assert_eq!(l.selection, SEL);
         assert!(
-            matches!(l.mutation, NedMutation::SearchReplace { .. } | NedMutation::SetInlines(_)),
+            matches!(
+                l.mutation,
+                NedMutation::SearchReplace { .. } | NedMutation::SetInlines(_)
+            ),
             "{:?}",
             l.mutation
         );
         // The block still carries its marker.
         assert!(matches!(
             block_from_node(&store, block),
-            Ok(ContentElement::Paragraph { marker: Some(_), .. })
+            Ok(ContentElement::Paragraph {
+                marker: Some(_),
+                ..
+            })
         ));
     }
 
@@ -878,7 +975,11 @@ mod tests {
     fn lower_marker_change_on_a_paragraph_is_replace() {
         let l = expect_lowered(lowered("body", &paragraph("Text"), "Text", "Text {#intro}"));
         assert_eq!(l.selection, SEL);
-        assert!(matches!(l.mutation, NedMutation::Replace(_)), "{:?}", l.mutation);
+        assert!(
+            matches!(l.mutation, NedMutation::Replace(_)),
+            "{:?}",
+            l.mutation
+        );
     }
 
     #[test]
@@ -904,7 +1005,10 @@ mod tests {
         let h3 = ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "Title");
         let l = expect_lowered(lowered("body", &h2, "## Title", "### Title"));
         assert_eq!(l.selection, SEL);
-        assert_eq!(l.mutation, NedMutation::Replace(vec![block_to_tree(&h3).unwrap()]));
+        assert_eq!(
+            l.mutation,
+            NedMutation::Replace(vec![block_to_tree(&h3).unwrap()])
+        );
     }
 
     #[test]
@@ -953,10 +1057,16 @@ mod tests {
             &edn("[:heading {:level \"2\"} \"First Post\"]"),
         ));
         assert_eq!(l.selection, SEL);
-        let NedMutation::Replace(trees) = &l.mutation else { panic!("{:?}", l.mutation) };
+        let NedMutation::Replace(trees) = &l.mutation else {
+            panic!("{:?}", l.mutation)
+        };
         assert_eq!(trees.len(), 1);
-        let proposed = ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "First Post");
-        assert_eq!(trees[0], crate::content_bridge::block_to_tree(&proposed).unwrap());
+        let proposed =
+            ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "First Post");
+        assert_eq!(
+            trees[0],
+            crate::content_bridge::block_to_tree(&proposed).unwrap()
+        );
 
         // The same level change in markdown reads as the block itself.
         assert_eq!(
@@ -971,7 +1081,8 @@ mod tests {
     /// when the text looks like a heading marker.
     #[test]
     fn markdown_slot_heading_edit_cannot_change_level() {
-        let slot_heading = ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "First");
+        let slot_heading =
+            ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "First");
         let (store, block) = store_with("slot", &slot_heading);
         assert_eq!(
             lower(&store, block, SEL, &md("First"), &md("First")),
@@ -1029,19 +1140,37 @@ mod tests {
 
         // The unchanged block, an empty text, a non-block and a bad payload.
         assert_eq!(
-            lower(&store, block, SEL, &md("The quick brown fox."), &edn("[:paragraph \"The quick brown fox.\"]")),
+            lower(
+                &store,
+                block,
+                SEL,
+                &md("The quick brown fox."),
+                &edn("[:paragraph \"The quick brown fox.\"]")
+            ),
             Ok(Lowering::NoChange)
         );
         let invalid = |proposed: &str| {
-            lower(&store, block, SEL, &md("The quick brown fox."), &edn(proposed))
-                .unwrap_err()
+            lower(
+                &store,
+                block,
+                SEL,
+                &md("The quick brown fox."),
+                &edn(proposed),
+            )
+            .unwrap_err()
         };
         let err = invalid("");
-        assert_eq!((err.cause, err.message.as_str()), (BlockEditCause::Invalid, "use delete"));
+        assert_eq!(
+            (err.cause, err.message.as_str()),
+            (BlockEditCause::Invalid, "use delete")
+        );
         assert_eq!(invalid("[:wibble \"x\"]").cause, BlockEditCause::Invalid);
         assert_eq!(invalid("[:separator]").cause, BlockEditCause::Invalid);
         assert_eq!(invalid("[:paragraph").cause, BlockEditCause::Invalid);
-        assert_eq!(invalid("[:heading {:level 2} \"T\"]").cause, BlockEditCause::Invalid);
+        assert_eq!(
+            invalid("[:heading {:level 2} \"T\"]").cause,
+            BlockEditCause::Invalid
+        );
     }
 
     #[test]
@@ -1052,10 +1181,19 @@ mod tests {
         // proposal, in either representation.
         for (base, proposed) in [
             (md("Something else."), md("The quick brown fox.")),
-            (md("Something else."), edn("[:paragraph \"The quick brown fox.\"]")),
-            (edn("[:paragraph \"Something else.\"]"), md("The quick brown fox.")),
+            (
+                md("Something else."),
+                edn("[:paragraph \"The quick brown fox.\"]"),
+            ),
+            (
+                edn("[:paragraph \"Something else.\"]"),
+                md("The quick brown fox."),
+            ),
         ] {
-            assert_eq!(lower(&store, block, SEL, &base, &proposed), Ok(Lowering::NoChange));
+            assert_eq!(
+                lower(&store, block, SEL, &base, &proposed),
+                Ok(Lowering::NoChange)
+            );
         }
         // A proposal that is not in place still checks the base.
         assert_eq!(
@@ -1109,7 +1247,9 @@ mod tests {
         // representation.
         let drifted = edn("[:paragraph \"Something else.\"]");
         assert_eq!(
-            lower(&store, block, SEL, &drifted, &md("New.")).unwrap_err().cause,
+            lower(&store, block, SEL, &drifted, &md("New."))
+                .unwrap_err()
+                .cause,
             BlockEditCause::Drifted
         );
         assert_eq!(check_base(&store, block, &base), Ok(()));
@@ -1119,7 +1259,9 @@ mod tests {
         );
         // A base that is not a block at all cannot be read.
         assert_eq!(
-            check_base(&store, block, &edn("[:wibble]")).unwrap_err().cause,
+            check_base(&store, block, &edn("[:wibble]"))
+                .unwrap_err()
+                .cause,
             BlockEditCause::Invalid
         );
     }
@@ -1128,7 +1270,8 @@ mod tests {
     fn edn_preview_is_markdown() {
         // A slot heading is edited as content: the preview shows its content
         // projection, not EDN and not the block projection.
-        let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
+        let h =
+            ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
         let (store, block) = store_with("slot", &h);
         let l = expect_lowered(lower(
             &store,
@@ -1176,8 +1319,8 @@ mod tests {
 
     #[test]
     fn edn_fixtures_lower() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/serve/protocol");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/serve/protocol");
         let mut seen = 0;
         for entry in std::fs::read_dir(&dir).expect("fixture dir") {
             let path = entry.expect("entry").path();
@@ -1189,15 +1332,27 @@ mod tests {
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             let request: editorial_types::BlockEditRequest =
                 serde_json::from_value(raw["request"].clone()).unwrap();
-            let BlockText::Edn(base) = &request.base else { panic!("{name}: base is not EDN") };
+            let BlockText::Edn(base) = &request.base else {
+                panic!("{name}: base is not EDN")
+            };
             // The block the fixture starts from, in the parent its selection
             // addresses: a slot when the selection names a slot other than body.
-            let parent = if request.selection.contains("\"body\"") { "body" } else { "slot" };
+            let parent = if request.selection.contains("\"body\"") {
+                "body"
+            } else {
+                "slot"
+            };
             let trees = template::hiccup_to_trees(base).unwrap_or_else(|e| panic!("{name}: {e}"));
             let el = crate::content_bridge::tree_to_block(&trees[0])
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             let (store, block) = store_with(parent, &el);
-            let l = lower(&store, block, &request.selection, &request.base, &request.proposed);
+            let l = lower(
+                &store,
+                block,
+                &request.selection,
+                &request.base,
+                &request.proposed,
+            );
             assert!(matches!(l, Ok(Lowering::Lowered(_))), "{name}: {l:?}");
             seen += 1;
         }
@@ -1209,8 +1364,8 @@ mod tests {
     /// picked text and destination, and an empty slot is filled by it.
     #[test]
     fn link_picker_fixtures_read_as_lone_links_and_fill_the_slot() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/serve/protocol");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/serve/protocol");
         let mut seen = 0;
         for name in ["link-picker.json", "link-picker-empty-slot.json"] {
             let raw: serde_json::Value =
@@ -1221,16 +1376,38 @@ mod tests {
                 raw["linkPicker"]["text"].as_str().unwrap(),
                 raw["linkPicker"]["href"].as_str().unwrap(),
             );
-            let BlockText::Markdown(proposed) = &request.proposed else { panic!("{name}") };
+            let BlockText::Markdown(proposed) = &request.proposed else {
+                panic!("{name}")
+            };
             let like = paragraph("");
             let elements = parse_markdown_projection(proposed, Projection::Content, &like).unwrap();
-            let [only] = elements.as_slice() else { panic!("{name}: {elements:?}") };
-            let link = only.sole_link().unwrap_or_else(|| panic!("{name}: not a lone link"));
-            assert_eq!((link.destination.as_str(), content::AsPlainText::plain_text(&link.text).as_str()), (href, text), "{name}");
+            let [only] = elements.as_slice() else {
+                panic!("{name}: {elements:?}")
+            };
+            let link = only
+                .sole_link()
+                .unwrap_or_else(|| panic!("{name}: not a lone link"));
+            assert_eq!(
+                (
+                    link.destination.as_str(),
+                    content::AsPlainText::plain_text(&link.text).as_str()
+                ),
+                (href, text),
+                "{name}"
+            );
             if name == "link-picker-empty-slot.json" {
-                let l = lower_into_empty_slot(&request.selection, &like, &request.base, &request.proposed);
-                let Ok(Lowering::Lowered(l)) = l else { panic!("{name}: {l:?}") };
-                assert!(matches!(l.mutation, NedMutation::InsertChild(ref trees) if trees.len() == 1));
+                let l = lower_into_empty_slot(
+                    &request.selection,
+                    &like,
+                    &request.base,
+                    &request.proposed,
+                );
+                let Ok(Lowering::Lowered(l)) = l else {
+                    panic!("{name}: {l:?}")
+                };
+                assert!(
+                    matches!(l.mutation, NedMutation::InsertChild(ref trees) if trees.len() == 1)
+                );
                 assert_eq!(l.selection, request.selection);
             }
             seen += 1;
@@ -1244,21 +1421,30 @@ mod tests {
     fn lower_into_empty_slot_inserts_the_proposed_blocks() {
         let sel = r#"(ned/slot (ned/doc-by-path "content/p.md") "title")"#;
         let title_like = title("");
-        let Ok(Lowering::Lowered(l)) = lower_into_empty_slot(sel, &title_like, &md(""), &md("Hello *World*"))
+        let Ok(Lowering::Lowered(l)) =
+            lower_into_empty_slot(sel, &title_like, &md(""), &md("Hello *World*"))
         else {
             panic!("expected a lowering")
         };
         assert_eq!(l.selection, sel);
-        let NedMutation::InsertChild(trees) = &l.mutation else { panic!("{:?}", l.mutation) };
+        let NedMutation::InsertChild(trees) = &l.mutation else {
+            panic!("{:?}", l.mutation)
+        };
         assert_eq!(trees.len(), 1);
         assert_eq!(
             tree_to_block(&trees[0]),
-            Ok(ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*"))
+            Ok(ContentElement::heading_from_markdown(
+                HeadingLevel::new(1).unwrap(),
+                "Hello *World*"
+            ))
         );
         assert_eq!(l.preview.base, pv(""));
         assert_eq!(l.preview.proposed, pv("Hello *World*"));
         // Nothing proposed, nothing to do; a base that is not empty is drift.
-        assert_eq!(lower_into_empty_slot(sel, &title_like, &md(""), &md("  ")), Ok(Lowering::NoChange));
+        assert_eq!(
+            lower_into_empty_slot(sel, &title_like, &md(""), &md("  ")),
+            Ok(Lowering::NoChange)
+        );
         let drifted = lower_into_empty_slot(sel, &title_like, &md("Old"), &md("New")).unwrap_err();
         assert_eq!(drifted.cause, BlockEditCause::Drifted);
     }
@@ -1279,14 +1465,22 @@ mod tests {
         assert_eq!(l.selection, SEL);
         assert_eq!(
             l.mutation,
-            NedMutation::SearchReplace { search: "World".to_string(), replace: "Presemble".to_string() }
+            NedMutation::SearchReplace {
+                search: "World".to_string(),
+                replace: "Presemble".to_string()
+            }
         );
     }
 
     #[test]
     fn lower_drifted_base_is_refused() {
-        let err = lowered("body", &paragraph("Current text."), "Old text.", "New text.")
-            .unwrap_err();
+        let err = lowered(
+            "body",
+            &paragraph("Current text."),
+            "Old text.",
+            "New text.",
+        )
+        .unwrap_err();
         assert_eq!(err.cause, BlockEditCause::Drifted);
     }
 
@@ -1305,7 +1499,8 @@ mod tests {
 
     #[test]
     fn lower_slot_heading_uses_content_projection() {
-        let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
+        let h =
+            ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
         let l = expect_lowered(lowered("slot", &h, "Hello *World*", "Hello *Presemble*"));
         // Only the text differs: a search over the heading's text, addressed
         // by the block selection.
@@ -1326,7 +1521,8 @@ mod tests {
 
     #[test]
     fn check_base_agrees_with_lower() {
-        let h = ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
+        let h =
+            ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello *World*");
         let img = ContentElement::lone_image("", "p.jpg");
         let cases: Vec<(&str, ContentElement, &str)> = vec![
             ("body", paragraph("Alpha beta."), "Alpha beta."),
@@ -1343,13 +1539,21 @@ mod tests {
             let (store, block) = store_with(parent, &el);
             let checked = check_base(&store, block, &md(base));
             // `lower` with a proposal that differs from every base used here.
-            let lowered = lower(&store, block, SEL, &md(base), &md("Something else entirely."));
+            let lowered = lower(
+                &store,
+                block,
+                SEL,
+                &md(base),
+                &md("Something else entirely."),
+            );
             match (&checked, &lowered) {
                 (Ok(()), Ok(_)) => {}
                 (Err(a), Err(b)) if b.cause == a.cause => {}
                 // `lower` can refuse for its own reasons (the proposal) only
                 // after the base was accepted.
-                (Ok(()), Err(b)) => assert_ne!(b.cause, BlockEditCause::Drifted, "{parent} {base:?}"),
+                (Ok(()), Err(b)) => {
+                    assert_ne!(b.cause, BlockEditCause::Drifted, "{parent} {base:?}")
+                }
                 other => panic!("{parent} {base:?}: {other:?}"),
             }
         }
@@ -1357,14 +1561,18 @@ mod tests {
         let (store, block) = store_with("body", &paragraph("Alpha beta."));
         assert!(check_base(&store, block, &md("Alpha beta.")).is_ok());
         assert_eq!(
-            check_base(&store, block, &md("Alpha gamma.")).unwrap_err().cause,
+            check_base(&store, block, &md("Alpha gamma."))
+                .unwrap_err()
+                .cause,
             BlockEditCause::Drifted
         );
     }
 
     #[test]
     fn lower_not_editable_kind() {
-        let html = ContentElement::HtmlBlock { source: "<b>x</b>".to_string() };
+        let html = ContentElement::HtmlBlock {
+            source: "<b>x</b>".to_string(),
+        };
         let err = lowered("body", &html, "<b>x</b>", "<b>y</b>").unwrap_err();
         assert_eq!(err.cause, BlockEditCause::NotEditable);
     }
@@ -1373,7 +1581,9 @@ mod tests {
         let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
         let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
         md.extend(rows.iter().map(|r| line(r)));
-        content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone()
+        content::parse_document(&md.join("\n")).unwrap().elements[0]
+            .node
+            .clone()
     }
 
     #[test]
@@ -1396,16 +1606,25 @@ mod tests {
     /// the payload (the old ones are relocated by the edit).
     #[test]
     fn lower_blockquote_change_is_replace() {
-        let quote = content::parse_document("> a\n>\n> b\n").unwrap().elements[0].node.clone();
+        let quote = content::parse_document("> a\n>\n> b\n").unwrap().elements[0]
+            .node
+            .clone();
         let base = content::project_markdown(&quote, Projection::Block).unwrap();
-        for proposed in ["> a\n>\n> z", "> a\n>\n> b\n>\n> c", "> a\n>\n> <!-- n -->\n>\n> z"] {
+        for proposed in [
+            "> a\n>\n> z",
+            "> a\n>\n> b\n>\n> c",
+            "> a\n>\n> <!-- n -->\n>\n> z",
+        ] {
             let l = expect_lowered(lowered("body", &quote, &base, proposed));
             assert_eq!(l.selection, SEL, "{proposed}");
             match l.mutation {
                 NedMutation::Replace(trees) => {
                     assert_eq!(trees.len(), 1);
                     let rendered = format!("{:?}", trees[0]);
-                    assert!(!rendered.contains("trivia") && !rendered.contains("<!--"), "{rendered}");
+                    assert!(
+                        !rendered.contains("trivia") && !rendered.contains("<!--"),
+                        "{rendered}"
+                    );
                 }
                 other => panic!("a quote change replaces the block, got {other:?}"),
             }
@@ -1418,16 +1637,26 @@ mod tests {
     /// no comments in the payload (the old ones are relocated by the edit).
     #[test]
     fn lower_list_change_is_replace() {
-        let list = content::parse_document("- a\n- b\n").unwrap().elements[0].node.clone();
+        let list = content::parse_document("- a\n- b\n").unwrap().elements[0]
+            .node
+            .clone();
         let base = content::project_markdown(&list, Projection::Block).unwrap();
-        for proposed in ["- a\n- z", "- a\n- b\n- c", "- a\n  <!-- n -->\n- z", "1. a\n2. b"] {
+        for proposed in [
+            "- a\n- z",
+            "- a\n- b\n- c",
+            "- a\n  <!-- n -->\n- z",
+            "1. a\n2. b",
+        ] {
             let l = expect_lowered(lowered("body", &list, &base, proposed));
             assert_eq!(l.selection, SEL, "{proposed}");
             match l.mutation {
                 NedMutation::Replace(trees) => {
                     assert_eq!(trees.len(), 1);
                     let rendered = format!("{:?}", trees[0]);
-                    assert!(!rendered.contains("trivia") && !rendered.contains("<!--"), "{rendered}");
+                    assert!(
+                        !rendered.contains("trivia") && !rendered.contains("<!--"),
+                        "{rendered}"
+                    );
                 }
                 other => panic!("a list change replaces the block, got {other:?}"),
             }
@@ -1445,7 +1674,12 @@ mod tests {
     fn block_to_tree_refuses_non_payload_kinds() {
         use content::{LinkTarget, LinkText};
         let cases = [
-            (ContentElement::HtmlBlock { source: "<b>x</b>".to_string() }, "html-block"),
+            (
+                ContentElement::HtmlBlock {
+                    source: "<b>x</b>".to_string(),
+                },
+                "html-block",
+            ),
             (ContentElement::Separator, "separator"),
             (
                 ContentElement::LinkExpression {
@@ -1471,14 +1705,25 @@ mod tests {
             ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "A *title*"),
             paragraph("Some **text**."),
             ContentElement::lone_link("t", "/x"),
-            content::parse_document("> q\n").unwrap().elements[0].node.clone(),
-            content::parse_document("- a\n- b").unwrap().elements[0].node.clone(),
-            content::parse_document("3. a\n\n   b\n4. c\n   - d").unwrap().elements[0].node.clone(),
+            content::parse_document("> q\n").unwrap().elements[0]
+                .node
+                .clone(),
+            content::parse_document("- a\n- b").unwrap().elements[0]
+                .node
+                .clone(),
+            content::parse_document("3. a\n\n   b\n4. c\n   - d")
+                .unwrap()
+                .elements[0]
+                .node
+                .clone(),
             ContentElement::CodeBlock {
                 language: Some("rust".to_string()),
                 code: "fn main() {}".to_string(),
             },
-            ContentElement::CodeBlock { language: None, code: "x".to_string() },
+            ContentElement::CodeBlock {
+                language: None,
+                code: "x".to_string(),
+            },
             ContentElement::lone_image("a", "p.jpg"),
             ContentElement::lone_image("", "p.jpg"),
             table_of(&["h1", "h2"], &[&["a", "b"], &["c", "d"]]),

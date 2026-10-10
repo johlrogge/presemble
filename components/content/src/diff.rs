@@ -125,11 +125,13 @@ fn elements_equal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use schema::parse_schema;
-    use schema::Grammar;
     use crate::parser::parse_and_assign;
-    use crate::transform::{Capitalize, CompositeTransform, InsertSeparator, InsertSlot, Transform};
+    use crate::transform::{
+        Capitalize, CompositeTransform, InsertSeparator, InsertSlot, Transform,
+    };
+    use schema::Grammar;
+    use schema::parse_schema;
+    use std::sync::Arc;
 
     fn post_grammar() -> Grammar {
         let schema_src = r#"# Post title {#title}
@@ -162,7 +164,11 @@ headings
         let doc = parse_and_assign(src, &grammar).unwrap();
         let cloned = doc.clone();
         let result = diff(&doc, &cloned);
-        assert!(result.is_empty(), "identical documents should produce empty diff, got: {:?}", result.changes);
+        assert!(
+            result.is_empty(),
+            "identical documents should produce empty diff, got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -174,8 +180,15 @@ headings
         let after = transform.apply(before.clone()).unwrap();
         let result = diff(&before, &after);
         assert!(!result.is_empty(), "expected a change");
-        let has_slot_changed = result.changes.iter().any(|c| matches!(c, Change::SlotChanged { name, .. } if name.as_str() == "title"));
-        assert!(has_slot_changed, "expected SlotChanged for 'title', got: {:?}", result.changes);
+        let has_slot_changed = result
+            .changes
+            .iter()
+            .any(|c| matches!(c, Change::SlotChanged { name, .. } if name.as_str() == "title"));
+        assert!(
+            has_slot_changed,
+            "expected SlotChanged for 'title', got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -187,7 +200,8 @@ headings
         let src = "Summary.\n\n[Jo](/author/jo)\n\n----\n";
         let before = parse_and_assign(src, &grammar).unwrap();
         // InsertSlot into a doc that already has the slot (empty) produces SlotChanged
-        let transform = InsertSlot::new(Arc::clone(&grammar), "title", "New Title".to_string()).unwrap();
+        let transform =
+            InsertSlot::new(Arc::clone(&grammar), "title", "New Title".to_string()).unwrap();
         let after = transform.apply(before.clone()).unwrap();
         let result = diff(&before, &after);
         // title slot exists in preamble (empty before, filled after) => SlotChanged
@@ -196,14 +210,18 @@ headings
             Change::SlotAdded { name, .. } => name.as_str() == "title",
             _ => false,
         });
-        assert!(has_title_change, "expected a change for 'title', got: {:?}", result.changes);
+        assert!(
+            has_title_change,
+            "expected a change for 'title', got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
     fn slot_added_when_absent_from_before() {
         // Construct a before document with a preamble that lacks the slot entirely.
-        use schema::Span;
         use crate::document::DocumentSlot;
+        use schema::Span;
         // Build an after document that has a slot the before doesn't have
         let grammar = Arc::new(post_grammar());
         let src = "Summary.\n\n[Jo](/author/jo)\n\n----\n";
@@ -214,7 +232,13 @@ headings
         let mut after = before.clone();
         // Add a title slot to after's preamble
         let title_slot = DocumentSlot {
-            name: grammar.preamble.iter().find(|s| s.name.as_str() == "title").unwrap().name.clone(),
+            name: grammar
+                .preamble
+                .iter()
+                .find(|s| s.name.as_str() == "title")
+                .unwrap()
+                .name
+                .clone(),
             elements: im::vector![schema::Spanned {
                 node: crate::document::ContentElement::heading_from_markdown(
                     schema::HeadingLevel::new(1).unwrap(),
@@ -225,8 +249,15 @@ headings
         };
         after.preamble.push_front(title_slot);
         let result = diff(&before, &after);
-        let has_slot_added = result.changes.iter().any(|c| matches!(c, Change::SlotAdded { name, .. } if name.as_str() == "title"));
-        assert!(has_slot_added, "expected SlotAdded for 'title', got: {:?}", result.changes);
+        let has_slot_added = result
+            .changes
+            .iter()
+            .any(|c| matches!(c, Change::SlotAdded { name, .. } if name.as_str() == "title"));
+        assert!(
+            has_slot_added,
+            "expected SlotAdded for 'title', got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -238,8 +269,15 @@ headings
         let before = parse_and_assign(src_before, &grammar).unwrap();
         let after = parse_and_assign(src_after, &grammar).unwrap();
         let result = diff(&before, &after);
-        let has_slot_changed = result.changes.iter().any(|c| matches!(c, Change::SlotChanged { name, .. } if name.as_str() == "title"));
-        assert!(has_slot_changed, "expected SlotChanged for 'title', got: {:?}", result.changes);
+        let has_slot_changed = result
+            .changes
+            .iter()
+            .any(|c| matches!(c, Change::SlotChanged { name, .. } if name.as_str() == "title"));
+        assert!(
+            has_slot_changed,
+            "expected SlotChanged for 'title', got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -251,8 +289,15 @@ headings
         let transform = InsertSeparator;
         let after = transform.apply(before.clone()).unwrap();
         let result = diff(&before, &after);
-        let has_separator_added = result.changes.iter().any(|c| matches!(c, Change::SeparatorAdded));
-        assert!(has_separator_added, "expected SeparatorAdded, got: {:?}", result.changes);
+        let has_separator_added = result
+            .changes
+            .iter()
+            .any(|c| matches!(c, Change::SeparatorAdded));
+        assert!(
+            has_separator_added,
+            "expected SeparatorAdded, got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -264,8 +309,15 @@ headings
         let mut after = before.clone();
         after.has_separator = false;
         let result = diff(&before, &after);
-        let has_separator_removed = result.changes.iter().any(|c| matches!(c, Change::SeparatorRemoved));
-        assert!(has_separator_removed, "expected SeparatorRemoved, got: {:?}", result.changes);
+        let has_separator_removed = result
+            .changes
+            .iter()
+            .any(|c| matches!(c, Change::SeparatorRemoved));
+        assert!(
+            has_separator_removed,
+            "expected SeparatorRemoved, got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -276,8 +328,15 @@ headings
         let before = parse_and_assign(src_before, &grammar).unwrap();
         let after = parse_and_assign(src_after, &grammar).unwrap();
         let result = diff(&before, &after);
-        let has_body_changed = result.changes.iter().any(|c| matches!(c, Change::BodyChanged { .. }));
-        assert!(has_body_changed, "expected BodyChanged, got: {:?}", result.changes);
+        let has_body_changed = result
+            .changes
+            .iter()
+            .any(|c| matches!(c, Change::BodyChanged { .. }));
+        assert!(
+            has_body_changed,
+            "expected BodyChanged, got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -301,8 +360,16 @@ headings
             Change::SlotRemoved { name, .. } => name.as_str() == "author",
             _ => false,
         });
-        assert!(!has_summary_change, "summary should not appear in diff, got: {:?}", result.changes);
-        assert!(!has_author_change, "author should not appear in diff, got: {:?}", result.changes);
+        assert!(
+            !has_summary_change,
+            "summary should not appear in diff, got: {:?}",
+            result.changes
+        );
+        assert!(
+            !has_author_change,
+            "author should not appear in diff, got: {:?}",
+            result.changes
+        );
     }
 
     #[test]
@@ -311,7 +378,9 @@ headings
         let src = "Summary.\n\n[Jo](/author/jo)\n";
         let before = parse_and_assign(src, &grammar).unwrap();
         let composite = CompositeTransform::new(vec![
-            Box::new(InsertSlot::new(Arc::clone(&grammar), "title", "New Title".to_string()).unwrap()),
+            Box::new(
+                InsertSlot::new(Arc::clone(&grammar), "title", "New Title".to_string()).unwrap(),
+            ),
             Box::new(InsertSeparator),
         ]);
         let after = composite.apply(before.clone()).unwrap();
@@ -322,8 +391,19 @@ headings
             Change::SlotAdded { name, .. } => name.as_str() == "title",
             _ => false,
         });
-        let has_separator_added = result.changes.iter().any(|c| matches!(c, Change::SeparatorAdded));
-        assert!(has_title_change, "expected a change for 'title', got: {:?}", result.changes);
-        assert!(has_separator_added, "expected SeparatorAdded, got: {:?}", result.changes);
+        let has_separator_added = result
+            .changes
+            .iter()
+            .any(|c| matches!(c, Change::SeparatorAdded));
+        assert!(
+            has_title_change,
+            "expected a change for 'title', got: {:?}",
+            result.changes
+        );
+        assert!(
+            has_separator_added,
+            "expected SeparatorAdded, got: {:?}",
+            result.changes
+        );
     }
 }

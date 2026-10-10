@@ -1,16 +1,15 @@
 use crate::buffer::{self, Synced};
 use lsp_capabilities::{
-    build_transform, content_completions, definition_for_position, hover_for_line,
-    link_completions,
-    schema_completions, template_completions, template_definition,
-    validate_schema_with_positions, validate_template_paths, validate_with_positions,
-    Severity, SlotAction, SlotCompletion, TemplateDefinitionTarget,
+    Severity, SlotAction, SlotCompletion, TemplateDefinitionTarget, build_transform,
+    content_completions, definition_for_position, hover_for_line, link_completions,
+    schema_completions, template_completions, template_definition, validate_schema_with_positions,
+    validate_template_paths, validate_with_positions,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_lsp::lsp_types::*;
-use tower_lsp::{async_trait, Client, LanguageServer};
+use tower_lsp::{Client, LanguageServer, async_trait};
 
 /// Build link completions from pre-fetched conductor link options.
 ///
@@ -122,10 +121,24 @@ impl Publisher {
     }
 
     /// Keep what the conductor answered, and show it.
-    async fn record_reply(&self, uri: &Url, version: i32, text: String, reply: Result<conductor::Response, String>) {
+    async fn record_reply(
+        &self,
+        uri: &Url,
+        version: i32,
+        text: String,
+        reply: Result<conductor::Response, String>,
+    ) {
         match reply {
             Ok(conductor::Response::EditorSynced { drifts, held }) => {
-                self.synced.lock().await.insert(uri.to_string(), Synced { version, text, drifts, held });
+                self.synced.lock().await.insert(
+                    uri.to_string(),
+                    Synced {
+                        version,
+                        text,
+                        drifts,
+                        held,
+                    },
+                );
                 self.publish_content_diagnostics(uri.clone()).await;
             }
             Ok(conductor::Response::Error(e)) | Err(e) => {
@@ -168,7 +181,11 @@ impl buffer::Link for ConductorLink {
 }
 
 impl PresembleLsp {
-    pub fn new(client: Client, site_dir: std::path::PathBuf, conductor: conductor::ConductorClient) -> Self {
+    pub fn new(
+        client: Client,
+        site_dir: std::path::PathBuf,
+        conductor: conductor::ConductorClient,
+    ) -> Self {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let repo = site_repository::SiteRepository::new(site_dir.clone());
         let conductor = Arc::new(Mutex::new(conductor));
@@ -199,7 +216,13 @@ impl PresembleLsp {
     /// Queue the editor's text for the conductor and return at once. A newer
     /// text replaces this one while it waits; the answer is kept and shown by
     /// the sender's thread when it comes.
-    fn queue_editor_text(&self, uri: &Url, path: conductor::editorial_types::ContentPath, version: i32, text: String) {
+    fn queue_editor_text(
+        &self,
+        uri: &Url,
+        path: conductor::editorial_types::ContentPath,
+        version: i32,
+        text: String,
+    ) {
         let publisher = self.publisher.clone();
         let handle = self.handle.clone();
         let uri_for_reply = uri.clone();
@@ -209,7 +232,9 @@ impl PresembleLsp {
             conductor::Command::EditorChanged { path, text },
             Box::new(move |reply| {
                 handle.spawn(async move {
-                    publisher.record_reply(&uri_for_reply, version, sent_text, reply).await;
+                    publisher
+                        .record_reply(&uri_for_reply, version, sent_text, reply)
+                        .await;
                 });
             }),
         );
@@ -227,7 +252,9 @@ impl PresembleLsp {
     /// Queue `cmd` for the file at site-relative `rel`, and show its
     /// diagnostics again when the conductor has answered.
     fn queue_and_republish(&self, rel: &str, cmd: conductor::Command) {
-        let Ok(uri) = Url::from_file_path(self.site_dir.join(rel)) else { return };
+        let Ok(uri) = Url::from_file_path(self.site_dir.join(rel)) else {
+            return;
+        };
         let publisher = self.publisher.clone();
         let handle = self.handle.clone();
         let key = uri.to_string();
@@ -252,7 +279,7 @@ impl PresembleLsp {
         let cond = self.conductor.lock().await;
         let stem = match cond.classify(&site_path) {
             Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
-            Ok(_) => return None,  // Not a content file — expected, no need to log
+            Ok(_) => return None, // Not a content file — expected, no need to log
             Err(e) => {
                 eprintln!("presemble-lsp: classify error for {site_path}: {e}");
                 return None;
@@ -355,7 +382,10 @@ impl PresembleLsp {
     }
 
     async fn validate_and_publish(&self, uri: Url, src: String) {
-        self.doc_sources.lock().await.insert(uri.to_string(), src.clone());
+        self.doc_sources
+            .lock()
+            .await
+            .insert(uri.to_string(), src.clone());
         let Some((grammar, _)) = self.grammar_for_uri(&uri).await else {
             self.client.publish_diagnostics(uri, vec![], None).await;
             return;
@@ -370,8 +400,14 @@ impl PresembleLsp {
                 };
                 let lsp_diag = Diagnostic {
                     range: Range {
-                        start: Position { line: p.start.0, character: p.start.1 },
-                        end: Position { line: p.end.0, character: p.end.1 },
+                        start: Position {
+                            line: p.start.0,
+                            character: p.start.1,
+                        },
+                        end: Position {
+                            line: p.end.0,
+                            character: p.end.1,
+                        },
                     },
                     severity: Some(severity),
                     message: p.message.clone(),
@@ -384,12 +420,20 @@ impl PresembleLsp {
             })
             .collect();
 
-        *self.doc_diagnostics.lock().await.entry(uri.to_string()).or_default() = stored;
+        *self
+            .doc_diagnostics
+            .lock()
+            .await
+            .entry(uri.to_string())
+            .or_default() = stored;
         self.publish_content_diagnostics(uri).await;
     }
 
     async fn validate_template_and_publish(&self, uri: Url, src: String) {
-        self.doc_sources.lock().await.insert(uri.to_string(), src.clone());
+        self.doc_sources
+            .lock()
+            .await
+            .insert(uri.to_string(), src.clone());
         let Some((grammar, stem)) = self.grammar_for_template_uri(&uri).await else {
             // No matching schema — clear diagnostics
             self.client.publish_diagnostics(uri, vec![], None).await;
@@ -401,7 +445,8 @@ impl PresembleLsp {
         // site are part of the context (the existing ListSchemas answer).
         let site = {
             let cond = self.conductor.lock().await;
-            let mut site = lsp_capabilities::CheckContext::new(cond.list_template_names().unwrap_or_default());
+            let mut site =
+                lsp_capabilities::CheckContext::new(cond.list_template_names().unwrap_or_default());
             for (collection, schema_src) in cond.list_schemas().unwrap_or_default() {
                 if let Ok(item_schema) = schema::parse_schema(&schema_src) {
                     site = site.with_collection(collection, item_schema);
@@ -419,8 +464,14 @@ impl PresembleLsp {
                 };
                 Diagnostic {
                     range: Range {
-                        start: Position { line: p.start.0, character: p.start.1 },
-                        end: Position { line: p.end.0, character: p.end.1 },
+                        start: Position {
+                            line: p.start.0,
+                            character: p.start.1,
+                        },
+                        end: Position {
+                            line: p.end.0,
+                            character: p.end.1,
+                        },
                     },
                     severity: Some(severity),
                     message: p.message.clone(),
@@ -432,14 +483,23 @@ impl PresembleLsp {
     }
 
     async fn validate_schema_and_publish(&self, uri: Url, src: String) {
-        self.doc_sources.lock().await.insert(uri.to_string(), src.clone());
+        self.doc_sources
+            .lock()
+            .await
+            .insert(uri.to_string(), src.clone());
         let positioned = validate_schema_with_positions(&src);
         let diags: Vec<Diagnostic> = positioned
             .iter()
             .map(|p| Diagnostic {
                 range: Range {
-                    start: Position { line: p.start.0, character: p.start.1 },
-                    end: Position { line: p.end.0, character: p.end.1 },
+                    start: Position {
+                        line: p.start.0,
+                        character: p.start.1,
+                    },
+                    end: Position {
+                        line: p.end.0,
+                        character: p.end.1,
+                    },
                 },
                 severity: Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR),
                 message: p.message.clone(),
@@ -453,7 +513,10 @@ impl PresembleLsp {
         let dependent_files: Vec<(std::path::PathBuf, conductor::FileClassification)> = {
             let cond = self.conductor.lock().await;
             match cond.list_dependents(schema_stem) {
-                Ok(deps) => deps.into_iter().map(|d| (std::path::PathBuf::from(&d.path), d.kind)).collect(),
+                Ok(deps) => deps
+                    .into_iter()
+                    .map(|d| (std::path::PathBuf::from(&d.path), d.kind))
+                    .collect(),
                 Err(_) => Vec::new(),
             }
         };
@@ -464,7 +527,9 @@ impl PresembleLsp {
             .filter(|(_, kind)| !matches!(kind, conductor::FileClassification::Schema { .. }))
             .filter_map(|(path, kind)| {
                 let uri = Url::from_file_path(&path).ok()?;
-                let src = sources.get(&uri.to_string()).cloned()
+                let src = sources
+                    .get(&uri.to_string())
+                    .cloned()
                     .or_else(|| std::fs::read_to_string(&path).ok())?;
                 Some((uri, src, kind))
             })
@@ -485,16 +550,20 @@ impl PresembleLsp {
     }
 }
 
-
-
 /// Convert a `content::SourceEdit` to an LSP `TextEdit` using byte-to-position mapping.
 fn source_edit_to_text_edit(src: &str, edit: &content::SourceEdit) -> TextEdit {
     let (start_line, start_char) = content::byte_to_position(src, edit.span.start);
     let (end_line, end_char) = content::byte_to_position(src, edit.span.end);
     TextEdit {
         range: Range {
-            start: Position { line: start_line, character: start_char },
-            end: Position { line: end_line, character: end_char },
+            start: Position {
+                line: start_line,
+                character: start_char,
+            },
+            end: Position {
+                line: end_line,
+                character: end_char,
+            },
         },
         new_text: edit.new_text.clone(),
     }
@@ -504,7 +573,11 @@ fn source_edit_to_text_edit(src: &str, edit: &content::SourceEdit) -> TextEdit {
 ///
 /// Falls back to a full-document replacement if the diff produces complex changes
 /// (SlotAdded, SlotRemoved, SeparatorAdded, SeparatorRemoved).
-fn build_targeted_edits(src: &str, grammar: &schema::Grammar, action: &SlotAction) -> Vec<TextEdit> {
+fn build_targeted_edits(
+    src: &str,
+    grammar: &schema::Grammar,
+    action: &SlotAction,
+) -> Vec<TextEdit> {
     let transform: Box<dyn content::Transform> = match build_transform(grammar, action) {
         Ok(t) => t,
         Err(_) => return full_doc_replacement(src, grammar, action),
@@ -530,7 +603,11 @@ fn build_targeted_edits(src: &str, grammar: &schema::Grammar, action: &SlotActio
 }
 
 /// Fall back to a full-document replacement TextEdit.
-fn full_doc_replacement(src: &str, grammar: &schema::Grammar, action: &SlotAction) -> Vec<TextEdit> {
+fn full_doc_replacement(
+    src: &str,
+    grammar: &schema::Grammar,
+    action: &SlotAction,
+) -> Vec<TextEdit> {
     use lsp_capabilities::apply_action;
     let new_content = match apply_action(src, grammar, action) {
         Ok(s) => s,
@@ -538,8 +615,14 @@ fn full_doc_replacement(src: &str, grammar: &schema::Grammar, action: &SlotActio
     };
     vec![TextEdit {
         range: Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: u32::MAX, character: 0 },
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: u32::MAX,
+                character: 0,
+            },
         },
         new_text: new_content,
     }]
@@ -547,12 +630,23 @@ fn full_doc_replacement(src: &str, grammar: &schema::Grammar, action: &SlotActio
 
 #[async_trait]
 impl LanguageServer for PresembleLsp {
-    async fn initialize(&self, _: InitializeParams) -> tower_lsp::jsonrpc::Result<InitializeResult> {
+    async fn initialize(
+        &self,
+        _: InitializeParams,
+    ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                    TextDocumentSyncKind::FULL,
+                )),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec!["#".into(), "[".into(), "!".into(), ".".into(), "\"".into()]),
+                    trigger_characters: Some(vec![
+                        "#".into(),
+                        "[".into(),
+                        "!".into(),
+                        ".".into(),
+                        "\"".into(),
+                    ]),
                     ..Default::default()
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -576,17 +670,26 @@ impl LanguageServer for PresembleLsp {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client.log_message(MessageType::INFO, "Presemble LSP ready").await;
+        self.client
+            .log_message(MessageType::INFO, "Presemble LSP ready")
+            .await;
 
         // Verify conductor is reachable on startup
         {
             let cond = self.conductor.lock().await;
             match cond.ping() {
-                Ok(()) => self.client.log_message(MessageType::INFO, "conductor connection verified").await,
-                Err(e) => self.client.log_message(MessageType::ERROR, format!("conductor unreachable: {e}")).await,
+                Ok(()) => {
+                    self.client
+                        .log_message(MessageType::INFO, "conductor connection verified")
+                        .await
+                }
+                Err(e) => {
+                    self.client
+                        .log_message(MessageType::ERROR, format!("conductor unreachable: {e}"))
+                        .await
+                }
             }
         }
-
     }
 
     async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
@@ -597,18 +700,29 @@ impl LanguageServer for PresembleLsp {
         let uri = p.text_document.uri;
         let src = p.text_document.text;
         let path = uri.to_file_path().unwrap_or_default();
-        self.versions.lock().await.insert(uri.to_string(), p.text_document.version);
+        self.versions
+            .lock()
+            .await
+            .insert(uri.to_string(), p.text_document.version);
         // The conductor keeps the text of an open content file, to compare the
         // changes that follow with it. Queued behind whatever is on its way,
         // and the handler goes on. What was answered for an earlier session of
         // the file is gone.
         if let Some(content_path) = content_path_for(&self.site_dir, &path) {
             self.synced.lock().await.remove(&uri.to_string());
-            self.queue_command(&uri, conductor::Command::EditorOpened { path: content_path, text: src.clone() });
+            self.queue_command(
+                &uri,
+                conductor::Command::EditorOpened {
+                    path: content_path,
+                    text: src.clone(),
+                },
+            );
         }
         let kind = self.classify_path(&path).await;
         match kind {
-            conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri, src).await,
+            conductor::FileClassification::Template { .. } => {
+                self.validate_template_and_publish(uri, src).await
+            }
             conductor::FileClassification::Schema { .. } => {
                 self.validate_schema_and_publish(uri.clone(), src).await;
                 if let Some(stem) = self.schema_stem(&uri).await {
@@ -626,7 +740,10 @@ impl LanguageServer for PresembleLsp {
         if let Some(content_path) = content_path_for(&self.site_dir, &path) {
             self.synced.lock().await.remove(&uri.to_string());
             // Behind the text that waits: both are sent, in order.
-            self.queue_command(&uri, conductor::Command::EditorClosed { path: content_path });
+            self.queue_command(
+                &uri,
+                conductor::Command::EditorClosed { path: content_path },
+            );
         }
     }
 
@@ -640,9 +757,13 @@ impl LanguageServer for PresembleLsp {
             let text = c.text;
             // Local validation first: it does not wait for the conductor.
             match kind {
-                conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri.clone(), text.clone()).await,
+                conductor::FileClassification::Template { .. } => {
+                    self.validate_template_and_publish(uri.clone(), text.clone())
+                        .await
+                }
                 conductor::FileClassification::Schema { .. } => {
-                    self.validate_schema_and_publish(uri.clone(), text.clone()).await;
+                    self.validate_schema_and_publish(uri.clone(), text.clone())
+                        .await;
                     if let Some(stem) = self.schema_stem(&uri).await {
                         self.revalidate_dependents(&stem).await;
                     }
@@ -691,7 +812,9 @@ impl LanguageServer for PresembleLsp {
                 conductor::FileClassification::Content { .. } => {
                     self.validate_and_publish(uri, src).await;
                 }
-                conductor::FileClassification::Template { .. } => self.validate_template_and_publish(uri, src).await,
+                conductor::FileClassification::Template { .. } => {
+                    self.validate_template_and_publish(uri, src).await
+                }
                 conductor::FileClassification::Schema { .. } => {
                     self.validate_schema_and_publish(uri.clone(), src).await;
                     if let Some(stem) = self.schema_stem(&uri).await {
@@ -703,24 +826,35 @@ impl LanguageServer for PresembleLsp {
         }
     }
 
-    async fn completion(&self, p: CompletionParams) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
+    async fn completion(
+        &self,
+        p: CompletionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
         let uri = &p.text_document_position.text_document.uri;
         let path = uri.to_file_path().unwrap_or_default();
         let kind = self.classify_path(&path).await;
         match kind {
             conductor::FileClassification::Schema { .. } => {
                 let pos = p.text_document_position.position;
-                let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+                let src = self
+                    .doc_sources
+                    .lock()
+                    .await
+                    .get(&uri.to_string())
+                    .cloned()
+                    .unwrap_or_default();
                 let items: Vec<CompletionItem> = schema_completions(&src, pos.line)
                     .into_iter()
                     .map(|c| CompletionItem {
                         label: c.label,
                         kind: Some(CompletionItemKind::FIELD),
                         detail: Some(c.detail),
-                        documentation: c.documentation.map(|d| Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: d,
-                        })),
+                        documentation: c.documentation.map(|d| {
+                            Documentation::MarkupContent(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: d,
+                            })
+                        }),
                         insert_text: Some(c.insert_text),
                         insert_text_format: if c.is_snippet {
                             Some(InsertTextFormat::SNIPPET)
@@ -740,7 +874,13 @@ impl LanguageServer for PresembleLsp {
                 };
                 let pos = p.text_document_position.position;
                 let items: Vec<CompletionItem> = template_completions(
-                    &self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default(),
+                    &self
+                        .doc_sources
+                        .lock()
+                        .await
+                        .get(&uri.to_string())
+                        .cloned()
+                        .unwrap_or_default(),
                     pos.line,
                     pos.character,
                     &grammar,
@@ -751,10 +891,12 @@ impl LanguageServer for PresembleLsp {
                     label: c.label,
                     kind: Some(CompletionItemKind::FIELD),
                     detail: Some(c.detail),
-                    documentation: c.documentation.map(|d| Documentation::MarkupContent(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: d,
-                    })),
+                    documentation: c.documentation.map(|d| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: d,
+                        })
+                    }),
                     insert_text: Some(c.insert_text),
                     insert_text_format: if c.is_snippet {
                         Some(InsertTextFormat::SNIPPET)
@@ -772,7 +914,13 @@ impl LanguageServer for PresembleLsp {
                 let Some((grammar, _stem)) = self.grammar_for_uri(uri).await else {
                     return Ok(None);
                 };
-                let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+                let src = self
+                    .doc_sources
+                    .lock()
+                    .await
+                    .get(&uri.to_string())
+                    .cloned()
+                    .unwrap_or_default();
                 let pos = p.text_document_position.position;
 
                 // When triggered by `[` and cursor is in the body section, offer link completions
@@ -780,18 +928,14 @@ impl LanguageServer for PresembleLsp {
                     .context
                     .as_ref()
                     .and_then(|c| c.trigger_character.as_deref());
-                if trigger == Some("[")
-                    && separator_line(&src).is_some_and(|sl| pos.line > sl)
-                {
+                if trigger == Some("[") && separator_line(&src).is_some_and(|sl| pos.line > sl) {
                     let link_items = {
                         let cond = self.conductor.lock().await;
                         // Fetch all link options from the conductor by iterating all schemas.
                         let stems = cond.list_schemas().unwrap_or_default();
                         let all_options: Vec<conductor::LinkOption> = stems
                             .iter()
-                            .flat_map(|(stem, _)| {
-                                cond.list_link_options(stem).unwrap_or_default()
-                            })
+                            .flat_map(|(stem, _)| cond.list_link_options(stem).unwrap_or_default())
                             .collect();
                         if all_options.is_empty() {
                             link_completions(&self.repo)
@@ -838,42 +982,51 @@ impl LanguageServer for PresembleLsp {
                 let at_heading_start = current_line.trim().is_empty()
                     || current_line.trim().chars().all(|c| c == '#')
                     || current_line.trim().starts_with('#');
-                let items: Vec<CompletionItem> = content_completions(&src, &grammar, Some(&self.repo))
-                    .into_iter()
-                    .filter(|c| {
-                        // Body heading completions only on lines that look like heading starts
-                        if c.label.starts_with('H') && c.label.ends_with("heading") {
-                            at_heading_start
-                        } else {
-                            true
-                        }
-                    })
-                    .map(|c| CompletionItem {
-                        label: c.label,
-                        kind: Some(CompletionItemKind::FIELD),
-                        detail: Some(c.detail),
-                        documentation: c.documentation.map(|d| Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: d,
-                        })),
-                        text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                            range: Range {
-                                start: Position { line: pos.line, character: 0 },
-                                end: Position { line: pos.line, character: line_end_char },
+                let items: Vec<CompletionItem> =
+                    content_completions(&src, &grammar, Some(&self.repo))
+                        .into_iter()
+                        .filter(|c| {
+                            // Body heading completions only on lines that look like heading starts
+                            if c.label.starts_with('H') && c.label.ends_with("heading") {
+                                at_heading_start
+                            } else {
+                                true
+                            }
+                        })
+                        .map(|c| CompletionItem {
+                            label: c.label,
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(c.detail),
+                            documentation: c.documentation.map(|d| {
+                                Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: d,
+                                })
+                            }),
+                            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                                range: Range {
+                                    start: Position {
+                                        line: pos.line,
+                                        character: 0,
+                                    },
+                                    end: Position {
+                                        line: pos.line,
+                                        character: line_end_char,
+                                    },
+                                },
+                                new_text: c.insert_text,
+                            })),
+                            insert_text: None,
+                            insert_text_format: if c.is_snippet {
+                                Some(InsertTextFormat::SNIPPET)
+                            } else {
+                                None
                             },
-                            new_text: c.insert_text,
-                        })),
-                        insert_text: None,
-                        insert_text_format: if c.is_snippet {
-                            Some(InsertTextFormat::SNIPPET)
-                        } else {
-                            None
-                        },
-                        sort_text: c.sort_text,
-                        preselect: if c.preselect { Some(true) } else { None },
-                        ..Default::default()
-                    })
-                    .collect();
+                            sort_text: c.sort_text,
+                            preselect: if c.preselect { Some(true) } else { None },
+                            ..Default::default()
+                        })
+                        .collect();
                 Ok(Some(CompletionResponse::Array(items)))
             }
         }
@@ -891,7 +1044,10 @@ impl LanguageServer for PresembleLsp {
         {
             if let Some(site_path) = site_path_for(&self.site_dir, &path) {
                 let cond = self.conductor.lock().await;
-                let _ = cond.send(&conductor::Command::CursorMoved { path: site_path, line });
+                let _ = cond.send(&conductor::Command::CursorMoved {
+                    path: site_path,
+                    line,
+                });
             }
         }
         let kind = self.classify_path(&path).await;
@@ -923,7 +1079,8 @@ impl LanguageServer for PresembleLsp {
                     let parts: Vec<&str> = path_str.splitn(3, '.').collect();
                     if parts.len() >= 2 && parts[0] == stem {
                         let field = parts[1];
-                        if let Some(slot) = grammar.preamble.iter().find(|s| s.name.as_str() == field)
+                        if let Some(slot) =
+                            grammar.preamble.iter().find(|s| s.name.as_str() == field)
                             && let Some(hint) = &slot.hint_text
                         {
                             return Ok(Some(Hover {
@@ -943,14 +1100,20 @@ impl LanguageServer for PresembleLsp {
                     return Ok(None);
                 };
                 Ok(hover_for_line(&src, &grammar, line).map(|text| Hover {
-                    contents: HoverContents::Markup(MarkupContent { kind: MarkupKind::Markdown, value: text }),
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: text,
+                    }),
                     range: None,
                 }))
             }
         }
     }
 
-    async fn code_action(&self, p: CodeActionParams) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
+    async fn code_action(
+        &self,
+        p: CodeActionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
         let uri = &p.text_document.uri;
         let diags = self.doc_diagnostics.lock().await;
         let stored: Vec<(Diagnostic, Option<SlotAction>)> = diags
@@ -966,12 +1129,23 @@ impl LanguageServer for PresembleLsp {
         let Some((grammar, _)) = self.grammar_for_uri(uri).await else {
             return Ok(Some(Vec::new()));
         };
-        let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+        let src = self
+            .doc_sources
+            .lock()
+            .await
+            .get(&uri.to_string())
+            .cloned()
+            .unwrap_or_default();
 
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
         let request_range = p.range;
-        for (_diag, maybe_action) in stored.into_iter().filter(|(d, _)| ranges_overlap(&d.range, &request_range)) {
-            let Some(slot_action) = maybe_action else { continue };
+        for (_diag, maybe_action) in stored
+            .into_iter()
+            .filter(|(d, _)| ranges_overlap(&d.range, &request_range))
+        {
+            let Some(slot_action) = maybe_action else {
+                continue;
+            };
 
             let title = match &slot_action {
                 SlotAction::Capitalize { .. } => "Capitalize first letter".to_string(),
@@ -1008,7 +1182,10 @@ impl LanguageServer for PresembleLsp {
 
         // The rest compares the buffer with the file as it is on disk.
         let version = self.versions.lock().await.get(&uri.to_string()).copied();
-        let file = uri.to_file_path().ok().and_then(|p| std::fs::read_to_string(p).ok());
+        let file = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| std::fs::read_to_string(p).ok());
         if let (Some(version), Some(file)) = (version, file) {
             // Same content, spelled differently: the buffer can take the
             // file's spelling.
@@ -1024,7 +1201,15 @@ impl LanguageServer for PresembleLsp {
             // offered wherever the cursor is.
             if let Some(rel) = self.rel_path(uri) {
                 let conflicted = self.has_disk_conflict(uri).await;
-                actions.extend(buffer::conflict_offer(&request_range, conflicted, uri, &rel, version, &src, &file));
+                actions.extend(buffer::conflict_offer(
+                    &request_range,
+                    conflicted,
+                    uri,
+                    &rel,
+                    version,
+                    &src,
+                    &file,
+                ));
             }
         }
         Ok(Some(actions))
@@ -1038,7 +1223,13 @@ impl LanguageServer for PresembleLsp {
         let Some((grammar, _)) = self.grammar_for_uri(uri).await else {
             return Ok(None);
         };
-        let src = self.doc_sources.lock().await.get(&uri.to_string()).cloned().unwrap_or_default();
+        let src = self
+            .doc_sources
+            .lock()
+            .await
+            .get(&uri.to_string())
+            .cloned()
+            .unwrap_or_default();
         Ok(Some(buffer::formatting_edits(&src, &grammar)))
     }
 
@@ -1064,15 +1255,22 @@ impl LanguageServer for PresembleLsp {
                             range: Range::default(),
                         })))
                     }
-                    Some(TemplateDefinitionTarget::InFile { line: def_line, character }) => {
-                        Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                            uri: uri.clone(),
-                            range: Range {
-                                start: Position { line: def_line, character },
-                                end: Position { line: def_line, character },
+                    Some(TemplateDefinitionTarget::InFile {
+                        line: def_line,
+                        character,
+                    }) => Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: uri.clone(),
+                        range: Range {
+                            start: Position {
+                                line: def_line,
+                                character,
                             },
-                        })))
-                    }
+                            end: Position {
+                                line: def_line,
+                                character,
+                            },
+                        },
+                    }))),
                     None => Ok(None),
                 }
             }
@@ -1090,26 +1288,53 @@ impl LanguageServer for PresembleLsp {
         }
     }
 
-    async fn execute_command(&self, params: ExecuteCommandParams) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
-        let arg = |i: usize| params.arguments.get(i).and_then(|v| v.as_str()).map(str::to_string);
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
+        let arg = |i: usize| {
+            params
+                .arguments
+                .get(i)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
         match params.command.as_str() {
             // The conductor takes the editor's version of a drift.
             buffer::KEEP_MINE => {
-                let Some(uri) = arg(0).and_then(|u| Url::parse(&u).ok()) else { return Ok(None) };
-                let Some(drift_id) = arg(1).and_then(|s| buffer::parse_drift_id(&s)) else { return Ok(None) };
+                let Some(uri) = arg(0).and_then(|u| Url::parse(&u).ok()) else {
+                    return Ok(None);
+                };
+                let Some(drift_id) = arg(1).and_then(|s| buffer::parse_drift_id(&s)) else {
+                    return Ok(None);
+                };
                 let path = uri.to_file_path().unwrap_or_default();
-                let Some(content_path) = content_path_for(&self.site_dir, &path) else { return Ok(None) };
+                let Some(content_path) = content_path_for(&self.site_dir, &path) else {
+                    return Ok(None);
+                };
                 // The answer is about the text last sent: keep its place.
-                let known = self.synced.lock().await.get(&uri.to_string()).map(|s| (s.version, s.text.clone()));
+                let known = self
+                    .synced
+                    .lock()
+                    .await
+                    .get(&uri.to_string())
+                    .map(|s| (s.version, s.text.clone()));
                 let publisher = self.publisher.clone();
                 let handle = self.handle.clone();
                 let reply_uri = uri.clone();
                 self.sender.push(
                     uri.as_str(),
-                    conductor::Command::KeepMine { path: content_path, drift_id },
+                    conductor::Command::KeepMine {
+                        path: content_path,
+                        drift_id,
+                    },
                     Box::new(move |reply| {
                         if let Some((version, text)) = known {
-                            handle.spawn(async move { publisher.record_reply(&reply_uri, version, text, reply).await });
+                            handle.spawn(async move {
+                                publisher
+                                    .record_reply(&reply_uri, version, text, reply)
+                                    .await
+                            });
                         }
                     }),
                 );
@@ -1117,13 +1342,17 @@ impl LanguageServer for PresembleLsp {
             // The file on disk wins; the code action replaced the buffer text.
             buffer::RELOAD_DOCUMENT => {
                 let Some(rel) = arg(0) else { return Ok(None) };
-                let Ok(path) = conductor::editorial_types::ContentPath::parse(&rel) else { return Ok(None) };
+                let Ok(path) = conductor::editorial_types::ContentPath::parse(&rel) else {
+                    return Ok(None);
+                };
                 self.queue_and_republish(&rel, conductor::Command::ReloadDocument { path });
             }
             // The unsaved edits win; the user said which file to overwrite.
             buffer::OVERWRITE_FILE => {
                 let Some(rel) = arg(0) else { return Ok(None) };
-                let Ok(path) = conductor::editorial_types::SitePath::parse(&rel) else { return Ok(None) };
+                let Ok(path) = conductor::editorial_types::SitePath::parse(&rel) else {
+                    return Ok(None);
+                };
                 let consent = conductor::editorial_types::ConflictConsent::Overwrite(
                     std::collections::BTreeSet::from([rel.clone()]),
                 );
@@ -1143,10 +1372,7 @@ fn line_length(src: &str, line: u32) -> u32 {
 }
 
 fn line_text(src: &str, line: u32) -> String {
-    src.lines()
-        .nth(line as usize)
-        .unwrap_or("")
-        .to_string()
+    src.lines().nth(line as usize).unwrap_or("").to_string()
 }
 
 fn separator_line(src: &str) -> Option<u32> {
@@ -1176,4 +1402,3 @@ mod tests {
         assert_eq!(sent.as_str(), "content/post/a.md");
     }
 }
-

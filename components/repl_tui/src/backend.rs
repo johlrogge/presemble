@@ -49,8 +49,14 @@ impl DirectBackend {
             template::Value::Integer(n) => n.to_string(),
             template::Value::Bool(b) => b.to_string(),
             template::Value::Absent => "nil".to_string(),
-            template::Value::Keyword { namespace: None, name } => format!(":{name}"),
-            template::Value::Keyword { namespace: Some(ns), name } => format!(":{ns}/{name}"),
+            template::Value::Keyword {
+                namespace: None,
+                name,
+            } => format!(":{name}"),
+            template::Value::Keyword {
+                namespace: Some(ns),
+                name,
+            } => format!(":{ns}/{name}"),
             template::Value::List(items) => {
                 let inner: Vec<String> = items.iter().map(Self::format_value).collect();
                 format!("({})", inner.join(" "))
@@ -158,7 +164,7 @@ impl ReplBackend for NreplBackend {
                 return EvalResult {
                     value: "mutex poisoned".to_string(),
                     is_error: true,
-                }
+                };
             }
         };
         match guard.eval(code) {
@@ -174,10 +180,16 @@ impl ReplBackend for NreplBackend {
                         Some(out) => format!("{out}{base}"),
                         None => base,
                     };
-                    EvalResult { value, is_error: false }
+                    EvalResult {
+                        value,
+                        is_error: false,
+                    }
                 }
             }
-            Err(e) => EvalResult { value: e, is_error: true },
+            Err(e) => EvalResult {
+                value: e,
+                is_error: true,
+            },
         }
     }
 

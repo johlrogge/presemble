@@ -65,7 +65,10 @@ pub struct BuildOutcome {
 /// Warnings are printed but do not fail the build.
 ///
 /// `_url_config` is not applied yet.
-pub fn build_for_publish(site_dir: &Path, url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+pub fn build_for_publish(
+    site_dir: &Path,
+    url_config: &UrlConfig,
+) -> Result<BuildOutcome, CliError> {
     let _ = url_config;
     let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
     build_published_into(&site_dir, &output_dir(&site_dir))
@@ -89,7 +92,13 @@ pub fn build_published_into(site_dir: &Path, dir: &Path) -> Result<BuildOutcome,
         });
     }
 
-    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Published, dir)?;
+    let outcome = render_site(
+        &site_dir,
+        &conductor,
+        report,
+        template::OutputMode::Published,
+        dir,
+    )?;
     if outcome.files_failed > 0 {
         return Err(CliError::PagesFailed(outcome.files_failed));
     }
@@ -108,7 +117,13 @@ pub fn build_for_serve(site_dir: &Path, _url_config: &UrlConfig) -> Result<Build
     let out = editorial_output_dir(&site_dir);
     let conductor = load_conductor(&site_dir)?.with_output_dir(out.clone());
     let report = conductor.validation_report();
-    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Editorial, &out)?;
+    let outcome = render_site(
+        &site_dir,
+        &conductor,
+        report,
+        template::OutputMode::Editorial,
+        &out,
+    )?;
     print_report(&outcome.validation);
     let files = report_file_count(&outcome.validation);
     if files > 0 {
@@ -130,14 +145,23 @@ pub fn editorial_output_dir(site_dir: &Path) -> std::path::PathBuf {
 /// (unpublished pages and editor-only attributes included), written to
 /// [`editorial_output_dir`] for inspection and comparison. It never touches
 /// the published output directory.
-pub fn build_for_editorial(site_dir: &Path, _url_config: &UrlConfig) -> Result<BuildOutcome, CliError> {
+pub fn build_for_editorial(
+    site_dir: &Path,
+    _url_config: &UrlConfig,
+) -> Result<BuildOutcome, CliError> {
     let site_dir = std::fs::canonicalize(site_dir).unwrap_or_else(|_| site_dir.to_path_buf());
     println!("Building site (editorial): {}", site_dir.display());
 
     let out = editorial_output_dir(&site_dir);
     let conductor = load_conductor(&site_dir)?.with_output_dir(out.clone());
     let report = conductor.validation_report();
-    let outcome = render_site(&site_dir, &conductor, report, template::OutputMode::Editorial, &out)?;
+    let outcome = render_site(
+        &site_dir,
+        &conductor,
+        report,
+        template::OutputMode::Editorial,
+        &out,
+    )?;
     print_report(&outcome.validation);
     Ok(outcome)
 }
@@ -157,7 +181,9 @@ fn render_site(
     out: &Path,
 ) -> Result<BuildOutcome, CliError> {
     // Copy assets (conductor handles content → HTML; assets are just file copies)
-    let repo = site_repository::SiteRepository::builder().from_dir(site_dir).build();
+    let repo = site_repository::SiteRepository::builder()
+        .from_dir(site_dir)
+        .build();
     copy_site_assets(site_dir, &repo, out)?;
 
     let (rebuilt, failed, errors) = conductor.build_all_pages(output);
@@ -280,7 +306,11 @@ pub(crate) fn copy_site_assets(
                 && let Some(ext) = path.extension().and_then(|e| e.to_str())
                 && (ext == "html" || ext == "hiccup")
             {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
                 if stem != "index"
                     && let Ok(src) = std::fs::read_to_string(&path)
                 {
@@ -415,7 +445,14 @@ pub fn run() -> Result<(), CliError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Build { site_dir, config, url_style, base_path, base_url, editorial }) => {
+        Some(Command::Build {
+            site_dir,
+            config,
+            url_style,
+            base_path,
+            base_url,
+            editorial,
+        }) => {
             let site_path = Path::new(&site_dir);
             let url_config = load_url_config(
                 site_path,
@@ -431,7 +468,15 @@ pub fn run() -> Result<(), CliError> {
             }
             Ok(())
         }
-        Some(Command::Serve { site_dir, config, url_style, base_path, base_url, port, dev_session }) => {
+        Some(Command::Serve {
+            site_dir,
+            config,
+            url_style,
+            base_path,
+            base_url,
+            port,
+            dev_session,
+        }) => {
             let site_path = Path::new(&site_dir);
             let url_config = load_url_config(
                 site_path,
@@ -445,9 +490,7 @@ pub fn run() -> Result<(), CliError> {
             serve::serve_site(site_path, port, &url_config, dev_session_label)?;
             Ok(())
         }
-        Some(Command::Init { site_dir }) => {
-            init_site(Path::new(&site_dir))
-        }
+        Some(Command::Init { site_dir }) => init_site(Path::new(&site_dir)),
         Some(Command::Reload { site_dir, file }) => reload_document(Path::new(&site_dir), &file),
         Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
         Some(Command::Conductor { site_dir }) => {
@@ -465,15 +508,15 @@ pub fn run() -> Result<(), CliError> {
             match resolved_port {
                 Some(p) => {
                     eprintln!("Connecting to conductor nREPL on port {p}...");
-                    let backend = repl_tui::NreplBackend::connect(p)
-                        .map_err(CliError::Render)?;
+                    let backend = repl_tui::NreplBackend::connect(p).map_err(CliError::Render)?;
                     repl_tui::run_repl(Box::new(backend))
                         .map_err(|e| CliError::Render(e.to_string()))
                 }
                 None => {
-                    eprintln!("No running conductor found. Starting standalone REPL (no site context).");
-                    let backend = repl_tui::DirectBackend::new()
-                        .map_err(CliError::Render)?;
+                    eprintln!(
+                        "No running conductor found. Starting standalone REPL (no site context)."
+                    );
+                    let backend = repl_tui::DirectBackend::new().map_err(CliError::Render)?;
                     repl_tui::run_repl(Box::new(backend))
                         .map_err(|e| CliError::Render(e.to_string()))
                 }
@@ -481,7 +524,8 @@ pub fn run() -> Result<(), CliError> {
         }
         None => {
             // backward compat: presemble <site-dir>
-            let site_dir = cli.site_dir
+            let site_dir = cli
+                .site_dir
                 .ok_or_else(|| CliError::Usage("presemble <site-dir>".to_string()))?;
             build_for_publish(Path::new(&site_dir), &UrlConfig::default())?;
             Ok(())
@@ -511,7 +555,10 @@ fn reload_document(site_dir: &Path, file: &str) -> Result<(), CliError> {
         .ok()
         .filter(|client| client.ping().is_ok());
     let Some(client) = client else {
-        println!("No conductor is running for {}; nothing to reload.", site_dir.display());
+        println!(
+            "No conductor is running for {}; nothing to reload.",
+            site_dir.display()
+        );
         return Ok(());
     };
     match client
@@ -523,7 +570,9 @@ fn reload_document(site_dir: &Path, file: &str) -> Result<(), CliError> {
             Ok(())
         }
         conductor::Response::Error(e) => Err(CliError::Render(e)),
-        other => Err(CliError::Render(format!("unexpected conductor response: {other:?}"))),
+        other => Err(CliError::Render(format!(
+            "unexpected conductor response: {other:?}"
+        ))),
     }
 }
 
@@ -555,8 +604,12 @@ fn load_url_config(
 
     let mut config = if json_path.exists() {
         let content = std::fs::read_to_string(&json_path)?;
-        serde_json::from_str::<UrlConfig>(&content)
-            .map_err(|e| CliError::Render(format!("config parse error in {}: {e}", json_path.display())))?
+        serde_json::from_str::<UrlConfig>(&content).map_err(|e| {
+            CliError::Render(format!(
+                "config parse error in {}: {e}",
+                json_path.display()
+            ))
+        })?
     } else {
         UrlConfig::default()
     };
@@ -566,9 +619,11 @@ fn load_url_config(
             "relative" => UrlStyle::Relative,
             "root" => UrlStyle::Root,
             "absolute" => UrlStyle::Absolute,
-            other => return Err(CliError::Usage(
-                format!("unknown url-style: '{other}' (expected: relative, root, absolute)")
-            )),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown url-style: '{other}' (expected: relative, root, absolute)"
+                )));
+            }
         };
     }
     if let Some(bp) = cli_base_path {
@@ -580,7 +635,6 @@ fn load_url_config(
 
     Ok(config)
 }
-
 
 fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
     // Guard: if any of schemas/, content/, or templates/ exist as non-empty directories
@@ -601,7 +655,13 @@ fn init_site(site_dir: &std::path::Path) -> Result<(), CliError> {
     }
 
     // Create directories using new directory-based convention
-    for sub in ["schemas/note", "content/note", "templates/note", "templates", "assets"] {
+    for sub in [
+        "schemas/note",
+        "content/note",
+        "templates/note",
+        "templates",
+        "assets",
+    ] {
         std::fs::create_dir_all(site_dir.join(sub))?;
     }
 
@@ -688,11 +748,8 @@ fn add_asset_node(
         })?;
         let refs = stylesheet::extract_refs(&css_content);
 
-        let import_urls: Vec<site_index::UrlPath> = refs
-            .imports
-            .iter()
-            .map(site_index::UrlPath::new)
-            .collect();
+        let import_urls: Vec<site_index::UrlPath> =
+            refs.imports.iter().map(site_index::UrlPath::new).collect();
         let asset_ref_urls: Vec<site_index::UrlPath> = refs
             .asset_urls
             .iter()
@@ -889,9 +946,21 @@ mod tests {
     fn cli_parses_build_editorial() {
         let cli = Cli::try_parse_from(["presemble", "build", "site/", "--editorial"])
             .expect("`presemble build <site-dir> --editorial` parses");
-        assert!(matches!(cli.command, Some(Command::Build { editorial: true, .. })));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Build {
+                editorial: true,
+                ..
+            })
+        ));
         let plain = Cli::try_parse_from(["presemble", "build", "site/"]).expect("parses");
-        assert!(matches!(plain.command, Some(Command::Build { editorial: false, .. })));
+        assert!(matches!(
+            plain.command,
+            Some(Command::Build {
+                editorial: false,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -911,7 +980,13 @@ mod tests {
         // No conductor runs for this directory, so a path that were accepted
         // would end in "nothing to reload" (Ok). A refusal is an error.
         let dir = std::env::temp_dir().join("presemble-reload-refusal-no-site");
-        for bad in ["../outside.md", "/etc/passwd", "content/../../x.md", "schemas/a.md", "content/a.txt"] {
+        for bad in [
+            "../outside.md",
+            "/etc/passwd",
+            "content/../../x.md",
+            "schemas/a.md",
+            "content/a.txt",
+        ] {
             assert!(
                 reload_document(&dir, bad).is_err(),
                 "{bad} must be refused before anything is sent"
@@ -988,7 +1063,10 @@ mod tests {
 
         let output_file = NamedTempFile::with_suffix(".edn").unwrap();
         let result = convert_template(input_file.path(), "edn", Some(output_file.path()));
-        assert!(result.is_ok(), "convert html->edn with output failed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "convert html->edn with output failed: {result:?}"
+        );
 
         let written = std::fs::read_to_string(output_file.path()).unwrap();
         assert!(!written.is_empty(), "output file should not be empty");
@@ -1077,10 +1155,14 @@ mod tests {
 
         // style.css output should depend on both source files
         let sources = dep_graph.sources_for(std::path::Path::new("/out/assets/style.css"));
-        assert!(sources.contains(&PathBuf::from("/site/assets/style.css")),
-            "should contain own source");
-        assert!(sources.contains(&PathBuf::from("/site/assets/base.css")),
-            "should contain @imported source");
+        assert!(
+            sources.contains(&PathBuf::from("/site/assets/style.css")),
+            "should contain own source"
+        );
+        assert!(
+            sources.contains(&PathBuf::from("/site/assets/base.css")),
+            "should contain @imported source"
+        );
         assert_eq!(sources.len(), 2);
 
         // Changing base.css should trigger rebuild of both outputs
@@ -1123,9 +1205,18 @@ mod tests {
         };
         let title = between("<title", "</title>").unwrap_or_default();
         let h1 = between("<h1", "</h1>").unwrap_or_default();
-        assert!(page.contains("<title>Hello, World!</title>"), "title should be exactly the note's title: {page}");
-        assert!(title.contains("Hello, World!"), "title should hold the note's title: {page}");
-        assert!(h1.contains("Hello, World!"), "h1 should hold the note's title: {page}");
+        assert!(
+            page.contains("<title>Hello, World!</title>"),
+            "title should be exactly the note's title: {page}"
+        );
+        assert!(
+            title.contains("Hello, World!"),
+            "title should hold the note's title: {page}"
+        );
+        assert!(
+            h1.contains("Hello, World!"),
+            "h1 should hold the note's title: {page}"
+        );
     }
 
     /// Guard: the scaffold's templates read only what the checker knows.
@@ -1134,11 +1225,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let site = tmp.path().join("site");
         init_site(&site).expect("init");
-        let grammar = schema::parse_schema(&std::fs::read_to_string(site.join("schemas/note/item.md")).unwrap())
-            .expect("schema");
+        let grammar = schema::parse_schema(
+            &std::fs::read_to_string(site.join("schemas/note/item.md")).unwrap(),
+        )
+        .expect("schema");
         // Red run: with this empty context (no collections) the index failed
         // with "unknown field 'note' in index schema".
-        let site_context = template::check::CheckContext::new(["note"]).with_collection("note", grammar.clone());
+        let site_context =
+            template::check::CheckContext::new(["note"]).with_collection("note", grammar.clone());
         // The item template is checked against the note schema; the index
         // against the (empty) root schema, with the note collection in its input.
         let root = schema::parse_schema("").expect("an empty root schema");
@@ -1212,5 +1306,4 @@ mod tests {
         std::fs::write(subdir.join("deep.md"), "# deep").unwrap();
         assert!(!is_source_empty(tmp.path()));
     }
-
 }

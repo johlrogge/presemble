@@ -75,7 +75,10 @@ pub fn parse_schema(input: &str) -> Result<Grammar, SchemaError> {
                 }
 
                 // Try to parse an element line
-                let span = Span { start: line_start, end: line_end };
+                let span = Span {
+                    start: line_start,
+                    end: line_end,
+                };
                 if let Some(slot) = try_parse_element(trimmed, span)? {
                     preamble.push(slot);
                     state = ParseState::ReadingConstraints;
@@ -111,7 +114,10 @@ pub fn parse_schema(input: &str) -> Result<Grammar, SchemaError> {
                     // Stay in ReadingConstraints; more key/value pairs may follow
                 } else {
                     // This line is either a constraint key or a new element line.
-                    let span = Span { start: line_start, end: line_end };
+                    let span = Span {
+                        start: line_start,
+                        end: line_end,
+                    };
                     if let Some(slot) = try_parse_element(trimmed, span)? {
                         // New element — push and stay in ReadingConstraints
                         preamble.push(slot);
@@ -350,7 +356,12 @@ fn apply_body_rule(rules: &mut BodyRules, key: &str, value: &str) -> Result<(), 
 fn parse_occurs_value(value: &str) -> Result<CountRange, SchemaError> {
     let trimmed = value.trim();
     // Numeric range syntax: `1..3`, `1..`, `..3`, `2`
-    if trimmed.chars().next().map(|c| c.is_ascii_digit() || c == '.').unwrap_or(false) {
+    if trimmed
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit() || c == '.')
+        .unwrap_or(false)
+    {
         return parse_count_range_from_bracket(trimmed, value);
     }
     match trimmed {
@@ -408,7 +419,10 @@ fn parse_alt_requirement(value: &str) -> Result<AltRequirement, SchemaError> {
 
 fn parse_type_constraint(value: &str) -> Result<Constraint, SchemaError> {
     let trimmed = value.trim();
-    if let Some(inner) = trimmed.strip_prefix("link(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = trimmed
+        .strip_prefix("link(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         let stem = inner.trim().to_string();
         if stem.is_empty() {
             return Err(SchemaError::ParseError(
@@ -481,9 +495,9 @@ fn parse_count_range_from_bracket(s: &str, context: &str) -> Result<CountRange, 
 }
 
 fn parse_usize(s: &str, context: &str) -> Result<usize, SchemaError> {
-    s.trim().parse::<usize>().map_err(|_| {
-        SchemaError::ParseError(format!("expected a number, got '{s}' in: {context}"))
-    })
+    s.trim()
+        .parse::<usize>()
+        .map_err(|_| SchemaError::ParseError(format!("expected a number, got '{s}' in: {context}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -531,8 +545,8 @@ fn parse_md_link(s: &str) -> Result<(String, String, String), SchemaError> {
         byte_pos += ch.len_utf8();
     }
 
-    let close_paren = close_paren_byte
-        .ok_or_else(|| SchemaError::ParseError(format!("missing ')' in: {s}")))?;
+    let close_paren =
+        close_paren_byte.ok_or_else(|| SchemaError::ParseError(format!("missing ')' in: {s}")))?;
 
     let url = after_bracket[1..close_paren].to_string();
     let rest = after_bracket[close_paren + 1..].to_string();
@@ -806,11 +820,7 @@ mod tests {
         assert_eq!(grammar.preamble.len(), 4, "expected 4 preamble slots");
         assert!(grammar.body.is_some(), "expected body section");
 
-        let names: Vec<&str> = grammar
-            .preamble
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect();
+        let names: Vec<&str> = grammar.preamble.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["title", "summary", "author", "cover"]);
     }
 
@@ -963,7 +973,10 @@ mod tests {
         if let Constraint::TypeLink(stem) = &slot.constraints[0] {
             assert_eq!(stem, "post");
         } else {
-            panic!("expected TypeLink constraint, got {:?}", slot.constraints[0]);
+            panic!(
+                "expected TypeLink constraint, got {:?}",
+                slot.constraints[0]
+            );
         }
     }
 
@@ -976,7 +989,10 @@ mod tests {
         if let Constraint::TypeLink(stem) = &slot.constraints[0] {
             assert_eq!(stem, "feature");
         } else {
-            panic!("expected TypeLink constraint, got {:?}", slot.constraints[0]);
+            panic!(
+                "expected TypeLink constraint, got {:?}",
+                slot.constraints[0]
+            );
         }
     }
 

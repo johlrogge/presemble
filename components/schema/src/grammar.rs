@@ -57,11 +57,17 @@ impl std::fmt::Display for SlotName {
 /// The type of structural element expected in a slot.
 #[derive(Debug, Clone)]
 pub enum Element {
-    Heading { level: HeadingLevelRange },
+    Heading {
+        level: HeadingLevelRange,
+    },
     /// One or more paragraphs. Cardinality is expressed via `Constraint::Occurs`.
     Paragraph,
-    Link { pattern: String },
-    Image { pattern: String },
+    Link {
+        pattern: String,
+    },
+    Image {
+        pattern: String,
+    },
     /// A flat sequence of text items (markdown list). The `occurs` constraint
     /// on a list slot bounds the number of items, not the number of list elements.
     List,

@@ -91,7 +91,8 @@ pub(crate) fn record_field(store: &NodeStore, id: NodeId, key: &str) -> Option<F
                     }
                     _ => {
                         let content = decode()?;
-                        let content::BlockShape::SoleImage(parts) = content::BlockShape::of(&content)
+                        let content::BlockShape::SoleImage(parts) =
+                            content::BlockShape::of(&content)
                         else {
                             return None;
                         };
@@ -307,7 +308,10 @@ mod tests {
     fn node_attr_text_found() {
         let (store, root) = make_test_store();
         let link = node_part(&store, root, "link").unwrap();
-        assert_eq!(node_attr_text(&store, link, "href"), Some("/about".to_string()));
+        assert_eq!(
+            node_attr_text(&store, link, "href"),
+            Some("/about".to_string())
+        );
     }
 
     #[test]

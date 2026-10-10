@@ -211,7 +211,12 @@ impl Selection {
     /// Unlike `following_siblings().nth_of_kind(..)`, each scope node is resolved
     /// separately, so two anchors yield two results rather than one picked from
     /// their merged following siblings.
-    pub fn nth_following_of_kind_each(&self, store: &NodeStore, kind: &str, idx: usize) -> Selection {
+    pub fn nth_following_of_kind_each(
+        &self,
+        store: &NodeStore,
+        kind: &str,
+        idx: usize,
+    ) -> Selection {
         let mut result = OrdSet::new();
         for &id in &self.nodes {
             for parent_id in store.parents(id) {
@@ -368,10 +373,7 @@ pub fn has_attr<'a>(attr: &'a str, value: &'a str) -> impl Fn(&NodeStore, NodeId
 }
 
 /// Match nodes that have an attribute with the given name and integer value.
-pub fn has_attr_int<'a>(
-    attr: &'a str,
-    value: i64,
-) -> impl Fn(&NodeStore, NodeId) -> bool + 'a {
+pub fn has_attr_int<'a>(attr: &'a str, value: i64) -> impl Fn(&NodeStore, NodeId) -> bool + 'a {
     move |store, id| {
         store.attributes(id).iter().any(|(n, vid)| {
             store.resolve_name(*n) == attr
@@ -475,7 +477,16 @@ mod tests {
     ///     │   └── text2 (Text "World")
     ///     └── h2 (Element "heading") with Attribute("level", Integer(2))
     ///         └── text3 (Text "Sub")
-    fn sample_store() -> (NodeStore, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId) {
+    fn sample_store() -> (
+        NodeStore,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+    ) {
         let mut store = NodeStore::new();
 
         let doc_name = store.intern("doc");
@@ -487,7 +498,13 @@ mod tests {
 
         let h1 = store.add_node(Node::Element(heading_name));
         let level1_val = store.add_node(Node::Integer(1));
-        store.add_edge(h1, Edge::Attribute { name: level_name, value: level1_val });
+        store.add_edge(
+            h1,
+            Edge::Attribute {
+                name: level_name,
+                value: level1_val,
+            },
+        );
 
         let text1 = store.add_node(Node::Text("Hello".to_string()));
         store.add_edge(h1, Edge::Child(text1));
@@ -498,7 +515,13 @@ mod tests {
 
         let h2 = store.add_node(Node::Element(heading_name));
         let level2_val = store.add_node(Node::Integer(2));
-        store.add_edge(h2, Edge::Attribute { name: level_name, value: level2_val });
+        store.add_edge(
+            h2,
+            Edge::Attribute {
+                name: level_name,
+                value: level2_val,
+            },
+        );
 
         let text3 = store.add_node(Node::Text("Sub".to_string()));
         store.add_edge(h2, Edge::Child(text3));
@@ -673,7 +696,16 @@ mod tests {
 
     /// Build a doc with children [h, p, h, p, p, p] under the root.
     /// Returns (store, root, h0, p0, h1_node, p1, p2, p3)
-    fn multi_child_store() -> (NodeStore, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId, NodeId) {
+    fn multi_child_store() -> (
+        NodeStore,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+        NodeId,
+    ) {
         let mut store = NodeStore::new();
         let doc_name = store.intern("doc");
         let heading_name = store.intern("heading");
@@ -857,7 +889,10 @@ mod tests {
             .children(&store)
             .nth_of_kind(&store, "paragraph", 0);
         assert_eq!(first.len(), 1);
-        assert!(first.contains(new_p), "inserted paragraph is first in document order");
+        assert!(
+            first.contains(new_p),
+            "inserted paragraph is first in document order"
+        );
 
         let second = Selection::single(root)
             .children(&store)
@@ -895,8 +930,15 @@ mod tests {
 
         let first = Selection::single(p).nth_text_each(&store, 0);
         assert_eq!(first.len(), 1);
-        assert!(first.contains(t_before), "newly inserted text is first in document order");
-        assert!(Selection::single(p).nth_text_each(&store, 1).contains(t_inner));
+        assert!(
+            first.contains(t_before),
+            "newly inserted text is first in document order"
+        );
+        assert!(
+            Selection::single(p)
+                .nth_text_each(&store, 1)
+                .contains(t_inner)
+        );
         assert!(Selection::single(p).nth_text_each(&store, 2).contains(t_a));
         assert!(Selection::single(p).nth_text_each(&store, 3).is_empty());
     }
@@ -920,7 +962,8 @@ mod tests {
     fn nth_following_of_kind_each_resolves_each_anchor_separately() {
         // root: [h0, p0, h1, p1, p2, p3]
         let (store, _root, h0, p0, h1_node, p1, p2, _p3) = multi_child_store();
-        let sel = Selection::from_ids([h0, h1_node]).nth_following_of_kind_each(&store, "paragraph", 0);
+        let sel =
+            Selection::from_ids([h0, h1_node]).nth_following_of_kind_each(&store, "paragraph", 0);
         assert_eq!(sel.len(), 2);
         assert!(sel.contains(p0));
         assert!(sel.contains(p1));
@@ -960,7 +1003,11 @@ mod tests {
         assert!(!vectors.is_empty());
         for pair in vectors {
             let input = pair[0].as_str().unwrap();
-            assert_eq!(normalize_ws(input), pair[1].as_str().unwrap(), "normalize {input:?}");
+            assert_eq!(
+                normalize_ws(input),
+                pair[1].as_str().unwrap(),
+                "normalize {input:?}"
+            );
         }
     }
 

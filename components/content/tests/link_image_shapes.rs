@@ -56,7 +56,10 @@ fn image_alt_keeps_markup() {
     let src = "# T\n\n[Jo](/author/jo)\n\n![*a* cat](images/c.jpg)\n\n----\n\nBody.\n";
     let doc = parse_and_assign(src, &grammar()).expect("parses");
     let saved = serialize_document(&doc);
-    assert!(saved.contains("![*a* cat](images/c.jpg)"), "saved:\n{saved}");
+    assert!(
+        saved.contains("![*a* cat](images/c.jpg)"),
+        "saved:\n{saved}"
+    );
 }
 
 /// A lone link is a paragraph (its shape is what makes the link slot take it).
@@ -64,7 +67,10 @@ fn image_alt_keeps_markup() {
 fn sole_link_paragraph_fills_link_slot() {
     let doc = parse_and_assign(DOC, &grammar()).expect("parses");
     assert!(
-        matches!(slot_element(&doc, "author"), ContentElement::Paragraph { .. }),
+        matches!(
+            slot_element(&doc, "author"),
+            ContentElement::Paragraph { .. }
+        ),
         "{:?}",
         slot_element(&doc, "author")
     );
@@ -76,7 +82,10 @@ fn sole_link_paragraph_fills_link_slot() {
 fn sole_image_paragraph_fills_image_slot() {
     let doc = parse_and_assign(DOC, &grammar()).expect("parses");
     assert!(
-        matches!(slot_element(&doc, "cover"), ContentElement::Paragraph { .. }),
+        matches!(
+            slot_element(&doc, "cover"),
+            ContentElement::Paragraph { .. }
+        ),
         "{:?}",
         slot_element(&doc, "cover")
     );
@@ -88,18 +97,27 @@ fn sole_image_paragraph_fills_image_slot() {
 #[test]
 fn link_slot_paragraph_with_added_text_is_error_not_structural() {
     let mut doc = parse_and_assign(DOC, &grammar()).expect("parses");
-    let slot = doc.preamble.iter_mut().find(|s| s.name.as_str() == "author").unwrap();
+    let slot = doc
+        .preamble
+        .iter_mut()
+        .find(|s| s.name.as_str() == "author")
+        .unwrap();
     slot.elements.front_mut().unwrap().node =
         ContentElement::paragraph_from_markdown("[Jo](/author/jo) and more");
 
     let errors = messages(&doc);
     assert!(
-        errors.iter().any(|m| m.contains("slot 'author'") && m.contains("expected a link")),
+        errors
+            .iter()
+            .any(|m| m.contains("slot 'author'") && m.contains("expected a link")),
         "no 'expected a link' error: {errors:?}"
     );
     // Editable and saveable.
     let saved = serialize_document(&doc);
-    assert!(saved.contains("[Jo](/author/jo) and more"), "saved:\n{saved}");
+    assert!(
+        saved.contains("[Jo](/author/jo) and more"),
+        "saved:\n{saved}"
+    );
     // Reassigned on reload: the paragraph is no longer in the link slot.
     let again = parse_and_assign(&saved, &grammar()).expect("parses");
     let author = again.preamble.iter().find(|s| s.name.as_str() == "author");
@@ -119,5 +137,8 @@ fn inline_html_in_link_text_is_error_l15() {
     let src = "# T\n\n[a <b>x</b>](/author/x)\n\n![c](images/c.jpg)\n\n----\n\nBody.\n";
     let doc = parse_and_assign(src, &grammar()).expect("parses");
     let errors = messages(&doc);
-    assert!(errors.iter().any(|m| m.contains("inline HTML")), "no inline-HTML error: {errors:?}");
+    assert!(
+        errors.iter().any(|m| m.contains("inline HTML")),
+        "no inline-HTML error: {errors:?}"
+    );
 }

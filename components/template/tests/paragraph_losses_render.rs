@@ -20,6 +20,9 @@ fn an_escaped_paragraph_renders_without_backslash() {
     )
     .expect("renders");
     assert!(html.contains("<p"), "{html}");
-    assert!(html.contains("># x</p>"), "the paragraph shows `# x`: {html}");
+    assert!(
+        html.contains("># x</p>"),
+        "the paragraph shows `# x`: {html}"
+    );
     assert!(!html.contains("\\#"), "the backslash is rendered: {html}");
 }

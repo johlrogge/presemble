@@ -1,10 +1,10 @@
 use std::io;
 use std::path::Path;
 
-use schema::Span;
 use crate::diff::{Change, DocumentDiff};
 use crate::document::Document;
 use crate::serializer::{self, serialize_document};
+use schema::Span;
 
 /// A targeted text replacement in source coordinates.
 #[derive(Debug, Clone)]
@@ -47,7 +47,10 @@ pub fn diff_to_source_edits(
     if needs_full_replacement {
         let new_text = serialize_document(after);
         return vec![SourceEdit {
-            span: Span { start: 0, end: src.len() },
+            span: Span {
+                start: 0,
+                end: src.len(),
+            },
             new_text,
         }];
     }
@@ -56,12 +59,19 @@ pub fn diff_to_source_edits(
 
     for change in &diff.changes {
         match change {
-            Change::SlotChanged { before: before_elems, after: after_elems, .. } => {
+            Change::SlotChanged {
+                before: before_elems,
+                after: after_elems,
+                ..
+            } => {
                 if before_elems.is_empty() {
                     // No before span to replace — use full replacement as safety fallback
                     let new_text = serialize_document(after);
                     return vec![SourceEdit {
-                        span: Span { start: 0, end: src.len() },
+                        span: Span {
+                            start: 0,
+                            end: src.len(),
+                        },
                         new_text,
                     }];
                 }
@@ -70,12 +80,19 @@ pub fn diff_to_source_edits(
                 edits.push(edit);
             }
 
-            Change::BodyChanged { before: before_elems, after: after_elems, .. } => {
+            Change::BodyChanged {
+                before: before_elems,
+                after: after_elems,
+                ..
+            } => {
                 if before_elems.is_empty() {
                     // No before span to replace — full replacement fallback
                     let new_text = serialize_document(after);
                     return vec![SourceEdit {
-                        span: Span { start: 0, end: src.len() },
+                        span: Span {
+                            start: 0,
+                            end: src.len(),
+                        },
                         new_text,
                     }];
                 }
@@ -142,7 +159,10 @@ fn make_elements_edit(
     };
 
     SourceEdit {
-        span: Span { start: span_start, end: span_end },
+        span: Span {
+            start: span_start,
+            end: span_end,
+        },
         new_text,
     }
 }
@@ -162,7 +182,9 @@ fn trailing_whitespace_in_span(src: &str, start: usize, end: usize) -> &str {
 
 /// Return true if all bytes at or after `pos` in `src` are whitespace.
 fn all_whitespace_after(src: &str, pos: usize) -> bool {
-    src[pos..].bytes().all(|b| matches!(b, b'\n' | b'\r' | b' ' | b'\t'))
+    src[pos..]
+        .bytes()
+        .all(|b| matches!(b, b'\n' | b'\r' | b' ' | b'\t'))
 }
 
 // ---------------------------------------------------------------------------
@@ -212,12 +234,12 @@ pub fn diff_to_dom_patches(_diff: &DocumentDiff) -> Vec<DomPatch> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use schema::parse_schema;
-    use schema::Grammar;
-    use crate::parser::parse_and_assign;
     use crate::diff::diff;
+    use crate::parser::parse_and_assign;
     use crate::transform::{Capitalize, InsertSeparator, InsertSlot, Transform};
+    use schema::Grammar;
+    use schema::parse_schema;
+    use std::sync::Arc;
 
     fn post_grammar() -> Grammar {
         let schema_src = r#"# Post title {#title}
@@ -264,7 +286,10 @@ headings
         let cloned = doc.clone();
         let d = diff(&doc, &cloned);
         let edits = diff_to_source_edits(src, &doc, &cloned, &d);
-        assert!(edits.is_empty(), "expected no edits for empty diff, got: {edits:?}");
+        assert!(
+            edits.is_empty(),
+            "expected no edits for empty diff, got: {edits:?}"
+        );
     }
 
     // ── slot_changed_produces_targeted_edit ──────────────────────────────────
@@ -334,10 +359,18 @@ headings
         let edits = diff_to_source_edits(src, &before, &after, &d);
 
         // SeparatorAdded -> full replacement
-        assert_eq!(edits.len(), 1, "expected 1 full-replacement edit, got: {edits:?}");
+        assert_eq!(
+            edits.len(),
+            1,
+            "expected 1 full-replacement edit, got: {edits:?}"
+        );
         let edit = &edits[0];
         assert_eq!(edit.span.start, 0, "full replacement should start at 0");
-        assert_eq!(edit.span.end, src.len(), "full replacement should end at src.len()");
+        assert_eq!(
+            edit.span.end,
+            src.len(),
+            "full replacement should end at src.len()"
+        );
         assert!(
             edit.new_text.contains("----"),
             "expected '----' in new_text: {:?}",
@@ -349,8 +382,8 @@ headings
 
     #[test]
     fn slot_added_falls_back_to_full_replacement() {
-        use schema::Span;
         use crate::document::DocumentSlot;
+        use schema::Span;
 
         let grammar = Arc::new(post_grammar());
         let src = "Summary.\n\n[Jo](/author/jo)\n\n----\n";
@@ -360,7 +393,13 @@ headings
         // Build after with a title slot present
         let mut after = before.clone();
         let title_slot = DocumentSlot {
-            name: grammar.preamble.iter().find(|s| s.name.as_str() == "title").unwrap().name.clone(),
+            name: grammar
+                .preamble
+                .iter()
+                .find(|s| s.name.as_str() == "title")
+                .unwrap()
+                .name
+                .clone(),
             elements: im::vector![schema::Spanned {
                 node: crate::document::ContentElement::heading_from_markdown(
                     schema::HeadingLevel::new(1).unwrap(),
@@ -375,7 +414,11 @@ headings
         let edits = diff_to_source_edits(src, &before, &after, &d);
 
         // SlotAdded -> full replacement
-        assert_eq!(edits.len(), 1, "expected 1 full-replacement edit, got: {edits:?}");
+        assert_eq!(
+            edits.len(),
+            1,
+            "expected 1 full-replacement edit, got: {edits:?}"
+        );
         let edit = &edits[0];
         assert_eq!(edit.span.start, 0);
         assert_eq!(edit.span.end, src.len());
@@ -387,13 +430,17 @@ headings
     fn body_changed_roundtrip() {
         let grammar = Arc::new(post_grammar());
         let src_before = "# Title\n\nSummary.\n\n[Jo](/author/jo)\n\n----\n\nOriginal body.\n";
-        let src_after_expected = "# Title\n\nSummary.\n\n[Jo](/author/jo)\n\n----\n\nChanged body.\n";
+        let src_after_expected =
+            "# Title\n\nSummary.\n\n[Jo](/author/jo)\n\n----\n\nChanged body.\n";
         let before = parse_and_assign(src_before, &grammar).unwrap();
         let after = parse_and_assign(src_after_expected, &grammar).unwrap();
         let d = diff(&before, &after);
 
         let edits = diff_to_source_edits(src_before, &before, &after, &d);
-        assert!(!edits.is_empty(), "expected at least one edit for body change");
+        assert!(
+            !edits.is_empty(),
+            "expected at least one edit for body change"
+        );
 
         let result = apply_source_edits(src_before, &edits);
         let expected = serialize_document(&after);
@@ -434,7 +481,8 @@ headings
         // Document without a title
         let src = "Summary.\n\n[Jo](/author/jo)\n\n----\n";
         let before = parse_and_assign(src, &grammar).unwrap();
-        let transform = InsertSlot::new(Arc::clone(&grammar), "title", "New Title".to_string()).unwrap();
+        let transform =
+            InsertSlot::new(Arc::clone(&grammar), "title", "New Title".to_string()).unwrap();
         let after = transform.apply(before.clone()).unwrap();
         let d = diff(&before, &after);
 

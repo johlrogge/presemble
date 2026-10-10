@@ -1,6 +1,6 @@
 use content::{
-    byte_to_position, parse_and_assign, parse_document,
-    Capitalize, InsertSlot, InsertSeparator, Transform,
+    Capitalize, InsertSeparator, InsertSlot, Transform, byte_to_position, parse_and_assign,
+    parse_document,
 };
 use schema::{Element, Grammar};
 use site_index::{DIR_CONTENT, DIR_TEMPLATES};
@@ -22,13 +22,39 @@ pub struct SlotCompletion {
 #[allow(dead_code)]
 impl SlotCompletion {
     /// Create a plain (non-snippet) completion.
-    fn plain(label: impl Into<String>, detail: impl Into<String>, documentation: Option<String>, insert_text: impl Into<String>) -> Self {
-        Self { label: label.into(), detail: detail.into(), documentation, insert_text: insert_text.into(), is_snippet: false, sort_text: None, preselect: false }
+    fn plain(
+        label: impl Into<String>,
+        detail: impl Into<String>,
+        documentation: Option<String>,
+        insert_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            detail: detail.into(),
+            documentation,
+            insert_text: insert_text.into(),
+            is_snippet: false,
+            sort_text: None,
+            preselect: false,
+        }
     }
 
     /// Create a snippet completion.
-    fn snippet(label: impl Into<String>, detail: impl Into<String>, documentation: Option<String>, insert_text: impl Into<String>) -> Self {
-        Self { label: label.into(), detail: detail.into(), documentation, insert_text: insert_text.into(), is_snippet: true, sort_text: None, preselect: false }
+    fn snippet(
+        label: impl Into<String>,
+        detail: impl Into<String>,
+        documentation: Option<String>,
+        insert_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            detail: detail.into(),
+            documentation,
+            insert_text: insert_text.into(),
+            is_snippet: true,
+            sort_text: None,
+            preselect: false,
+        }
     }
 
     fn with_sort_text(mut self, s: impl Into<String>) -> Self {
@@ -51,9 +77,7 @@ pub enum SlotAction {
         placeholder_value: String,
     },
     /// Capitalize the first character of a slot's text.
-    Capitalize {
-        slot_name: String,
-    },
+    Capitalize { slot_name: String },
     /// Insert a missing body separator.
     InsertSeparator,
 }
@@ -134,7 +158,12 @@ pub fn completions_for_schema(
                                             .and_then(|src| extract_title(&src))
                                             .unwrap_or_else(|| file_slug.clone());
                                         let url = url_from_pattern(pattern, &file_slug);
-                                        SlotCompletion::plain(title.clone(), url.clone(), slot.hint_text.clone(), format!("[{title}]({url})"))
+                                        SlotCompletion::plain(
+                                            title.clone(),
+                                            url.clone(),
+                                            slot.hint_text.clone(),
+                                            format!("[{title}]({url})"),
+                                        )
                                     })
                                     .collect();
                                 return items;
@@ -142,7 +171,12 @@ pub fn completions_for_schema(
                         }
                     }
                     // Fallback: generic slot name item
-                    vec![SlotCompletion::plain(slot.name.to_string(), "Link", slot.hint_text.clone(), format!("input.{}", slot.name))]
+                    vec![SlotCompletion::plain(
+                        slot.name.to_string(),
+                        "Link",
+                        slot.hint_text.clone(),
+                        format!("input.{}", slot.name),
+                    )]
                 }
                 _ => {
                     let detail = match &slot.element {
@@ -158,17 +192,23 @@ pub fn completions_for_schema(
                         Element::Image { .. } => "Image".to_string(),
                         Element::List => "List".to_string(),
                     };
-                    vec![SlotCompletion::plain(slot.name.to_string(), detail, slot.hint_text.clone(), format!("input.{}", slot.name))]
+                    vec![SlotCompletion::plain(
+                        slot.name.to_string(),
+                        detail,
+                        slot.hint_text.clone(),
+                        format!("input.{}", slot.name),
+                    )]
                 }
             }
         })
         .collect()
 }
 
-
 /// Escape special characters in LSP snippet syntax.
 fn escape_snippet(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('$', "\\$").replace('}', "\\}")
+    s.replace('\\', "\\\\")
+        .replace('$', "\\$")
+        .replace('}', "\\}")
 }
 
 /// Generate LSP snippet text for a slot, with placeholder selections.
@@ -253,7 +293,8 @@ pub fn content_completions(
                             format!("Link to {content_stem}/{file_slug}"),
                             slot.hint_text.clone(),
                             format!("[${{1:{escaped_title}}}](${{2:{escaped_url}}})"),
-                        ).with_sort_text(sort_text.clone());
+                        )
+                        .with_sort_text(sort_text.clone());
                         if first_missing {
                             c = c.with_preselect();
                         }
@@ -420,7 +461,12 @@ pub fn schema_completions(src: &str, cursor_line: u32) -> Vec<SlotCompletion> {
                 SlotCompletion::plain("1..3", "occurs value", None, "1..3"),
                 SlotCompletion::plain("0..5", "occurs value", None, "0..5"),
             ],
-            "content" => vec![SlotCompletion::plain("capitalized", "content value", None, "capitalized")],
+            "content" => vec![SlotCompletion::plain(
+                "capitalized",
+                "content value",
+                None,
+                "capitalized",
+            )],
             "orientation" => vec![
                 SlotCompletion::plain("landscape", "orientation value", None, "landscape"),
                 SlotCompletion::plain("portrait", "orientation value", None, "portrait"),
@@ -441,11 +487,36 @@ pub fn schema_completions(src: &str, cursor_line: u32) -> Vec<SlotCompletion> {
     // Mode 2: empty line → offer element templates
     if current_line.trim().is_empty() {
         return vec![
-            SlotCompletion::plain("Heading slot", "heading element", Some("A heading element with name anchor".to_string()), "# Heading text {#name}\noccurs\n: exactly once\n"),
-            SlotCompletion::plain("Paragraph slot", "paragraph element", Some("A paragraph element".to_string()), "Paragraph text. {#name}\noccurs\n: exactly once\n"),
-            SlotCompletion::plain("Link slot", "link element", Some("A link reference to other content".to_string()), "[link text](/pattern) {#name}\noccurs\n: exactly once\n"),
-            SlotCompletion::plain("Image slot", "image element", Some("An image element".to_string()), "![alt text](images/*.(jpg|png)) {#name}\noccurs\n: exactly once\n"),
-            SlotCompletion::plain("Body separator", "body section", Some("Separator between preamble and body".to_string()), "----\n\nBody content.\nheadings\n: h3..h6\n"),
+            SlotCompletion::plain(
+                "Heading slot",
+                "heading element",
+                Some("A heading element with name anchor".to_string()),
+                "# Heading text {#name}\noccurs\n: exactly once\n",
+            ),
+            SlotCompletion::plain(
+                "Paragraph slot",
+                "paragraph element",
+                Some("A paragraph element".to_string()),
+                "Paragraph text. {#name}\noccurs\n: exactly once\n",
+            ),
+            SlotCompletion::plain(
+                "Link slot",
+                "link element",
+                Some("A link reference to other content".to_string()),
+                "[link text](/pattern) {#name}\noccurs\n: exactly once\n",
+            ),
+            SlotCompletion::plain(
+                "Image slot",
+                "image element",
+                Some("An image element".to_string()),
+                "![alt text](images/*.(jpg|png)) {#name}\noccurs\n: exactly once\n",
+            ),
+            SlotCompletion::plain(
+                "Body separator",
+                "body section",
+                Some("Separator between preamble and body".to_string()),
+                "----\n\nBody content.\nheadings\n: h3..h6\n",
+            ),
         ];
     }
 
@@ -504,12 +575,17 @@ pub fn validate_with_positions(src: &str, grammar: &Grammar) -> Vec<PositionedDi
         let (start, end) = span_to_positions(src, diag.span.as_ref());
 
         let action = if diag.message.contains("uppercase") {
-            diag.slot.as_ref().map(|s| SlotAction::Capitalize { slot_name: s.as_str().to_string() })
+            diag.slot.as_ref().map(|s| SlotAction::Capitalize {
+                slot_name: s.as_str().to_string(),
+            })
         } else if diag.message.contains("missing body separator") {
             Some(SlotAction::InsertSeparator)
         } else if diag.message.contains("missing") {
             if let Some(slot_name) = &diag.slot {
-                let slot = grammar.preamble.iter().find(|s| s.name.as_str() == slot_name.as_str());
+                let slot = grammar
+                    .preamble
+                    .iter()
+                    .find(|s| s.name.as_str() == slot_name.as_str());
                 slot.map(|s| {
                     let placeholder = template_for_slot(s);
                     SlotAction::InsertSlot {
@@ -637,11 +713,19 @@ pub fn template_completions(
                 // Extract the prefix typed so far before the cursor
                 // The word being typed: after the last `(` or space.
                 let typed = &line_str[value_start_in_line..cursor];
-                let prefix = typed.rsplit(|c: char| c == '(' || c.is_whitespace()).next().unwrap_or("");
+                let prefix = typed
+                    .rsplit(|c: char| c == '(' || c.is_whitespace())
+                    .next()
+                    .unwrap_or("");
 
                 if !prefix.contains('.') {
                     // No dot yet — offer "input"
-                    return vec![SlotCompletion::plain("input", "content type", None, "input")];
+                    return vec![SlotCompletion::plain(
+                        "input",
+                        "content type",
+                        None,
+                        "input",
+                    )];
                 } else if prefix.starts_with("input.") {
                     // Typed "input." — offer all preamble slots
                     return grammar
@@ -655,7 +739,12 @@ pub fn template_completions(
                                 Element::Image { .. } => "image".to_string(),
                                 Element::List => "list".to_string(),
                             };
-                            SlotCompletion::plain(slot.name.to_string(), detail, slot.hint_text.clone(), slot.name.to_string())
+                            SlotCompletion::plain(
+                                slot.name.to_string(),
+                                detail,
+                                slot.hint_text.clone(),
+                                slot.name.to_string(),
+                            )
                         })
                         .collect();
                 } else {
@@ -727,7 +816,9 @@ pub fn template_definition(
     // 1. File-qualified names containing `::`
     if name.contains("::") {
         let file_part = name.split("::").next()?;
-        let path = site_dir.join(DIR_TEMPLATES).join(format!("{file_part}.html"));
+        let path = site_dir
+            .join(DIR_TEMPLATES)
+            .join(format!("{file_part}.html"));
         return Some(TemplateDefinitionTarget::File(path));
     }
 
@@ -780,7 +871,8 @@ fn called_template_on_line(line: &str) -> Option<&str> {
         if let Some(head) = symbols(open) {
             if head == "juxt" {
                 let after = open + line[open..].find("juxt")? + "juxt".len();
-                return symbols(after).filter(|name| template::expression::function(name).is_none());
+                return symbols(after)
+                    .filter(|name| template::expression::function(name).is_none());
             }
             if !head.contains('=') && template::expression::function(head).is_none() {
                 return Some(head);
@@ -820,7 +912,6 @@ pub fn validate_schema_with_positions(src: &str) -> Vec<PositionedDiagnostic> {
         .collect()
 }
 
-
 /// Write a new value to a named schema slot of a document held as a string.
 ///
 /// If the slot already exists in the document, the existing element is replaced
@@ -850,32 +941,33 @@ pub fn write_slot_to_string(
 ///
 /// The grammar is cloned into an `Arc` so that the resulting transform can be
 /// used independently from its source.
-pub fn build_transform(grammar: &Grammar, action: &SlotAction) -> Result<Box<dyn content::Transform>, String> {
+pub fn build_transform(
+    grammar: &Grammar,
+    action: &SlotAction,
+) -> Result<Box<dyn content::Transform>, String> {
     let grammar_arc = Arc::new(grammar.clone());
     match action {
-        SlotAction::InsertSlot { slot_name, placeholder_value } => {
-            Ok(Box::new(
-                InsertSlot::new(Arc::clone(&grammar_arc), slot_name, placeholder_value.clone())
-                    .map_err(|e| e.to_string())?,
-            ))
-        }
-        SlotAction::Capitalize { slot_name } => {
-            Ok(Box::new(
-                Capitalize::new(Arc::clone(&grammar_arc), slot_name)
-                    .map_err(|e| e.to_string())?,
-            ))
-        }
+        SlotAction::InsertSlot {
+            slot_name,
+            placeholder_value,
+        } => Ok(Box::new(
+            InsertSlot::new(
+                Arc::clone(&grammar_arc),
+                slot_name,
+                placeholder_value.clone(),
+            )
+            .map_err(|e| e.to_string())?,
+        )),
+        SlotAction::Capitalize { slot_name } => Ok(Box::new(
+            Capitalize::new(Arc::clone(&grammar_arc), slot_name).map_err(|e| e.to_string())?,
+        )),
         SlotAction::InsertSeparator => Ok(Box::new(InsertSeparator)),
     }
 }
 
 /// Apply a SlotAction to a source string, returning the new file content.
 /// Uses the Document-level pipeline: parse -> modify -> serialize.
-pub fn apply_action(
-    src: &str,
-    grammar: &Grammar,
-    action: &SlotAction,
-) -> Result<String, String> {
+pub fn apply_action(src: &str, grammar: &Grammar, action: &SlotAction) -> Result<String, String> {
     let doc = content::parse_and_assign(src, grammar)
         .map_err(|e| format!("failed to parse document: {e}"))?;
     let transform = build_transform(grammar, action)?;
@@ -897,7 +989,10 @@ mod tests {
     fn completions_for_schema_returns_all_slots() {
         let grammar = article_grammar();
         let completions = completions_for_schema(&grammar, "article", None);
-        assert!(!completions.is_empty(), "should return completions for article schema");
+        assert!(
+            !completions.is_empty(),
+            "should return completions for article schema"
+        );
         assert!(
             completions.iter().any(|c| c.label == "title"),
             "should include a 'title' completion"
@@ -935,7 +1030,10 @@ mod tests {
         let src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let grammar = article_grammar();
         let diags = validate_with_positions(src, &grammar);
-        assert!(diags.is_empty(), "valid document should produce no diagnostics: {diags:#?}");
+        assert!(
+            diags.is_empty(),
+            "valid document should produce no diagnostics: {diags:#?}"
+        );
     }
 
     #[test]
@@ -943,7 +1041,10 @@ mod tests {
         let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
         let grammar = article_grammar();
         let diags = validate_with_positions(src, &grammar);
-        assert!(!diags.is_empty(), "document missing title should produce diagnostics");
+        assert!(
+            !diags.is_empty(),
+            "document missing title should produce diagnostics"
+        );
     }
 
     #[test]
@@ -957,7 +1058,10 @@ mod tests {
             "expected a 'missing' diagnostic: {diags:#?}"
         );
         let action = missing_diag.unwrap().action.as_ref();
-        assert!(action.is_some(), "missing field diagnostic should have an action");
+        assert!(
+            action.is_some(),
+            "missing field diagnostic should have an action"
+        );
         assert!(
             matches!(action.unwrap(), SlotAction::InsertSlot { .. }),
             "action should be InsertSlot: {action:?}"
@@ -970,16 +1074,26 @@ mod tests {
         let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";
         let grammar = article_grammar();
         let diags = validate_with_positions(src, &grammar);
-        let insert_actions: Vec<_> = diags.iter()
+        let insert_actions: Vec<_> = diags
+            .iter()
             .filter(|d| d.message.contains("missing"))
             .filter_map(|d| d.action.as_ref())
             .collect();
-        assert!(!insert_actions.is_empty(), "expected at least one InsertSlot action for missing slot: {diags:#?}");
+        assert!(
+            !insert_actions.is_empty(),
+            "expected at least one InsertSlot action for missing slot: {diags:#?}"
+        );
         let first_action = &insert_actions[0];
         match first_action {
-            SlotAction::InsertSlot { slot_name, placeholder_value } => {
+            SlotAction::InsertSlot {
+                slot_name,
+                placeholder_value,
+            } => {
                 assert!(!slot_name.is_empty(), "slot_name should not be empty");
-                assert!(!placeholder_value.is_empty(), "placeholder_value should not be empty");
+                assert!(
+                    !placeholder_value.is_empty(),
+                    "placeholder_value should not be empty"
+                );
             }
             other => panic!("expected InsertSlot, got {other:?}"),
         }
@@ -991,10 +1105,14 @@ mod tests {
         let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n";
         let grammar = article_grammar();
         let diags = validate_with_positions(src, &grammar);
-        let sep_action = diags.iter()
+        let sep_action = diags
+            .iter()
             .filter_map(|d| d.action.as_ref())
             .find(|a| matches!(a, SlotAction::InsertSeparator));
-        assert!(sep_action.is_some(), "expected InsertSeparator action for missing separator: {diags:#?}");
+        assert!(
+            sep_action.is_some(),
+            "expected InsertSeparator action for missing separator: {diags:#?}"
+        );
     }
 
     #[test]
@@ -1011,7 +1129,10 @@ mod tests {
             .find(|d| d.message.contains("The missing piece"))
             .unwrap_or_else(|| panic!("expected an unassigned diagnostic: {raw:#?}"));
         assert_eq!(unassigned.slot, None, "{unassigned:#?}");
-        let span = unassigned.span.clone().expect("unassigned diagnostic should have a span");
+        let span = unassigned
+            .span
+            .clone()
+            .expect("unassigned diagnostic should have a span");
         let para_start = src.find(para).unwrap();
         assert!(
             span.start <= para_start && span.end >= para_start + para.len(),
@@ -1023,7 +1144,11 @@ mod tests {
             .iter()
             .find(|d| d.message.contains("The missing piece"))
             .unwrap_or_else(|| panic!("expected a positioned diagnostic: {diags:#?}"));
-        assert!(positioned.action.is_none(), "unexpected action: {:?}", positioned.action);
+        assert!(
+            positioned.action.is_none(),
+            "unexpected action: {:?}",
+            positioned.action
+        );
         assert_eq!(positioned.start, byte_to_position(&src, para_start));
     }
 
@@ -1039,7 +1164,10 @@ mod tests {
         let src = "# Hello World\n\nSome paragraph.\n";
         let site_dir = std::path::Path::new("../../fixtures/blog-site");
         let result = definition_for_position(src, 0, site_dir);
-        assert!(result.is_none(), "heading line should not produce a definition");
+        assert!(
+            result.is_none(),
+            "heading line should not produce a definition"
+        );
     }
 
     #[test]
@@ -1099,10 +1227,7 @@ mod tests {
         let src = r#"<presemble:insert data="(ref input.body)" />"#;
         let grammar = article_grammar();
         let diags = validate_template_paths(src, &grammar, "article", &no_templates());
-        assert!(
-            diags.is_empty(),
-            "input.body should be valid: {diags:#?}"
-        );
+        assert!(diags.is_empty(), "input.body should be valid: {diags:#?}");
     }
 
     #[test]
@@ -1151,7 +1276,8 @@ mod tests {
         let diags = validate_template_paths("[:ul (cart input.title)]", &grammar, "article", &site);
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert!(diags[0].message.contains("cart"), "{}", diags[0].message);
-        let diags = validate_template_paths("((juxt card nothing) input)", &grammar, "article", &site);
+        let diags =
+            validate_template_paths("((juxt card nothing) input)", &grammar, "article", &site);
         assert_eq!(diags.len(), 1, "{diags:#?}");
         assert!(diags[0].message.contains("nothing"), "{}", diags[0].message);
     }
@@ -1176,8 +1302,15 @@ mod tests {
         for src in cases {
             let diags = validate_template_paths(src, &grammar, "article", &no_templates());
             assert_eq!(diags.len(), 1, "{src}: {diags:#?}");
-            assert!(diags[0].message.contains("nope"), "{src}: {}", diags[0].message);
-            assert!(matches!(diags[0].severity, validation::Severity::Error), "{src}");
+            assert!(
+                diags[0].message.contains("nope"),
+                "{src}: {}",
+                diags[0].message
+            );
+            assert!(
+                matches!(diags[0].severity, validation::Severity::Error),
+                "{src}"
+            );
         }
         // The same positions with a field of the schema: nothing to report.
         let valid = [
@@ -1196,21 +1329,43 @@ mod tests {
     #[test]
     fn html_literal_parenthesis_is_an_unknown_function_diagnostic() {
         let grammar = article_grammar();
-        let diags = validate_template_paths(r#"<a title="(draft)">x</a>"#, &grammar, "article", &no_templates());
+        let diags = validate_template_paths(
+            r#"<a title="(draft)">x</a>"#,
+            &grammar,
+            "article",
+            &no_templates(),
+        );
         assert_eq!(diags.len(), 1, "{diags:#?}");
-        assert!(diags[0].message.contains("unknown function"), "{}", diags[0].message);
+        assert!(
+            diags[0].message.contains("unknown function"),
+            "{}",
+            diags[0].message
+        );
         assert!(diags[0].message.contains("draft"), "{}", diags[0].message);
         // The literal, written as an expression, is fine.
-        let ok = validate_template_paths(r#"<a title='(ref "(draft)")'>x</a>"#, &grammar, "article", &no_templates());
+        let ok = validate_template_paths(
+            r#"<a title='(ref "(draft)")'>x</a>"#,
+            &grammar,
+            "article",
+            &no_templates(),
+        );
         assert!(ok.is_empty(), "{ok:#?}");
     }
 
     #[test]
     fn unbalanced_parenthesis_attribute_warns() {
         let grammar = article_grammar();
-        let diags = validate_template_paths(r#"<a title="(draft">x</a>"#, &grammar, "article", &no_templates());
+        let diags = validate_template_paths(
+            r#"<a title="(draft">x</a>"#,
+            &grammar,
+            "article",
+            &no_templates(),
+        );
         assert_eq!(diags.len(), 1, "{diags:#?}");
-        assert!(matches!(diags[0].severity, validation::Severity::Warning), "{diags:#?}");
+        assert!(
+            matches!(diags[0].severity, validation::Severity::Warning),
+            "{diags:#?}"
+        );
     }
 
     #[test]
@@ -1223,14 +1378,32 @@ mod tests {
             &no_templates(),
         );
         assert_eq!(arity.len(), 1, "{arity:#?}");
-        assert!(arity[0].message.contains("arguments"), "{}", arity[0].message);
+        assert!(
+            arity[0].message.contains("arguments"),
+            "{}",
+            arity[0].message
+        );
 
         // `input.author` is a link slot: a record, not text.
-        let record = validate_template_paths(r#"<a href="(ref input.author)">x</a>"#, &grammar, "article", &no_templates());
+        let record = validate_template_paths(
+            r#"<a href="(ref input.author)">x</a>"#,
+            &grammar,
+            "article",
+            &no_templates(),
+        );
         assert_eq!(record.len(), 1, "{record:#?}");
-        assert!(record[0].message.contains("input.author"), "{}", record[0].message);
+        assert!(
+            record[0].message.contains("input.author"),
+            "{}",
+            record[0].message
+        );
         // Naming a field of the record is fine.
-        let field = validate_template_paths(r#"<a href="(ref input.author.href)">x</a>"#, &grammar, "article", &no_templates());
+        let field = validate_template_paths(
+            r#"<a href="(ref input.author.href)">x</a>"#,
+            &grammar,
+            "article",
+            &no_templates(),
+        );
         assert!(field.is_empty(), "{field:#?}");
     }
 
@@ -1323,7 +1496,11 @@ mod tests {
         let src = r#"<presemble:insert data="input" />"#;
         let cursor_char = src.find("input").unwrap() as u32 + "input".len() as u32;
         let completions = template_completions(src, 0, cursor_char, &grammar, "article");
-        assert_eq!(completions.len(), 1, "should return single 'input' completion: {completions:#?}");
+        assert_eq!(
+            completions.len(),
+            1,
+            "should return single 'input' completion: {completions:#?}"
+        );
         assert_eq!(completions[0].label, "input");
         assert_eq!(completions[0].detail, "content type");
         assert_eq!(completions[0].insert_text, "input");
@@ -1336,7 +1513,11 @@ mod tests {
         let src = r#"<presemble:insert data="" />"#;
         let cursor_char = src.find("data=\"").unwrap() as u32 + "data=\"".len() as u32;
         let completions = template_completions(src, 0, cursor_char, &grammar, "article");
-        assert_eq!(completions.len(), 1, "empty prefix should offer 'input': {completions:#?}");
+        assert_eq!(
+            completions.len(),
+            1,
+            "empty prefix should offer 'input': {completions:#?}"
+        );
         assert_eq!(completions[0].label, "input");
     }
 
@@ -1408,7 +1589,10 @@ mod tests {
         // The first attribute (`href`) is no completion site; the insert is.
         let cursor_char = src.rfind("input.").unwrap() as u32 + "input.".len() as u32;
         let completions = template_completions(src, 0, cursor_char, &grammar, "article");
-        assert!(completions.iter().any(|c| c.label == "title"), "{completions:#?}");
+        assert!(
+            completions.iter().any(|c| c.label == "title"),
+            "{completions:#?}"
+        );
         let after_paren = r#"<presemble:insert data="(" />"#;
         let cursor_char = after_paren.find("(\"").unwrap() as u32 + 1;
         let offered = template_completions(after_paren, 0, cursor_char, &grammar, "article");
@@ -1504,14 +1688,25 @@ mod tests {
         // A heading line without the required {#name} anchor triggers a parse error
         let src = "# Title without anchor\n";
         let diags = validate_schema_with_positions(src);
-        assert_eq!(diags.len(), 1, "invalid schema should produce exactly one diagnostic: {diags:#?}");
+        assert_eq!(
+            diags.len(),
+            1,
+            "invalid schema should produce exactly one diagnostic: {diags:#?}"
+        );
         let diag = &diags[0];
         assert!(
             matches!(diag.severity, validation::Severity::Error),
             "diagnostic should be an error: {diag:#?}"
         );
-        assert!(!diag.message.is_empty(), "error message should not be empty");
-        assert_eq!(diag.start, (0, 0), "error should be positioned at line 0 char 0");
+        assert!(
+            !diag.message.is_empty(),
+            "error message should not be empty"
+        );
+        assert_eq!(
+            diag.start,
+            (0, 0),
+            "error should be positioned at line 0 char 0"
+        );
         assert_eq!(diag.end, (0, 0), "error end should be at line 0 char 0");
         assert!(diag.action.is_none(), "should have no action");
     }
@@ -1589,10 +1784,16 @@ mod tests {
             .iter()
             .find(|c| c.label != "----")
             .expect("should have at least one non-separator completion");
-        assert!(first.preselect, "first missing slot should be preselected: {first:#?}");
+        assert!(
+            first.preselect,
+            "first missing slot should be preselected: {first:#?}"
+        );
         // Only one should be preselected
         let preselected_count = completions.iter().filter(|c| c.preselect).count();
-        assert_eq!(preselected_count, 1, "exactly one completion should be preselected");
+        assert_eq!(
+            preselected_count, 1,
+            "exactly one completion should be preselected"
+        );
     }
 
     #[test]
@@ -1610,7 +1811,10 @@ mod tests {
         );
         // summary should be preselected (first missing)
         let summary_c = completions.iter().find(|c| c.label == "summary").unwrap();
-        assert!(summary_c.preselect, "summary should be preselected when title is filled: {summary_c:#?}");
+        assert!(
+            summary_c.preselect,
+            "summary should be preselected when title is filled: {summary_c:#?}"
+        );
     }
 
     #[test]
@@ -1679,8 +1883,14 @@ mod tests {
             "old heading should be replaced: {result}"
         );
         // Other slots should be preserved
-        assert!(result.contains("Summary text."), "summary should be preserved: {result}");
-        assert!(result.contains("[Author Name]"), "author should be preserved: {result}");
+        assert!(
+            result.contains("Summary text."),
+            "summary should be preserved: {result}"
+        );
+        assert!(
+            result.contains("[Author Name]"),
+            "author should be preserved: {result}"
+        );
     }
 
     #[test]
@@ -1698,13 +1908,17 @@ mod tests {
             "old summary should be replaced: {result}"
         );
         // Title should be preserved
-        assert!(result.contains("# Hello, World"), "title should be preserved: {result}");
+        assert!(
+            result.contains("# Hello, World"),
+            "title should be preserved: {result}"
+        );
     }
 
     #[test]
     fn write_slot_to_string_unknown_slot_returns_error() {
         let grammar = article_grammar();
-        let src = "# Hello\n\nSummary.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
+        let src =
+            "# Hello\n\nSummary.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
         let result = write_slot_to_string(src, "nonexistent_slot", &grammar, "value");
         assert!(result.is_err(), "unknown slot should return Err");
         assert!(
@@ -1725,7 +1939,10 @@ mod tests {
             "result should contain the inserted heading: {result}"
         );
         // Existing content should be preserved
-        assert!(result.contains("Summary text."), "summary should be preserved: {result}");
+        assert!(
+            result.contains("Summary text."),
+            "summary should be preserved: {result}"
+        );
     }
 
     #[test]
@@ -1747,7 +1964,10 @@ mod tests {
                     if content::AsPlainText::plain_text(content) == "New Title"
             )
         });
-        assert!(has_new_title, "parsed document should contain the new heading: {doc:#?}");
+        assert!(
+            has_new_title,
+            "parsed document should contain the new heading: {doc:#?}"
+        );
     }
 
     #[test]
@@ -1786,9 +2006,18 @@ mod tests {
             !result.contains("Second summary paragraph."),
             "second old summary paragraph should be replaced: {result}"
         );
-        assert!(result.contains("# My Title"), "title should be preserved: {result}");
-        assert!(result.contains("[Author Name]"), "author should be preserved: {result}");
-        assert!(result.contains("![cover]"), "cover should be preserved: {result}");
+        assert!(
+            result.contains("# My Title"),
+            "title should be preserved: {result}"
+        );
+        assert!(
+            result.contains("[Author Name]"),
+            "author should be preserved: {result}"
+        );
+        assert!(
+            result.contains("![cover]"),
+            "cover should be preserved: {result}"
+        );
     }
 
     #[test]
@@ -1819,8 +2048,14 @@ mod tests {
             result.contains("[New Author]"),
             "new author should be present: {result}"
         );
-        assert!(result.contains("# My Title"), "title should be preserved: {result}");
-        assert!(result.contains("![cover]"), "cover should be preserved: {result}");
+        assert!(
+            result.contains("# My Title"),
+            "title should be preserved: {result}"
+        );
+        assert!(
+            result.contains("![cover]"),
+            "cover should be preserved: {result}"
+        );
     }
 
     // --- apply_action tests ---
@@ -1829,21 +2064,37 @@ mod tests {
     fn apply_action_insert_slot() {
         let grammar = article_grammar();
         let src = "Summary text.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
-        let result = apply_action(src, &grammar, &SlotAction::InsertSlot {
-            slot_name: "title".to_string(),
-            placeholder_value: "New Title".to_string(),
-        }).unwrap();
-        assert!(result.contains("# New Title"), "should contain heading with # prefix: {result}");
+        let result = apply_action(
+            src,
+            &grammar,
+            &SlotAction::InsertSlot {
+                slot_name: "title".to_string(),
+                placeholder_value: "New Title".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(
+            result.contains("# New Title"),
+            "should contain heading with # prefix: {result}"
+        );
     }
 
     #[test]
     fn apply_action_capitalize() {
         let grammar = article_grammar();
         let src = "# lowercase title\n\nSummary.\n\n[Author](/author/test)\n\n![cover](images/cover.jpg)\n\n----\n";
-        let result = apply_action(src, &grammar, &SlotAction::Capitalize {
-            slot_name: "title".to_string(),
-        }).unwrap();
-        assert!(result.contains("# Lowercase title"), "should capitalize: {result}");
+        let result = apply_action(
+            src,
+            &grammar,
+            &SlotAction::Capitalize {
+                slot_name: "title".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(
+            result.contains("# Lowercase title"),
+            "should capitalize: {result}"
+        );
     }
 
     #[test]
@@ -1866,7 +2117,9 @@ mod tests {
             "body paragraph should NOT be offered (free-form prose): {completions:#?}"
         );
         assert!(
-            completions.iter().any(|c| c.label.starts_with("H") && c.label.ends_with("heading")),
+            completions
+                .iter()
+                .any(|c| c.label.starts_with("H") && c.label.ends_with("heading")),
             "should offer body heading completion after separator: {completions:#?}"
         );
         // Separator should NOT be offered since it's already present

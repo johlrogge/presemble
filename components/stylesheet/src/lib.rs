@@ -139,13 +139,21 @@ mod tests {
     fn import_goes_to_imports() {
         let refs = extract_refs(r#"@import "/reset.css";"#);
         assert_eq!(refs.imports, vec!["/reset.css"]);
-        assert!(refs.asset_urls.is_empty(), "unexpected asset_urls: {:?}", refs.asset_urls);
+        assert!(
+            refs.asset_urls.is_empty(),
+            "unexpected asset_urls: {:?}",
+            refs.asset_urls
+        );
     }
 
     #[test]
     fn url_goes_to_asset_urls() {
         let refs = extract_refs(r#"div { background: url("/font.woff2"); }"#);
-        assert!(refs.imports.is_empty(), "unexpected imports: {:?}", refs.imports);
+        assert!(
+            refs.imports.is_empty(),
+            "unexpected imports: {:?}",
+            refs.imports
+        );
         assert_eq!(refs.asset_urls, vec!["/font.woff2"]);
     }
 
@@ -153,7 +161,11 @@ mod tests {
     fn import_url_goes_to_imports() {
         let refs = extract_refs(r#"@import url("/reset.css");"#);
         assert_eq!(refs.imports, vec!["/reset.css"]);
-        assert!(refs.asset_urls.is_empty(), "unexpected asset_urls: {:?}", refs.asset_urls);
+        assert!(
+            refs.asset_urls.is_empty(),
+            "unexpected asset_urls: {:?}",
+            refs.asset_urls
+        );
     }
 
     #[test]
@@ -174,15 +186,31 @@ mod tests {
             body { background: url(https://example.com/img.png); }
         "#;
         let refs = extract_refs(css);
-        assert!(refs.imports.is_empty(), "unexpected imports: {:?}", refs.imports);
-        assert!(refs.asset_urls.is_empty(), "unexpected asset_urls: {:?}", refs.asset_urls);
+        assert!(
+            refs.imports.is_empty(),
+            "unexpected imports: {:?}",
+            refs.imports
+        );
+        assert!(
+            refs.asset_urls.is_empty(),
+            "unexpected asset_urls: {:?}",
+            refs.asset_urls
+        );
     }
 
     #[test]
     fn data_uris_excluded() {
         let refs = extract_refs("body { background: url(data:image/svg+xml;base64,abc); }");
-        assert!(refs.imports.is_empty(), "unexpected imports: {:?}", refs.imports);
-        assert!(refs.asset_urls.is_empty(), "unexpected asset_urls: {:?}", refs.asset_urls);
+        assert!(
+            refs.imports.is_empty(),
+            "unexpected imports: {:?}",
+            refs.imports
+        );
+        assert!(
+            refs.asset_urls.is_empty(),
+            "unexpected asset_urls: {:?}",
+            refs.asset_urls
+        );
     }
 
     #[test]
@@ -192,8 +220,16 @@ mod tests {
             body { background: url(images/bg.png); }
         "#;
         let refs = extract_refs(css);
-        assert!(refs.imports.is_empty(), "unexpected imports: {:?}", refs.imports);
-        assert!(refs.asset_urls.is_empty(), "unexpected asset_urls: {:?}", refs.asset_urls);
+        assert!(
+            refs.imports.is_empty(),
+            "unexpected imports: {:?}",
+            refs.imports
+        );
+        assert!(
+            refs.asset_urls.is_empty(),
+            "unexpected asset_urls: {:?}",
+            refs.asset_urls
+        );
     }
 
     #[test]
@@ -209,7 +245,11 @@ mod tests {
     #[test]
     fn url_in_rule_block() {
         let refs = extract_refs(r#"div { background: url("/bg.png") }"#);
-        assert!(refs.imports.is_empty(), "unexpected imports: {:?}", refs.imports);
+        assert!(
+            refs.imports.is_empty(),
+            "unexpected imports: {:?}",
+            refs.imports
+        );
         assert_eq!(refs.asset_urls, vec!["/bg.png"]);
     }
 
@@ -236,19 +276,31 @@ mod tests {
     #[test]
     fn css_url_ignores_external() {
         let refs = extract_refs("body { background: url(https://example.com/img.png); }");
-        assert!(refs.asset_urls.is_empty(), "expected empty but got: {:?}", refs.asset_urls);
+        assert!(
+            refs.asset_urls.is_empty(),
+            "expected empty but got: {:?}",
+            refs.asset_urls
+        );
     }
 
     #[test]
     fn css_url_ignores_data_uri() {
         let refs = extract_refs("body { background: url(data:image/svg+xml;base64,abc); }");
-        assert!(refs.asset_urls.is_empty(), "expected empty but got: {:?}", refs.asset_urls);
+        assert!(
+            refs.asset_urls.is_empty(),
+            "expected empty but got: {:?}",
+            refs.asset_urls
+        );
     }
 
     #[test]
     fn css_url_ignores_relative() {
         let refs = extract_refs("body { background: url(images/bg.png); }");
-        assert!(refs.asset_urls.is_empty(), "expected empty but got: {:?}", refs.asset_urls);
+        assert!(
+            refs.asset_urls.is_empty(),
+            "expected empty but got: {:?}",
+            refs.asset_urls
+        );
     }
 
     #[test]

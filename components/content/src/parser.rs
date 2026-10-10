@@ -2,15 +2,15 @@ use crate::document::{
     Align, Blocks, Column, Comment, ContentElement, Document, FlatDocument, Keyword, LinkTarget,
     LinkText, List, ListKind, Spacing,
 };
-use std::borrow::Cow;
 use crate::error::ContentError;
-use crate::inline::{inlines_from_events, InlineContext, Inlines};
+use crate::inline::{InlineContext, Inlines, inlines_from_events};
 use crate::link_expression::{
-    bare_marker, parse_destination, recognise_paragraph, split_marker, LinkExpressionDiagnostic,
+    LinkExpressionDiagnostic, bare_marker, parse_destination, recognise_paragraph, split_marker,
 };
 use crate::slot_assignment::assign_slots;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use schema::{Grammar, HeadingLevel, Span, Spanned};
+use std::borrow::Cow;
 
 /// Convert a byte offset in `src` to a zero-indexed LSP (line, character) Position.
 /// `character` is a UTF-16 code unit offset as required by the LSP specification.
@@ -43,7 +43,10 @@ fn empty_cell() -> Inlines {
 fn cell_from_source(source: &str) -> Inlines {
     let source = source.trim();
     crate::inline::parse_inlines(source, InlineContext::Cell).unwrap_or_else(|_| {
-        Inlines::new(vec![crate::inline::Inline::Text(source.to_string())], InlineContext::Cell)
+        Inlines::new(
+            vec![crate::inline::Inline::Text(source.to_string())],
+            InlineContext::Cell,
+        )
     })
 }
 
@@ -80,14 +83,21 @@ fn table_row_cells(row: &str) -> Vec<&str> {
 /// drops those cells, ADR-062 L16) widens the table: the header is padded with
 /// empty columns, so that no cell is lost. That is canonicalisation, like L19:
 /// the saved table has the extra columns.
-fn table_element(aligns: Vec<Align>, headers: Vec<Inlines>, rows: Vec<Vec<Inlines>>) -> ContentElement {
+fn table_element(
+    aligns: Vec<Align>,
+    headers: Vec<Inlines>,
+    rows: Vec<Vec<Inlines>>,
+) -> ContentElement {
     let width = rows.iter().map(Vec::len).fold(headers.len(), usize::max);
     let mut headers = headers;
     headers.resize_with(width, empty_cell);
     let columns = headers
         .into_iter()
         .enumerate()
-        .map(|(i, header)| Column { header, align: aligns.get(i).copied().unwrap_or_default() })
+        .map(|(i, header)| Column {
+            header,
+            align: aligns.get(i).copied().unwrap_or_default(),
+        })
         .collect();
     let rows = rows
         .into_iter()
@@ -186,7 +196,11 @@ pub(crate) fn paragraph_marker(trimmed: &str) -> Option<ParagraphMarker<'_>> {
     };
     let marker = crate::document::SlotMarker::new(name)?;
     let start = trimmed.len() - name.len() - 3;
-    Some(ParagraphMarker { content, marker, start })
+    Some(ParagraphMarker {
+        content,
+        marker,
+        start,
+    })
 }
 
 /// What is wrong with a paragraph that carries a marker (ADR-060 P1), read
@@ -211,7 +225,10 @@ pub(crate) fn diagnose_paragraph_marker(
             LinkExpressionDiagnostic::MarkerOnOwnLine(name.to_string())
         };
     }
-    diagnose_marker_paragraph(&crate::inline::paragraph_diagnosis_source(content, Some(marker)))
+    diagnose_marker_paragraph(&crate::inline::paragraph_diagnosis_source(
+        content,
+        Some(marker),
+    ))
 }
 
 /// The name of a bare `{#name}` on the last line of `trimmed`, if any.
@@ -360,9 +377,7 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         },
         /// An HTML block (ADR-062); its `Html` events are ignored and its
         /// trimmed source is kept.
-        HtmlBlock {
-            byte_range: std::ops::Range<usize>,
-        },
+        HtmlBlock { byte_range: std::ops::Range<usize> },
         /// A whole paragraph (top level or directly in a container) recognised
         /// from its source as a link expression (ADR-058); every event up to
         /// its end is ignored.
@@ -382,8 +397,12 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
         // irrelevant.
         if matches!(state, State::LinkExpression { .. }) {
             if matches!(event, Event::End(TagEnd::Paragraph))
-                && let State::LinkExpression { text, target, slot, byte_range } =
-                    std::mem::replace(&mut state, State::Idle)
+                && let State::LinkExpression {
+                    text,
+                    target,
+                    slot,
+                    byte_range,
+                } = std::mem::replace(&mut state, State::Idle)
             {
                 current(&mut root, &mut open).elements.push_back(Spanned {
                     node: ContentElement::LinkExpression { text, target, slot },
@@ -416,8 +435,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 || (*implicit && ends_implicit_paragraph(&event));
             if ends {
                 let explicit_end = matches!(event, Event::End(TagEnd::Paragraph));
-                if let State::Paragraph { events, byte_range, implicit } =
-                    std::mem::replace(&mut state, State::Idle)
+                if let State::Paragraph {
+                    events,
+                    byte_range,
+                    implicit,
+                } = std::mem::replace(&mut state, State::Idle)
                 {
                     let prefixes = open_prefixes(&open);
                     let elements = &mut current(&mut root, &mut open).elements;
@@ -431,7 +453,12 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     continue;
                 }
             } else {
-                if let State::Paragraph { events, byte_range, implicit } = &mut state {
+                if let State::Paragraph {
+                    events,
+                    byte_range,
+                    implicit,
+                } = &mut state
+                {
                     if *implicit {
                         byte_range.end = range.end;
                     }
@@ -452,8 +479,8 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                 // Disk input must never take the server down, so release
                 // builds keep the whole source as literal text; debug and
                 // test builds fail loudly.
-                let (content, marker) = crate::inline::read_heading_source(&source)
-                    .unwrap_or_else(|| {
+                let (content, marker) =
+                    crate::inline::read_heading_source(&source).unwrap_or_else(|| {
                         let line = input[..byte_range.start].matches('\n').count() + 1;
                         debug_assert!(
                             false,
@@ -464,7 +491,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                         crate::inline::literal_heading_content(&source)
                     });
                 current(&mut root, &mut open).elements.push_back(Spanned {
-                    node: ContentElement::Heading { level: *level, content, marker },
+                    node: ContentElement::Heading {
+                        level: *level,
+                        content,
+                        marker,
+                    },
                     span: Span::from(byte_range.clone()),
                 });
                 state = State::Idle;
@@ -496,9 +527,18 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     read_link_expression_paragraph(&container_source(raw, &open_prefixes(&open)))
                 });
                 if let Some((text, target, slot)) = link_expression {
-                    state = State::LinkExpression { text, target, slot, byte_range: range };
+                    state = State::LinkExpression {
+                        text,
+                        target,
+                        slot,
+                        byte_range: range,
+                    };
                 } else {
-                    state = State::Paragraph { events: Vec::new(), byte_range: range, implicit: false };
+                    state = State::Paragraph {
+                        events: Vec::new(),
+                        byte_range: range,
+                        implicit: false,
+                    };
                 }
             }
 
@@ -510,7 +550,11 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             | Event::HardBreak
             | Event::InlineHtml(_)
             | Event::Start(
-                Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } | Tag::Image { .. },
+                Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Link { .. }
+                | Tag::Image { .. },
             ) if matches!(state, State::Idle) && matches!(open.last(), Some(Open::Item { .. })) => {
                 state = State::Paragraph {
                     events: vec![(event.into_static(), range.clone())],
@@ -534,15 +578,26 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     matches!(state, State::Idle),
                     "invariant: a blockquote starts between blocks"
                 );
-                let col = column_of(input, range.start) + 1 + usize::from(input[range.start..].starts_with("> "));
-                open.push(Open::Quote { blocks: Blocks::default(), range, col });
+                let col = column_of(input, range.start)
+                    + 1
+                    + usize::from(input[range.start..].starts_with("> "));
+                open.push(Open::Quote {
+                    blocks: Blocks::default(),
+                    range,
+                    col,
+                });
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 debug_assert!(
                     matches!(state, State::Idle),
                     "invariant: a blockquote ends between blocks"
                 );
-                if let Some(Open::Quote { mut blocks, range: opened, .. }) = open.pop() {
+                if let Some(Open::Quote {
+                    mut blocks,
+                    range: opened,
+                    ..
+                }) = open.pop()
+                {
                     drop_list_separators(&mut blocks);
                     // An empty quote is kept (ADR-059 §13).
                     current(&mut root, &mut open).elements.push_back(Spanned {
@@ -550,7 +605,10 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                         span: Span::from(opened),
                     });
                 } else {
-                    debug_assert!(false, "invariant: a blockquote ends the blockquote that is open");
+                    debug_assert!(
+                        false,
+                        "invariant: a blockquote ends the blockquote that is open"
+                    );
                 }
             }
 
@@ -566,11 +624,19 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     Some(start) => ListKind::Ordered { start },
                     None => ListKind::Bullet,
                 };
-                open.push(Open::List { kind, loose: false, items: Vec::new(), range });
+                open.push(Open::List {
+                    kind,
+                    loose: false,
+                    items: Vec::new(),
+                    range,
+                });
             }
             Event::Start(Tag::Item) => {
                 let col = item_content_column(input, range.start);
-                open.push(Open::Item { blocks: Blocks::default(), col });
+                open.push(Open::Item {
+                    blocks: Blocks::default(),
+                    col,
+                });
             }
             Event::End(TagEnd::Item) => {
                 debug_assert!(
@@ -593,9 +659,24 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     matches!(state, State::Idle),
                     "invariant: a list ends between blocks"
                 );
-                if let Some(Open::List { kind, loose, items, range: opened }) = open.pop() {
-                    let spacing = if loose { Spacing::Loose } else { Spacing::Tight };
-                    let list = List { kind, spacing, items }.normalised();
+                if let Some(Open::List {
+                    kind,
+                    loose,
+                    items,
+                    range: opened,
+                }) = open.pop()
+                {
+                    let spacing = if loose {
+                        Spacing::Loose
+                    } else {
+                        Spacing::Tight
+                    };
+                    let list = List {
+                        kind,
+                        spacing,
+                        items,
+                    }
+                    .normalised();
                     current(&mut root, &mut open).elements.push_back(Spanned {
                         node: ContentElement::List { list },
                         span: Span::from(opened),
@@ -621,10 +702,15 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     match Comment::new(source) {
                         Some(comment) => container.comments.push_back((
                             container.elements.len(),
-                            Spanned { node: comment, span: Span::from(byte_range) },
+                            Spanned {
+                                node: comment,
+                                span: Span::from(byte_range),
+                            },
                         )),
                         None => container.elements.push_back(Spanned {
-                            node: ContentElement::HtmlBlock { source: source.to_string() },
+                            node: ContentElement::HtmlBlock {
+                                source: source.to_string(),
+                            },
                             span: Span::from(byte_range),
                         }),
                     }
@@ -637,10 +723,19 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
                     _ => None,
                 };
-                state = State::CodeBlock { language, code: String::new(), byte_range: range };
+                state = State::CodeBlock {
+                    language,
+                    code: String::new(),
+                    byte_range: range,
+                };
             }
             Event::End(TagEnd::CodeBlock) => {
-                if let State::CodeBlock { language, mut code, byte_range } = state {
+                if let State::CodeBlock {
+                    language,
+                    mut code,
+                    byte_range,
+                } = state
+                {
                     // Canonical `code` excludes the line terminator before the
                     // closing fence; `serialize_element` re-adds it.
                     if code.ends_with("\r\n") {
@@ -668,13 +763,23 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::Start(Tag::TableHead) => {}
             Event::End(TagEnd::TableHead) => {
-                if let State::Table { ref mut headers, ref mut current_row, .. } = state {
+                if let State::Table {
+                    ref mut headers,
+                    ref mut current_row,
+                    ..
+                } = state
+                {
                     *headers = std::mem::take(current_row);
                 }
             }
             Event::Start(Tag::TableRow) | Event::Start(Tag::TableCell) => {}
             Event::End(TagEnd::TableCell) => {
-                if let State::Table { ref mut current_row, ref mut cell_events, .. } = state {
+                if let State::Table {
+                    ref mut current_row,
+                    ref mut cell_events,
+                    ..
+                } = state
+                {
                     // Reading a cell cannot fail: the events are inline.
                     let events = std::mem::take(cell_events);
                     current_row.push(inlines_from_events(events, InlineContext::Cell));
@@ -682,7 +787,13 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
             }
             Event::End(TagEnd::TableRow) => {
                 let prefixes = open_prefixes(&open);
-                if let State::Table { ref mut rows, ref mut current_row, ref headers, .. } = state {
+                if let State::Table {
+                    ref mut rows,
+                    ref mut current_row,
+                    ref headers,
+                    ..
+                } = state
+                {
                     let mut row = std::mem::take(current_row);
                     // GFM keeps no cell beyond the header's width: the rest
                     // are read from the row's source (L16).
@@ -691,13 +802,24 @@ pub fn parse_document(input: &str) -> Result<FlatDocument, ContentError> {
                     let cells = table_row_cells(&source);
                     if cells.len() > headers.len() {
                         row.resize_with(headers.len(), empty_cell);
-                        row.extend(cells[headers.len()..].iter().map(|cell| cell_from_source(cell)));
+                        row.extend(
+                            cells[headers.len()..]
+                                .iter()
+                                .map(|cell| cell_from_source(cell)),
+                        );
                     }
                     rows.push(row);
                 }
             }
             Event::End(TagEnd::Table) => {
-                if let State::Table { aligns, headers, rows, byte_range, .. } = state {
+                if let State::Table {
+                    aligns,
+                    headers,
+                    rows,
+                    byte_range,
+                    ..
+                } = state
+                {
                     current(&mut root, &mut open).elements.push_back(Spanned {
                         node: table_element(aligns, headers, rows),
                         span: Span::from(byte_range),
@@ -752,7 +874,10 @@ fn drop_list_separators(blocks: &mut Blocks) {
                 .comments
                 .iter()
                 .any(|(i, c)| *i == k && c.node.as_str() == LIST_SEPARATOR);
-            alone && separator && is_list_of_kind(k - 1).is_some() && is_list_of_kind(k - 1) == is_list_of_kind(k)
+            alone
+                && separator
+                && is_list_of_kind(k - 1).is_some()
+                && is_list_of_kind(k - 1) == is_list_of_kind(k)
         })
         .collect();
     if !drop.is_empty() {
@@ -765,11 +890,20 @@ fn drop_list_separators(blocks: &mut Blocks) {
 enum Open {
     /// A blockquote. `col` is the column its content starts at, on its first
     /// line.
-    Quote { blocks: Blocks, range: std::ops::Range<usize>, col: usize },
+    Quote {
+        blocks: Blocks,
+        range: std::ops::Range<usize>,
+        col: usize,
+    },
     /// A list: it holds items, never blocks. `loose` is set when an item
     /// holds a paragraph directly (pulldown leaves that tag out of a tight
     /// list).
-    List { kind: ListKind, loose: bool, items: Vec<Blocks>, range: std::ops::Range<usize> },
+    List {
+        kind: ListKind,
+        loose: bool,
+        items: Vec<Blocks>,
+        range: std::ops::Range<usize>,
+    },
     /// A list item. `col` is its content column, on its first line.
     Item { blocks: Blocks, col: usize },
 }
@@ -833,9 +967,16 @@ fn item_content_column(input: &str, at: usize) -> usize {
     let digits = marker.bytes().take_while(u8::is_ascii_digit).count();
     let marker_len = if digits > 0 { digits + 1 } else { 1 };
     let after = marker.get(marker_len..).unwrap_or_default();
-    let spaces = after.bytes().take_while(|b| *b == b' ' || *b == b'\t').count();
+    let spaces = after
+        .bytes()
+        .take_while(|b| *b == b' ' || *b == b'\t')
+        .count();
     let blank = after[spaces..].is_empty() || after[spaces..].starts_with(['\n', '\r']);
-    let pad = if blank || spaces >= 5 { 1 } else { spaces.max(1) };
+    let pad = if blank || spaces >= 5 {
+        1
+    } else {
+        spaces.max(1)
+    };
     column_of(input, at) + lead + marker_len + pad
 }
 
@@ -964,7 +1105,11 @@ fn link_element(text: String, href: String) -> ContentElement {
         let decoded = href.replace("%20", " ");
         if let Ok(target) = parse_link_target(&decoded) {
             // Legacy spellings never carry a slot marker.
-            return ContentElement::LinkExpression { text: link_text, target, slot: None };
+            return ContentElement::LinkExpression {
+                text: link_text,
+                target,
+                slot: None,
+            };
         }
     }
     let content = Inlines::new(
@@ -975,7 +1120,10 @@ fn link_element(text: String, href: String) -> ContentElement {
         }],
         InlineContext::Paragraph,
     );
-    ContentElement::Paragraph { content, marker: None }
+    ContentElement::Paragraph {
+        content,
+        marker: None,
+    }
 }
 
 type ParagraphEvents = Vec<(Event<'static>, std::ops::Range<usize>)>;
@@ -992,8 +1140,9 @@ fn sole_legacy_link_expression(events: &ParagraphEvents) -> Option<Spanned<Conte
         Event::InlineHtml(h) | Event::Html(h) => Comment::new(h).is_some(),
         _ => false,
     };
-    let significant: Vec<usize> =
-        (0..events.len()).filter(|&i| !is_trivia(&events[i].0)).collect();
+    let significant: Vec<usize> = (0..events.len())
+        .filter(|&i| !is_trivia(&events[i].0))
+        .collect();
     let (&first, &last) = (significant.first()?, significant.last()?);
     if first == last {
         return None;
@@ -1019,8 +1168,10 @@ fn sole_legacy_link_expression(events: &ParagraphEvents) -> Option<Spanned<Conte
     match (&events[first].0, &events[last].0) {
         (Event::Start(Tag::Link { dest_url, .. }), Event::End(TagEnd::Link)) if !has(nested) => {
             let node = link_element(inner_text(), dest_url.to_string());
-            matches!(node, ContentElement::LinkExpression { .. })
-                .then(|| Spanned { node, span: Span::from(events[first].1.clone()) })
+            matches!(node, ContentElement::LinkExpression { .. }).then(|| Spanned {
+                node,
+                span: Span::from(events[first].1.clone()),
+            })
         }
         _ => None,
     }
@@ -1029,7 +1180,11 @@ fn sole_legacy_link_expression(events: &ParagraphEvents) -> Option<Spanned<Conte
 /// `events` without the trailing marker that starts at byte `cut` of the
 /// input and is written `literal`. `None` when the marker cannot be cut off
 /// the events (the event that holds it does not end in it as text).
-fn without_marker(events: ParagraphEvents, cut: usize, literal: &str) -> Option<Vec<Event<'static>>> {
+fn without_marker(
+    events: ParagraphEvents,
+    cut: usize,
+    literal: &str,
+) -> Option<Vec<Event<'static>>> {
     let mut out: Vec<Event<'static>> = Vec::new();
     for (event, range) in events {
         if range.end <= cut {
@@ -1089,7 +1244,7 @@ fn finish_paragraph(
     prefixes: &[Prefix],
     elements: &mut im::Vector<Spanned<ContentElement>>,
 ) {
-    use crate::inline::{inlines_from_events, InlineContext};
+    use crate::inline::{InlineContext, inlines_from_events};
     let raw = input.get(byte_range.clone()).unwrap_or_default();
     // Inside containers the prefixes of later lines are not content.
     let source = container_source(raw, prefixes);
@@ -1107,8 +1262,10 @@ fn finish_paragraph(
     }
     let (content, marker) = match found {
         None => {
-            let content =
-                inlines_from_events(events.into_iter().map(|(event, _)| event), InlineContext::Paragraph);
+            let content = inlines_from_events(
+                events.into_iter().map(|(event, _)| event),
+                InlineContext::Paragraph,
+            );
             (content, None)
         }
         Some(found) => {
@@ -1206,7 +1363,11 @@ fn heading_source(raw: &str) -> String {
         .enumerate()
         .map(|(i, line)| {
             let line = line.trim_matches([' ', '\t']);
-            if i + 1 < count { line.strip_suffix('\\').unwrap_or(line) } else { line }
+            if i + 1 < count {
+                line.strip_suffix('\\').unwrap_or(line)
+            } else {
+                line
+            }
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -1234,9 +1395,8 @@ fn convert_heading_level(
         pulldown_cmark::HeadingLevel::H5 => 5,
         pulldown_cmark::HeadingLevel::H6 => 6,
     };
-    HeadingLevel::new(numeric).ok_or_else(|| {
-        ContentError::ParseError(format!("invalid heading level: {numeric}"))
-    })
+    HeadingLevel::new(numeric)
+        .ok_or_else(|| ContentError::ParseError(format!("invalid heading level: {numeric}")))
 }
 
 #[cfg(test)]
@@ -1266,9 +1426,14 @@ mod tests {
         let block = &doc.elements[1];
         assert_eq!(
             block.node,
-            ContentElement::HtmlBlock { source: "<div class=\"x\">\n  y\n</div>".to_string() }
+            ContentElement::HtmlBlock {
+                source: "<div class=\"x\">\n  y\n</div>".to_string()
+            }
         );
-        assert_eq!(src[block.span.start..block.span.end].trim_end(), "<div class=\"x\">\n  y\n</div>");
+        assert_eq!(
+            src[block.span.start..block.span.end].trim_end(),
+            "<div class=\"x\">\n  y\n</div>"
+        );
     }
 
     /// L12 resolved (ADR-062): comment-only HTML is trivia, never an element,
@@ -1280,8 +1445,13 @@ mod tests {
         assert_eq!(doc.comments.len(), 1);
         assert_eq!(doc.comments[0].0, 0);
         assert_eq!(doc.comments[0].1.node.as_str(), "<!-- note -->");
-        let grammar = schema::Grammar { preamble: vec![], body: None };
-        let saved = crate::serializer::serialize_document(&parse_and_assign("<!-- note -->\n", &grammar).unwrap());
+        let grammar = schema::Grammar {
+            preamble: vec![],
+            body: None,
+        };
+        let saved = crate::serializer::serialize_document(
+            &parse_and_assign("<!-- note -->\n", &grammar).unwrap(),
+        );
         assert_eq!(saved, "<!-- note -->\n");
 
         let doc = parse_document("<!--\nmulti\n\nline\n-->\n").unwrap();
@@ -1294,7 +1464,10 @@ mod tests {
         // A comment is anchored by the index of the element it precedes.
         let doc = parse_document("A.\n\n<!-- note -->\n\nB.\n").unwrap();
         assert_element_count(&doc, 2);
-        assert_eq!(doc.comments.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            doc.comments.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     /// pulldown-cmark 0.12: a type-2 block (`<!--`) ends on the first line
@@ -1307,14 +1480,20 @@ mod tests {
             assert_eq!(doc.comments.len(), 1, "{comment:?}");
             assert_eq!(doc.comments[0].1.node.as_str(), comment);
             assert_eq!(
-                doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+                doc.elements
+                    .iter()
+                    .map(|e| e.node.clone())
+                    .collect::<Vec<_>>(),
                 vec![ContentElement::paragraph_from_markdown("After.")],
                 "{comment:?}"
             );
         }
         let doc = parse_document("Para line\n<!-- c -->\n").unwrap();
         assert_element_count(&doc, 1);
-        assert_eq!(doc.comments.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            doc.comments.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     /// L13 (flipped, ADR-059 stage 8): HTML inside a blockquote is kept, as in
@@ -1323,13 +1502,25 @@ mod tests {
     #[test]
     fn html_inside_a_blockquote_is_kept_and_reported_l13() {
         let doc = parse_document("> <div>\n> x\n> </div>\n").unwrap();
-        let blocks = match doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>().as_slice() {
+        let blocks = match doc
+            .elements
+            .iter()
+            .map(|e| e.node.clone())
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
             [ContentElement::Blockquote { blocks }] => blocks.clone(),
             other => panic!("{other:#?}"),
         };
         assert_eq!(
-            blocks.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
-            vec![ContentElement::HtmlBlock { source: "<div>\nx\n</div>".to_string() }]
+            blocks
+                .elements
+                .iter()
+                .map(|e| e.node.clone())
+                .collect::<Vec<_>>(),
+            vec![ContentElement::HtmlBlock {
+                source: "<div>\nx\n</div>".to_string()
+            }]
         );
 
         let first = crate::serializer::serialize_elements(&doc.elements);
@@ -1348,7 +1539,10 @@ mod tests {
         assert_eq!(first, "# a <b>x</b>");
         let again = parse_document(&first).unwrap();
         assert_eq!(again.elements[0].node, doc.elements[0].node);
-        assert_eq!(crate::serializer::serialize_elements(&again.elements), first);
+        assert_eq!(
+            crate::serializer::serialize_elements(&again.elements),
+            first
+        );
     }
 
     /// Writes the single block of `md` back.
@@ -1359,7 +1553,10 @@ mod tests {
     /// L17 resolved (ADR-063): a code span in a heading keeps its backticks.
     #[test]
     fn heading_code_span_keeps_backticks_l17() {
-        assert_eq!(written("## The `<div>` element\n"), "## The `<div>` element");
+        assert_eq!(
+            written("## The `<div>` element\n"),
+            "## The `<div>` element"
+        );
     }
 
     #[test]
@@ -1383,7 +1580,11 @@ mod tests {
             let line = pair[0].as_str().unwrap();
             let doc = parse_document(&format!("{line}\n")).unwrap();
             assert_eq!(doc.elements.len(), 1, "{line:?}: {:#?}", doc.elements);
-            assert_eq!(doc.elements[0].node.text().as_deref(), pair[1].as_str(), "{line:?}");
+            assert_eq!(
+                doc.elements[0].node.text().as_deref(),
+                pair[1].as_str(),
+                "{line:?}"
+            );
         }
     }
 
@@ -1433,12 +1634,26 @@ mod tests {
     fn image_bearing_paragraph_keeps_a_literal_angle_bracket() {
         let doc = parse_document("![i](a.png) a \\<b>\n").unwrap();
         let nodes: Vec<ContentElement> = doc.elements.iter().map(|e| e.node.clone()).collect();
-        assert_eq!(nodes, vec![ContentElement::paragraph_from_markdown("![i](a.png) a \\<b>")]);
-        let ContentElement::Paragraph { content, .. } = &nodes[0] else { panic!("{nodes:?}") };
-        assert_eq!(content.as_slice().last(), Some(&Inline::Text(" a <b>".to_string())));
+        assert_eq!(
+            nodes,
+            vec![ContentElement::paragraph_from_markdown(
+                "![i](a.png) a \\<b>"
+            )]
+        );
+        let ContentElement::Paragraph { content, .. } = &nodes[0] else {
+            panic!("{nodes:?}")
+        };
+        assert_eq!(
+            content.as_slice().last(),
+            Some(&Inline::Text(" a <b>".to_string()))
+        );
         let saved = crate::serializer::serialize_elements(&doc.elements);
-        let again: Vec<ContentElement> =
-            parse_document(&saved).unwrap().elements.iter().map(|e| e.node.clone()).collect();
+        let again: Vec<ContentElement> = parse_document(&saved)
+            .unwrap()
+            .elements
+            .iter()
+            .map(|e| e.node.clone())
+            .collect();
         assert_eq!(again, nodes, "{saved:?}");
     }
 
@@ -1452,10 +1667,17 @@ mod tests {
         };
         assert_eq!(nodes.len(), 1, "{nodes:?}");
         assert_eq!(*marker, None, "an escaped marker is literal text");
-        assert_eq!(content.as_slice().first(), Some(&Inline::Text("Text {#x} ".to_string())));
+        assert_eq!(
+            content.as_slice().first(),
+            Some(&Inline::Text("Text {#x} ".to_string()))
+        );
         let saved = crate::serializer::serialize_elements(&doc.elements);
-        let again: Vec<ContentElement> =
-            parse_document(&saved).unwrap().elements.iter().map(|e| e.node.clone()).collect();
+        let again: Vec<ContentElement> = parse_document(&saved)
+            .unwrap()
+            .elements
+            .iter()
+            .map(|e| e.node.clone())
+            .collect();
         assert_eq!(again, nodes, "{saved:?}");
     }
 
@@ -1464,10 +1686,15 @@ mod tests {
     fn inline_html_in_headings_and_blockquotes_is_kept() {
         let doc = parse_document("## a <b>x</b>\n\n> q <i>y</i> z\n").unwrap();
         assert_eq!(
-            doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            doc.elements
+                .iter()
+                .map(|e| e.node.clone())
+                .collect::<Vec<_>>(),
             vec![
                 ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), "a <b>x</b>"),
-                quote(vec![ContentElement::paragraph_from_markdown("q <i>y</i> z")]),
+                quote(vec![ContentElement::paragraph_from_markdown(
+                    "q <i>y</i> z"
+                )]),
             ]
         );
     }
@@ -1476,7 +1703,13 @@ mod tests {
     fn quote(children: Vec<ContentElement>) -> ContentElement {
         ContentElement::Blockquote {
             blocks: Blocks::from_elements(
-                children.into_iter().map(|node| Spanned { node, span: Span { start: 0, end: 0 } }).collect(),
+                children
+                    .into_iter()
+                    .map(|node| Spanned {
+                        node,
+                        span: Span { start: 0, end: 0 },
+                    })
+                    .collect(),
             ),
         }
     }
@@ -1493,7 +1726,10 @@ mod tests {
                         Blocks::from_elements(
                             blocks
                                 .into_iter()
-                                .map(|node| Spanned { node, span: Span { start: 0, end: 0 } })
+                                .map(|node| Spanned {
+                                    node,
+                                    span: Span { start: 0, end: 0 },
+                                })
                                 .collect(),
                         )
                     })
@@ -1504,7 +1740,11 @@ mod tests {
 
     /// A tight bullet list with one paragraph per item.
     fn tight_bullets(items: &[&str]) -> ContentElement {
-        list(ListKind::Bullet, Spacing::Tight, items.iter().map(|s| vec![para(s)]).collect())
+        list(
+            ListKind::Bullet,
+            Spacing::Tight,
+            items.iter().map(|s| vec![para(s)]).collect(),
+        )
     }
 
     /// A paragraph of only inline HTML has no text events; it is kept.
@@ -1513,7 +1753,10 @@ mod tests {
         let src = "<img src=a> <img src=b>";
         let doc = parse_document(&format!("{src}\n")).unwrap();
         assert_eq!(
-            doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            doc.elements
+                .iter()
+                .map(|e| e.node.clone())
+                .collect::<Vec<_>>(),
             vec![ContentElement::paragraph_from_markdown(src)]
         );
         assert_eq!(crate::serializer::serialize_elements(&doc.elements), src);
@@ -1525,11 +1768,24 @@ mod tests {
     #[test]
     fn inline_html_in_links_and_alt_text_is_kept() {
         let nodes = |md: &str| -> Vec<ContentElement> {
-            parse_document(md).unwrap().elements.iter().map(|e| e.node.clone()).collect()
+            parse_document(md)
+                .unwrap()
+                .elements
+                .iter()
+                .map(|e| e.node.clone())
+                .collect()
         };
-        for md in ["[a <b>x</b>](/p)", "![a <b>x</b>](i.png)", "t <b>x</b> ![i](i.png)"] {
+        for md in [
+            "[a <b>x</b>](/p)",
+            "![a <b>x</b>](i.png)",
+            "t <b>x</b> ![i](i.png)",
+        ] {
             let parsed = nodes(&format!("{md}\n"));
-            assert_eq!(parsed, vec![ContentElement::paragraph_from_markdown(md)], "{md:?}");
+            assert_eq!(
+                parsed,
+                vec![ContentElement::paragraph_from_markdown(md)],
+                "{md:?}"
+            );
             assert!(
                 crate::serializer::serialize_element(&parsed[0]).contains("<b>"),
                 "the HTML is kept: {md:?}"
@@ -1544,7 +1800,11 @@ mod tests {
         let doc = parse_document("# My Title").unwrap();
         assert_element_count(&doc, 1);
         match &doc.elements[0].node {
-            ContentElement::Heading { level, content, marker } => {
+            ContentElement::Heading {
+                level,
+                content,
+                marker,
+            } => {
                 assert_eq!(level.value(), 1, "expected H1");
                 assert_eq!(content.as_slice(), &[Inline::Text("My Title".to_string())]);
                 assert_eq!(*marker, None);
@@ -1559,15 +1819,22 @@ mod tests {
     fn heading_marker_is_structural() {
         let doc = parse_document("## Intro {#intro}\n\n## Intro \\{#x}\n").unwrap();
         match &doc.elements[0].node {
-            ContentElement::Heading { content, marker, .. } => {
+            ContentElement::Heading {
+                content, marker, ..
+            } => {
                 assert_eq!(content.as_slice(), &[Inline::Text("Intro".to_string())]);
                 assert_eq!(marker.as_ref().map(|m| m.as_str()), Some("intro"));
             }
             other => panic!("expected Heading, got {other:?}"),
         }
         match &doc.elements[1].node {
-            ContentElement::Heading { content, marker, .. } => {
-                assert_eq!(content.as_slice(), &[Inline::Text("Intro {#x}".to_string())]);
+            ContentElement::Heading {
+                content, marker, ..
+            } => {
+                assert_eq!(
+                    content.as_slice(),
+                    &[Inline::Text("Intro {#x}".to_string())]
+                );
                 assert_eq!(*marker, None);
             }
             other => panic!("expected Heading, got {other:?}"),
@@ -1637,7 +1904,10 @@ mod tests {
         assert_element_count(&doc, 1);
         match &doc.elements[0].node {
             ContentElement::Paragraph { content, marker } => {
-                assert_eq!(content.as_slice(), &[Inline::Text("Hello, world.".to_string())]);
+                assert_eq!(
+                    content.as_slice(),
+                    &[Inline::Text("Hello, world.".to_string())]
+                );
                 assert_eq!(*marker, None);
             }
             other => panic!("expected Paragraph, got {other:?}"),
@@ -1675,7 +1945,10 @@ mod tests {
         let doc = parse_document("![](images/no-alt.png)").unwrap();
         assert_element_count(&doc, 1);
         let image = doc.elements[0].node.sole_image().expect("a lone image");
-        assert!(image.alt.is_empty(), "alt should be empty when the alt text is empty");
+        assert!(
+            image.alt.is_empty(),
+            "alt should be empty when the alt text is empty"
+        );
         assert_eq!(image.source, "images/no-alt.png");
     }
 
@@ -1685,7 +1958,11 @@ mod tests {
     fn image_alt_formatting_and_title_are_kept() {
         let doc = parse_document("![*a* cat](c.png \"t\")").unwrap();
         let image = doc.elements[0].node.sole_image().expect("a lone image");
-        assert!(matches!(image.alt.as_slice()[0], Inline::Emph(_)), "{:?}", image.alt);
+        assert!(
+            matches!(image.alt.as_slice()[0], Inline::Emph(_)),
+            "{:?}",
+            image.alt
+        );
         assert_eq!(image.title.as_deref(), Some("t"));
     }
 
@@ -1695,7 +1972,10 @@ mod tests {
     fn link_produces_a_paragraph_of_shape_sole_link() {
         let doc = parse_document("[Visit Rust](https://rust-lang.org)").unwrap();
         assert_element_count(&doc, 1);
-        assert!(matches!(doc.elements[0].node, ContentElement::Paragraph { .. }));
+        assert!(matches!(
+            doc.elements[0].node,
+            ContentElement::Paragraph { .. }
+        ));
         let link = doc.elements[0].node.sole_link().expect("a lone link");
         assert_eq!(link.text.plain_text(), "Visit Rust");
         assert_eq!(link.destination, "https://rust-lang.org");
@@ -1705,7 +1985,11 @@ mod tests {
     fn link_text_is_captured() {
         let doc = parse_document("[Author Name](/authors/name)").unwrap();
         let link = doc.elements[0].node.sole_link().expect("a lone link");
-        assert_eq!(link.text.plain_text(), "Author Name", "link text should match anchor text");
+        assert_eq!(
+            link.text.plain_text(),
+            "Author Name",
+            "link text should match anchor text"
+        );
     }
 
     /// L6, resolved by stage 5b: a link's text keeps its formatting, and its
@@ -1714,7 +1998,11 @@ mod tests {
     fn link_text_formatting_and_title_are_kept() {
         let doc = parse_document("[**a** b](/x \"t\")").unwrap();
         let link = doc.elements[0].node.sole_link().expect("a lone link");
-        assert!(matches!(link.text.as_slice()[0], Inline::Strong(_)), "{:?}", link.text);
+        assert!(
+            matches!(link.text.as_slice()[0], Inline::Strong(_)),
+            "{:?}",
+            link.text
+        );
         assert_eq!(link.title.as_deref(), Some("t"));
     }
 
@@ -1739,7 +2027,10 @@ mod tests {
         let els = nodes("| ![i](a.png) | b |\n|---|---|\n| c | ![j](b.png) |\n");
         assert_eq!(
             els,
-            vec![crate::document::table(&["![i](a.png)", "b"], &[&["c", "![j](b.png)"]])]
+            vec![crate::document::table(
+                &["![i](a.png)", "b"],
+                &[&["c", "![j](b.png)"]]
+            )]
         );
     }
 
@@ -1784,13 +2075,23 @@ mod tests {
     #[test]
     fn a_link_in_a_blockquote_stays_in_the_blockquote() {
         let els = nodes("> see [a](/a) here\n");
-        assert_eq!(els, vec![quote(vec![ContentElement::paragraph_from_markdown("see [a](/a) here")])]);
+        assert_eq!(
+            els,
+            vec![quote(vec![ContentElement::paragraph_from_markdown(
+                "see [a](/a) here"
+            )])]
+        );
     }
 
     #[test]
     fn an_image_in_a_blockquote_stays_in_the_blockquote() {
         let els = nodes("> see ![i](a.png) here\n");
-        assert_eq!(els, vec![quote(vec![ContentElement::paragraph_from_markdown("see ![i](a.png) here")])]);
+        assert_eq!(
+            els,
+            vec![quote(vec![ContentElement::paragraph_from_markdown(
+                "see ![i](a.png) here"
+            )])]
+        );
     }
 
     // ── Blockquotes hold blocks (ADR-059 stage 8.1) ──────────────────────────
@@ -1853,19 +2154,38 @@ mod tests {
     /// D1: a quote's paragraphs are read as at the top level.
     #[test]
     fn markers_and_link_expressions_in_a_blockquote_read_as_at_top_level() {
-        let els = nodes("> q {#x}\n>\n> a\n> b {#y}\n>\n> [posts](:post)\n>\n> [t](->> :post (take 2)) {#news}\n");
+        let els = nodes(
+            "> q {#x}\n>\n> a\n> b {#y}\n>\n> [posts](:post)\n>\n> [t](->> :post (take 2)) {#news}\n",
+        );
         let children = quote_children(&els[0]);
         assert_eq!(children.len(), 4, "{children:?}");
         let marker = |c: &ContentElement| match c {
-            ContentElement::Paragraph { marker, .. } => marker.as_ref().map(|m| m.as_str().to_string()),
+            ContentElement::Paragraph { marker, .. } => {
+                marker.as_ref().map(|m| m.as_str().to_string())
+            }
             other => panic!("{other:?}"),
         };
         assert_eq!(marker(&children[0]).as_deref(), Some("x"));
         assert_eq!(marker(&children[1]).as_deref(), Some("y"));
-        assert!(matches!(children[2], ContentElement::LinkExpression { slot: None, .. }), "{:?}", children[2]);
-        assert!(matches!(children[3], ContentElement::LinkExpression { slot: Some(_), .. }), "{:?}", children[3]);
+        assert!(
+            matches!(
+                children[2],
+                ContentElement::LinkExpression { slot: None, .. }
+            ),
+            "{:?}",
+            children[2]
+        );
+        assert!(
+            matches!(
+                children[3],
+                ContentElement::LinkExpression { slot: Some(_), .. }
+            ),
+            "{:?}",
+            children[3]
+        );
         // The same source at the top level reads the same.
-        let top = nodes("q {#x}\n\na\nb {#y}\n\n[posts](:post)\n\n[t](->> :post (take 2)) {#news}\n");
+        let top =
+            nodes("q {#x}\n\na\nb {#y}\n\n[posts](:post)\n\n[t](->> :post (take 2)) {#news}\n");
         assert_eq!(top, children);
     }
 
@@ -1874,10 +2194,13 @@ mod tests {
     fn empty_blockquote_is_kept() {
         assert_eq!(nodes(">\n"), vec![quote(vec![])]);
         assert_eq!(written(">\n"), ">");
-        assert_eq!(nodes("> a\n>\n> >\n"), vec![quote(vec![
-            ContentElement::paragraph_from_markdown("a"),
-            quote(vec![]),
-        ])]);
+        assert_eq!(
+            nodes("> a\n>\n> >\n"),
+            vec![quote(vec![
+                ContentElement::paragraph_from_markdown("a"),
+                quote(vec![]),
+            ])]
+        );
     }
 
     /// Paragraphs inside a quote are blocks of the quote: the document has the
@@ -1896,9 +2219,21 @@ mod tests {
     fn comment_inside_blockquote_is_trivia() {
         let doc = parse_document("> a\n>\n> <!-- c -->\n>\n> b\n>\n> <!-- end -->\n").unwrap();
         assert!(doc.comments.is_empty(), "{:?}", doc.comments);
-        let ContentElement::Blockquote { blocks } = &doc.elements[0].node else { panic!() };
-        let comments: Vec<_> = blocks.comments.iter().map(|(i, c)| (*i, c.node.as_str().to_string())).collect();
-        assert_eq!(comments, vec![(1, "<!-- c -->".to_string()), (2, "<!-- end -->".to_string())]);
+        let ContentElement::Blockquote { blocks } = &doc.elements[0].node else {
+            panic!()
+        };
+        let comments: Vec<_> = blocks
+            .comments
+            .iter()
+            .map(|(i, c)| (*i, c.node.as_str().to_string()))
+            .collect();
+        assert_eq!(
+            comments,
+            vec![
+                (1, "<!-- c -->".to_string()),
+                (2, "<!-- end -->".to_string())
+            ]
+        );
         assert_eq!(blocks.elements.len(), 2);
     }
 
@@ -1907,23 +2242,44 @@ mod tests {
         use Prefix::{Indent, Quote};
         // No container: borrowed.
         assert!(matches!(container_source("a\n> b", &[]), Cow::Borrowed(_)));
-        assert_eq!(container_source("a\n> b\n>   c\n>d\n", &[Quote]), "a\nb\n  c\nd\n");
+        assert_eq!(
+            container_source("a\n> b\n>   c\n>d\n", &[Quote]),
+            "a\nb\n  c\nd\n"
+        );
         // Up to three spaces before the marker; four make it text.
-        assert_eq!(container_source("a\n   > b\n    > c", &[Quote]), "a\nb\n    > c");
+        assert_eq!(
+            container_source("a\n   > b\n    > c", &[Quote]),
+            "a\nb\n    > c"
+        );
         // Two levels, and a line that stops at the first.
-        assert_eq!(container_source("a\n> > b\n> c\nd", &[Quote, Quote]), "a\nb\nc\nd");
+        assert_eq!(
+            container_source("a\n> > b\n> c\nd", &[Quote, Quote]),
+            "a\nb\nc\nd"
+        );
         // A lazy line has no marker and is kept.
         assert_eq!(container_source("a\nlazy", &[Quote]), "a\nlazy");
         // An item takes its indentation, and no more.
-        assert_eq!(container_source("a\n  b\n    c\n", &[Indent(2)]), "a\nb\n  c\n");
+        assert_eq!(
+            container_source("a\n  b\n    c\n", &[Indent(2)]),
+            "a\nb\n  c\n"
+        );
         // A blank line may have less than the indentation.
         assert_eq!(container_source("a\n\n  b", &[Indent(2)]), "a\n\nb");
         // A quote, then an item in it; an item, then a quote in it.
-        assert_eq!(container_source("a\n>   b\n> c", &[Quote, Indent(2)]), "a\nb\nc");
-        assert_eq!(container_source("a\n  > b\n  > c", &[Indent(2), Quote]), "a\nb\nc");
+        assert_eq!(
+            container_source("a\n>   b\n> c", &[Quote, Indent(2)]),
+            "a\nb\nc"
+        );
+        assert_eq!(
+            container_source("a\n  > b\n  > c", &[Indent(2), Quote]),
+            "a\nb\nc"
+        );
         // A line with less indentation than the item has, and content, is lazy:
         // what is left is kept, and no prefix after it is applied.
-        assert_eq!(container_source("a\n lazy\n  > x", &[Indent(2), Quote]), "a\nlazy\nx");
+        assert_eq!(
+            container_source("a\n lazy\n  > x", &[Indent(2), Quote]),
+            "a\nlazy\nx"
+        );
         assert_eq!(container_source("a\nlazy", &[Indent(2)]), "a\nlazy");
     }
 
@@ -2004,9 +2360,9 @@ Body paragraph."#;
         assert!(has_separator, "expected a Separator in the mixed document");
 
         // Confirm there is an H3 heading.
-        let h3 = doc.elements.iter().find(|e| {
-            matches!(&e.node, ContentElement::Heading { level, .. } if level.value() == 3)
-        });
+        let h3 = doc.elements.iter().find(
+            |e| matches!(&e.node, ContentElement::Heading { level, .. } if level.value() == 3),
+        );
         assert!(h3.is_some(), "expected an H3 heading in the mixed document");
     }
 
@@ -2049,7 +2405,10 @@ Body paragraph."#;
 
     #[test]
     fn code_block_excludes_line_terminator_before_closing_fence() {
-        assert_eq!(parse_single_code("```rust\nfn main() {}\n```\n"), "fn main() {}");
+        assert_eq!(
+            parse_single_code("```rust\nfn main() {}\n```\n"),
+            "fn main() {}"
+        );
     }
 
     #[test]
@@ -2104,17 +2463,26 @@ Body paragraph."#;
 
     #[test]
     fn table_with_inline_code_in_cell() {
-        let input = "| Command | Description |\n|---------|-------------|\n| `cargo test` | Run tests |\n";
+        let input =
+            "| Command | Description |\n|---------|-------------|\n| `cargo test` | Run tests |\n";
         let doc = parse_document(input).expect("table with inline code should parse");
         let table = doc
             .elements
             .iter()
             .find(|e| matches!(e.node, ContentElement::Table { .. }))
             .expect("expected a Table element");
-        let ContentElement::Table { rows, .. } = &table.node else { unreachable!() };
+        let ContentElement::Table { rows, .. } = &table.node else {
+            unreachable!()
+        };
         assert_eq!(rows.len(), 1, "expected one body row");
-        assert_eq!(rows[0][0].as_slice(), [Inline::Code("cargo test".to_string())]);
-        assert_eq!(rows[0][1].as_slice(), [Inline::Text("Run tests".to_string())]);
+        assert_eq!(
+            rows[0][0].as_slice(),
+            [Inline::Code("cargo test".to_string())]
+        );
+        assert_eq!(
+            rows[0][1].as_slice(),
+            [Inline::Text("Run tests".to_string())]
+        );
     }
 
     /// The header and cell sources of the one table in `input`, as canonical
@@ -2123,10 +2491,18 @@ Body paragraph."#;
         use crate::inline::serialize_inlines;
         let source = |cell: &Inlines| serialize_inlines(cell, InlineContext::Cell);
         let doc = parse_document(input).expect("table markdown should parse");
-        match doc.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>().as_slice() {
+        match doc
+            .elements
+            .iter()
+            .map(|e| e.node.clone())
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
             [ContentElement::Table { columns, rows }] => (
                 columns.iter().map(|c| source(&c.header)).collect(),
-                rows.iter().map(|row| row.iter().map(source).collect()).collect(),
+                rows.iter()
+                    .map(|row| row.iter().map(source).collect())
+                    .collect(),
                 columns.iter().map(|c| c.align).collect(),
             ),
             other => panic!("expected exactly one Table, got {other:?}"),
@@ -2135,17 +2511,23 @@ Body paragraph."#;
 
     #[test]
     fn table_cells_are_read_as_inline_nodes() {
-        let (headers, rows, _) = only_table(
-            "| **H** | `a\\|b` |\n|---|---|\n|  \\<x>  | <b>y</b> &amp; _z_ |\n",
-        );
+        let (headers, rows, _) =
+            only_table("| **H** | `a\\|b` |\n|---|---|\n|  \\<x>  | <b>y</b> &amp; _z_ |\n");
         assert_eq!(headers, vec!["**H**".to_string(), "`a\\|b`".to_string()]);
-        assert_eq!(rows, vec![vec!["\\<x>".to_string(), "<b>y</b> & *z*".to_string()]]);
+        assert_eq!(
+            rows,
+            vec![vec!["\\<x>".to_string(), "<b>y</b> & *z*".to_string()]]
+        );
     }
 
     #[test]
     fn table_alignment_is_read_from_the_delimiter_row() {
-        let (_, _, aligns) = only_table("| a | b | c | d |\n|---|:--|:-:|--:|\n| 1 | 2 | 3 | 4 |\n");
-        assert_eq!(aligns, vec![Align::Default, Align::Left, Align::Center, Align::Right]);
+        let (_, _, aligns) =
+            only_table("| a | b | c | d |\n|---|:--|:-:|--:|\n| 1 | 2 | 3 | 4 |\n");
+        assert_eq!(
+            aligns,
+            vec![Align::Default, Align::Left, Align::Center, Align::Right]
+        );
     }
 
     #[test]
@@ -2192,8 +2574,14 @@ Body paragraph."#;
     #[test]
     fn excess_table_cells_are_kept_l16() {
         let (headers, rows, aligns) = only_table("| A | B |\n|---|---|\n| `a|b` | c |\n");
-        assert_eq!(headers, vec!["A".to_string(), "B".to_string(), String::new()]);
-        assert_eq!(rows, vec![vec!["`a".to_string(), "b`".to_string(), "c".to_string()]]);
+        assert_eq!(
+            headers,
+            vec!["A".to_string(), "B".to_string(), String::new()]
+        );
+        assert_eq!(
+            rows,
+            vec![vec!["`a".to_string(), "b`".to_string(), "c".to_string()]]
+        );
         assert_eq!(aligns, vec![Align::Default; 3]);
 
         // Alignment of the columns that were there is kept; shorter rows are
@@ -2202,7 +2590,10 @@ Body paragraph."#;
             only_table("| A | B |\n|:--|--:|\n| 1 | 2 | 3 | 4 |\n| x |\n");
         assert_eq!(headers, vec!["A", "B", "", ""]);
         assert_eq!(rows, vec![vec!["1", "2", "3", "4"], vec!["x", "", "", ""]]);
-        assert_eq!(aligns, vec![Align::Left, Align::Right, Align::Default, Align::Default]);
+        assert_eq!(
+            aligns,
+            vec![Align::Left, Align::Right, Align::Default, Align::Default]
+        );
 
         // An escaped pipe is not a separator.
         let (headers, rows, _) = only_table("| A | B |\n|---|---|\n| `a\\|b` | c |\n");
@@ -2235,7 +2626,10 @@ Body paragraph."#;
             "| A | B |  |\n| --- | --- | --- |\n| 1 | 2 | 3 |\n| x | y |  |"
         );
         let quoted = "> | A | B |\n> |---|---|\n> | 1 | 2 | 3 |\n";
-        assert_eq!(written(quoted), "> | A | B |  |\n> | --- | --- | --- |\n> | 1 | 2 | 3 |");
+        assert_eq!(
+            written(quoted),
+            "> | A | B |  |\n> | --- | --- | --- |\n> | 1 | 2 | 3 |"
+        );
         for md in [top, quoted, "| A | B |\n|---|---|\n| `a|b` | c |\n"] {
             let saved = written(md);
             assert_eq!(written(&saved), saved, "a fixed point: {md:?}");
@@ -2285,7 +2679,10 @@ Body paragraph."#;
     fn parse_document_heading_has_span() {
         let src = "# Hello\n\nSome text.\n";
         let doc = parse_document(src).expect("should parse");
-        let heading = doc.elements.iter().find(|e| matches!(e.node, ContentElement::Heading { .. }));
+        let heading = doc
+            .elements
+            .iter()
+            .find(|e| matches!(e.node, ContentElement::Heading { .. }));
         assert!(heading.is_some(), "expected a heading element");
         let h = heading.unwrap();
         assert_eq!(h.span.start, 0, "heading should start at byte 0");
@@ -2340,16 +2737,24 @@ headings
         // Inline markdown rendering happens in the renderer, not the parser.
         let input = "# Title\n\nSummary.\n\n----\n\nThis has **bold** text.\n";
         let doc = parse_document(input).unwrap();
-        let body_elements: Vec<_> = doc.elements.iter()
+        let body_elements: Vec<_> = doc
+            .elements
+            .iter()
             .skip_while(|e| !matches!(e.node, ContentElement::Separator))
             .skip(1) // skip the separator itself
             .collect();
-        assert!(!body_elements.is_empty(), "expected body elements after separator");
+        assert!(
+            !body_elements.is_empty(),
+            "expected body elements after separator"
+        );
         let first = &body_elements[0].node;
         match first {
             ContentElement::Paragraph { content, .. } => {
                 assert!(
-                    content.as_slice().iter().any(|i| matches!(i, Inline::Strong(_))),
+                    content
+                        .as_slice()
+                        .iter()
+                        .any(|i| matches!(i, Inline::Strong(_))),
                     "expected a strong node, got: {content:?}"
                 );
             }
@@ -2361,11 +2766,16 @@ headings
     fn body_paragraph_with_italic_parses_as_paragraph_not_html() {
         let input = "# Title\n\nSummary.\n\n----\n\nThis has _italic_ text.\n";
         let doc = parse_document(input).unwrap();
-        let body_elements: Vec<_> = doc.elements.iter()
+        let body_elements: Vec<_> = doc
+            .elements
+            .iter()
             .skip_while(|e| !matches!(e.node, ContentElement::Separator))
             .skip(1)
             .collect();
-        assert!(!body_elements.is_empty(), "expected body elements after separator");
+        assert!(
+            !body_elements.is_empty(),
+            "expected body elements after separator"
+        );
         match &body_elements[0].node {
             ContentElement::Paragraph { .. } => {}
             other => panic!("expected Paragraph for body paragraph with italic, got: {other:?}"),
@@ -2376,11 +2786,16 @@ headings
     fn body_blockquote_produces_blockquote_element() {
         let input = "# Title\n\nSummary.\n\n----\n\n> A quoted text.\n";
         let doc = parse_document(input).unwrap();
-        let body_elements: Vec<_> = doc.elements.iter()
+        let body_elements: Vec<_> = doc
+            .elements
+            .iter()
             .skip_while(|e| !matches!(e.node, ContentElement::Separator))
             .skip(1)
             .collect();
-        assert!(!body_elements.is_empty(), "expected body elements after separator");
+        assert!(
+            !body_elements.is_empty(),
+            "expected body elements after separator"
+        );
         match &body_elements[0].node {
             ContentElement::Blockquote { blocks } => {
                 let text = crate::serializer::serialize_blocks(blocks);
@@ -2396,7 +2811,9 @@ headings
     #[test]
     fn blockquote_serializes_with_gt_prefix() {
         use crate::serializer::serialize_element;
-        let elem = quote(vec![ContentElement::paragraph_from_markdown("A quoted text.")]);
+        let elem = quote(vec![ContentElement::paragraph_from_markdown(
+            "A quoted text.",
+        )]);
         let serialized = serialize_element(&elem);
         assert!(
             serialized.starts_with("> "),
@@ -2413,7 +2830,9 @@ headings
         // Paragraphs BEFORE the separator should still be ContentElement::Paragraph
         let input = "Summary text here.\n\n----\n\nBody content.\n";
         let doc = parse_document(input).unwrap();
-        let preamble_elements: Vec<_> = doc.elements.iter()
+        let preamble_elements: Vec<_> = doc
+            .elements
+            .iter()
             .take_while(|e| !matches!(e.node, ContentElement::Separator))
             .collect();
         assert!(!preamble_elements.is_empty(), "expected preamble elements");
@@ -2428,11 +2847,16 @@ headings
         // Body headings should remain ContentElement::Heading
         let input = "# Title\n\n----\n\n### Body Heading\n\nBody paragraph.\n";
         let doc = parse_document(input).unwrap();
-        let body_elements: Vec<_> = doc.elements.iter()
+        let body_elements: Vec<_> = doc
+            .elements
+            .iter()
             .skip_while(|e| !matches!(e.node, ContentElement::Separator))
             .skip(1)
             .collect();
-        assert!(!body_elements.is_empty(), "expected body elements after separator");
+        assert!(
+            !body_elements.is_empty(),
+            "expected body elements after separator"
+        );
         match &body_elements[0].node {
             ContentElement::Heading { level, .. } => {
                 assert_eq!(level.value(), 3, "expected H3 heading");
@@ -2469,10 +2893,8 @@ headings
         // []((->>%20:post%20(sort-by%20:published%20:desc)%20(take%204)))
         // -> ThreadExpr with source "post", SortBy + Take ops
         // %20 encodes spaces so the href is a valid CommonMark bare link destination.
-        let doc = parse_document(
-            "[]((->>%20:post%20(sort-by%20:published%20:desc)%20(take%204)))",
-        )
-        .unwrap();
+        let doc = parse_document("[]((->>%20:post%20(sort-by%20:published%20:desc)%20(take%204)))")
+            .unwrap();
         let expr = doc
             .elements
             .iter()
@@ -2523,11 +2945,16 @@ headings
     fn plain_link_unchanged() {
         // [text](/some/path) -> a lone link, not LinkExpression
         let doc = parse_document("[text](/some/path)").unwrap();
-        let link = doc.elements[0].node.sole_link().expect("expected a lone link");
+        let link = doc.elements[0]
+            .node
+            .sole_link()
+            .expect("expected a lone link");
         assert_eq!(link.text.plain_text(), "text");
         assert_eq!(link.destination, "/some/path");
         assert!(
-            !doc.elements.iter().any(|e| matches!(e.node, ContentElement::LinkExpression { .. })),
+            !doc.elements
+                .iter()
+                .any(|e| matches!(e.node, ContentElement::LinkExpression { .. })),
             "plain link should not produce a LinkExpression"
         );
     }
@@ -2550,7 +2977,10 @@ headings
     #[test]
     fn nested_list_stays_one_list() {
         assert_single_list("- a\n  - b\n    - [c](/c)\n- d");
-        assert_eq!(written("- a\n  - b\n    - [c](/c)\n- d"), "- a\n  - b\n    - [c](/c)\n- d");
+        assert_eq!(
+            written("- a\n  - b\n    - [c](/c)\n- d"),
+            "- a\n  - b\n    - [c](/c)\n- d"
+        );
     }
 
     #[test]
@@ -2623,7 +3053,10 @@ headings
     fn list_items_are_block_containers() {
         assert_eq!(
             nodes("- a\n\n  b\n- c"),
-            vec![bullets(Spacing::Loose, vec![vec![para("a"), para("b")], vec![para("c")]])]
+            vec![bullets(
+                Spacing::Loose,
+                vec![vec![para("a"), para("b")], vec![para("c")]]
+            )]
         );
         // An item holds any blocks.
         assert_eq!(
@@ -2631,14 +3064,23 @@ headings
             vec![bullets(
                 Spacing::Tight,
                 vec![
-                    vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "H")],
-                    vec![ContentElement::CodeBlock { language: None, code: "x".to_string() }],
+                    vec![ContentElement::heading_from_markdown(
+                        HeadingLevel::new(1).unwrap(),
+                        "H"
+                    )],
+                    vec![ContentElement::CodeBlock {
+                        language: None,
+                        code: "x".to_string()
+                    }],
                     vec![quote(vec![para("q")])],
                 ]
             )]
         );
         // An empty item is an item without blocks.
-        assert_eq!(nodes("-\n- b"), vec![bullets(Spacing::Tight, vec![vec![], vec![para("b")]])]);
+        assert_eq!(
+            nodes("-\n- b"),
+            vec![bullets(Spacing::Tight, vec![vec![], vec![para("b")]])]
+        );
         assert_saved_as("-\n- b", "-\n- b");
     }
 
@@ -2687,13 +3129,19 @@ headings
     #[test]
     fn nested_lists_and_quotes_inside_items_round_trip() {
         assert_saved_as("- a\n  - b\n    - c\n- d", "- a\n  - b\n    - c\n- d");
-        assert_saved_as("1. a\n   1. b\n   2. c\n2. d", "1. a\n   1. b\n   2. c\n2. d");
+        assert_saved_as(
+            "1. a\n   1. b\n   2. c\n2. d",
+            "1. a\n   1. b\n   2. c\n2. d",
+        );
         // A quote in an item, a list in a quote, a list in a quote in an item.
         assert_saved_as("- > q\n  > r\n- b", "- > q\n  > r\n- b");
         assert_saved_as("> - a\n>   - b\n> - c", "> - a\n>   - b\n> - c");
         assert_saved_as("- > - a\n  >   - b", "- > - a\n  >   - b");
         // Several blocks in an item, loose; a nested list, loose.
-        assert_saved_as("- a\n\n  > q\n\n  - n\n\n  ```\n  x\n  ```", "- a\n\n  > q\n\n  - n\n\n  ```\n  x\n  ```");
+        assert_saved_as(
+            "- a\n\n  > q\n\n  - n\n\n  ```\n  x\n  ```",
+            "- a\n\n  > q\n\n  - n\n\n  ```\n  x\n  ```",
+        );
         assert_saved_as("- a\n\n  - b\n\n  - c", "- a\n\n  - b\n\n  - c");
         assert_eq!(
             nodes("- a\n  > q"),
@@ -2716,7 +3164,14 @@ headings
         let after_paragraph = list(
             ListKind::Bullet,
             Spacing::Tight,
-            vec![vec![para("a"), list(ListKind::Ordered { start: 2 }, Spacing::Tight, vec![vec![para("b")]])]],
+            vec![vec![
+                para("a"),
+                list(
+                    ListKind::Ordered { start: 2 },
+                    Spacing::Tight,
+                    vec![vec![para("b")]],
+                ),
+            ]],
         );
         assert_eq!(
             written_element(&after_paragraph),
@@ -2730,7 +3185,10 @@ headings
         let empty_first = list(
             ListKind::Bullet,
             Spacing::Tight,
-            vec![vec![para("a"), list(ListKind::Bullet, Spacing::Tight, vec![vec![]])]],
+            vec![vec![
+                para("a"),
+                list(ListKind::Bullet, Spacing::Tight, vec![vec![]]),
+            ]],
         );
         assert_eq!(written_element(&empty_first), "- a\n\n  -");
     }
@@ -2741,15 +3199,32 @@ headings
     fn comments_inside_items_are_trivia() {
         let doc = parse_document("- a\n  <!-- c -->\n  - b\n  <!-- end -->\n").unwrap();
         assert!(doc.comments.is_empty(), "{:?}", doc.comments);
-        let ContentElement::List { list } = &doc.elements[0].node else { panic!() };
+        let ContentElement::List { list } = &doc.elements[0].node else {
+            panic!()
+        };
         assert_eq!(list.items.len(), 1);
-        let comments: Vec<_> =
-            list.items[0].comments.iter().map(|(i, c)| (*i, c.node.as_str().to_string())).collect();
-        assert_eq!(comments, vec![(1, "<!-- c -->".to_string()), (2, "<!-- end -->".to_string())]);
+        let comments: Vec<_> = list.items[0]
+            .comments
+            .iter()
+            .map(|(i, c)| (*i, c.node.as_str().to_string()))
+            .collect();
+        assert_eq!(
+            comments,
+            vec![
+                (1, "<!-- c -->".to_string()),
+                (2, "<!-- end -->".to_string())
+            ]
+        );
         assert_eq!(list.items[0].elements.len(), 2);
-        assert_saved_as("- a\n  <!-- c -->\n  - b\n  <!-- end -->", "- a\n  <!-- c -->\n  - b\n  <!-- end -->");
+        assert_saved_as(
+            "- a\n  <!-- c -->\n  - b\n  <!-- end -->",
+            "- a\n  <!-- c -->\n  - b\n  <!-- end -->",
+        );
         // Loose.
-        assert_saved_as("- a\n\n  <!-- c -->\n\n  b\n\n- c", "- a\n\n  <!-- c -->\n\n  b\n\n- c");
+        assert_saved_as(
+            "- a\n\n  <!-- c -->\n\n  b\n\n- c",
+            "- a\n\n  <!-- c -->\n\n  b\n\n- c",
+        );
     }
 
     /// A comment or an HTML tag that spans lines inside a paragraph reads the
@@ -2763,21 +3238,34 @@ headings
         fn in_item(md: &str) -> String {
             md.split('\n')
                 .enumerate()
-                .map(|(i, l)| if i == 0 { format!("- {l}") } else { format!("  {l}") })
+                .map(|(i, l)| {
+                    if i == 0 {
+                        format!("- {l}")
+                    } else {
+                        format!("  {l}")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         }
         fn in_quote(md: &str) -> String {
-            md.split('\n').map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
+            md.split('\n')
+                .map(|l| format!("> {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         }
         /// The first paragraph found, at any depth.
         fn paragraph(element: &ContentElement) -> Option<Inlines> {
             match element {
                 ContentElement::Paragraph { content, .. } => Some(content.clone()),
-                ContentElement::Blockquote { blocks } => blocks.elements.iter().find_map(|e| paragraph(&e.node)),
-                ContentElement::List { list } => {
-                    list.items.iter().flat_map(|i| i.elements.iter()).find_map(|e| paragraph(&e.node))
+                ContentElement::Blockquote { blocks } => {
+                    blocks.elements.iter().find_map(|e| paragraph(&e.node))
                 }
+                ContentElement::List { list } => list
+                    .items
+                    .iter()
+                    .flat_map(|i| i.elements.iter())
+                    .find_map(|e| paragraph(&e.node)),
                 _ => None,
             }
         }
@@ -2796,7 +3284,11 @@ headings
             ];
             for md in cases {
                 let element = &nodes(&md)[0];
-                assert_eq!(paragraph(element).as_ref(), Some(&top), "{md:?} reads differently");
+                assert_eq!(
+                    paragraph(element).as_ref(),
+                    Some(&top),
+                    "{md:?} reads differently"
+                );
                 let saved = written(&md);
                 assert_eq!(nodes(&saved), nodes(&md), "{md:?} saved as {saved:?}");
                 assert_eq!(written(&saved), saved, "{md:?}: the second save differs");
@@ -2809,11 +3301,27 @@ headings
     #[test]
     fn the_paragraph_of_a_tight_item_is_read_like_any_paragraph() {
         let els = nodes("- a {#x}\n- [posts](:post)\n- [l](/l) and ![i](a.png)\n- a\n  b");
-        let ContentElement::List { list } = &els[0] else { panic!("{els:?}") };
+        let ContentElement::List { list } = &els[0] else {
+            panic!("{els:?}")
+        };
         assert_eq!(list.spacing, Spacing::Tight);
         let first = |i: usize| list.items[i].elements[0].node.clone();
-        assert!(matches!(first(0), ContentElement::Paragraph { marker: Some(_), .. }), "{:?}", first(0));
-        assert!(matches!(first(1), ContentElement::LinkExpression { .. }), "{:?}", first(1));
+        assert!(
+            matches!(
+                first(0),
+                ContentElement::Paragraph {
+                    marker: Some(_),
+                    ..
+                }
+            ),
+            "{:?}",
+            first(0)
+        );
+        assert!(
+            matches!(first(1), ContentElement::LinkExpression { .. }),
+            "{:?}",
+            first(1)
+        );
         assert_eq!(first(2), para("[l](/l) and ![i](a.png)"));
         // The lines of a paragraph, without the item's indentation.
         assert_eq!(first(3), para("a\nb"));
@@ -2834,7 +3342,10 @@ headings
         let els = nodes("-\n  ----\n- b");
         assert_eq!(
             els,
-            vec![bullets(Spacing::Tight, vec![vec![ContentElement::Separator], vec![para("b")]])]
+            vec![bullets(
+                Spacing::Tight,
+                vec![vec![ContentElement::Separator], vec![para("b")]]
+            )]
         );
         assert_saved_as("-\n  ----\n- b", "-\n  ----\n- b");
     }
@@ -2849,9 +3360,11 @@ headings
         let doc = parse_document(input).unwrap();
         let written = crate::serializer::serialize_elements(&doc.elements);
         assert!(
-            doc.elements.iter().any(|e| matches!(&e.node, ContentElement::List { .. })
-                && crate::serializer::serialize_element(&e.node)
-                    .contains("[schemas](/feature/schemas-as-contracts)")),
+            doc.elements
+                .iter()
+                .any(|e| matches!(&e.node, ContentElement::List { .. })
+                    && crate::serializer::serialize_element(&e.node)
+                        .contains("[schemas](/feature/schemas-as-contracts)")),
             "expected a List containing the schemas link; got {:#?}\n{written}",
             doc.elements
         );
@@ -2864,11 +3377,19 @@ headings
     }
 
     fn nodes(md: &str) -> Vec<ContentElement> {
-        parse_document(md).unwrap().elements.iter().map(|e| e.node.clone()).collect()
+        parse_document(md)
+            .unwrap()
+            .elements
+            .iter()
+            .map(|e| e.node.clone())
+            .collect()
     }
 
     fn pulldown_events(md: &str) -> String {
-        format!("{:?}", Parser::new_ext(md, super::MARKDOWN_OPTIONS).collect::<Vec<_>>())
+        format!(
+            "{:?}",
+            Parser::new_ext(md, super::MARKDOWN_OPTIONS).collect::<Vec<_>>()
+        )
     }
 
     fn thread_expr(
@@ -2878,16 +3399,21 @@ headings
     ) -> ContentElement {
         ContentElement::LinkExpression {
             text,
-            target: LinkTarget::ThreadExpr { source: kw(source), operations },
+            target: LinkTarget::ThreadExpr {
+                source: kw(source),
+                operations,
+            },
             slot: None,
         }
     }
 
     fn marked(element: ContentElement, slot: &str) -> ContentElement {
         match element {
-            ContentElement::LinkExpression { text, target, .. } => {
-                ContentElement::LinkExpression { text, target, slot: Some(kw(slot)) }
-            }
+            ContentElement::LinkExpression { text, target, .. } => ContentElement::LinkExpression {
+                text,
+                target,
+                slot: Some(kw(slot)),
+            },
             other => other,
         }
     }
@@ -2912,12 +3438,24 @@ headings
                  Text(Borrowed(\"]\")), Text(Borrowed({rest:?})), End(Paragraph)]"
             )
         };
-        assert_eq!(pulldown_events("[x](->> :post (take 4))"), text_events("(->> :post (take 4))"));
-        assert_eq!(pulldown_events("[x](->> :post)"), text_events("(->> :post)"));
+        assert_eq!(
+            pulldown_events("[x](->> :post (take 4))"),
+            text_events("(->> :post (take 4))")
+        );
+        assert_eq!(
+            pulldown_events("[x](->> :post)"),
+            text_events("(->> :post)")
+        );
         // `((->> …))` is NOT a link with an empty href and a parenthesised
         // title: it is plain text too.
-        assert_eq!(pulldown_events("[x]((->> :post (take 4)))"), text_events("((->> :post (take 4)))"));
-        assert_eq!(pulldown_events("[x]((->> :post))"), text_events("((->> :post))"));
+        assert_eq!(
+            pulldown_events("[x]((->> :post (take 4)))"),
+            text_events("((->> :post (take 4)))")
+        );
+        assert_eq!(
+            pulldown_events("[x]((->> :post))"),
+            text_events("((->> :post))")
+        );
         // Without spaces the destination is a bare link destination.
         assert_eq!(
             pulldown_events("[x](->>)"),
@@ -2934,15 +3472,24 @@ headings
             nodes("[x](->> :post (take 4))"),
             vec![thread_expr(label("x"), "post", vec![LinkOp::Take(4)])]
         );
-        assert_eq!(nodes("[x](->> :post)"), vec![thread_expr(label("x"), "post", vec![])]);
+        assert_eq!(
+            nodes("[x](->> :post)"),
+            vec![thread_expr(label("x"), "post", vec![])]
+        );
         assert_eq!(
             nodes("[x]((->> :post (take 4)))"),
             vec![thread_expr(label("x"), "post", vec![LinkOp::Take(4)])]
         );
-        assert_eq!(nodes("[x]((->> :post))"), vec![thread_expr(label("x"), "post", vec![])]);
+        assert_eq!(
+            nodes("[x]((->> :post))"),
+            vec![thread_expr(label("x"), "post", vec![])]
+        );
         // Malformed: not a link expression; pulldown's bare link remains, as
         // a paragraph that holds the one link.
-        assert_eq!(nodes("[x](->>)"), vec![ContentElement::paragraph_from_markdown("[x](->>)")]);
+        assert_eq!(
+            nodes("[x](->>)"),
+            vec![ContentElement::paragraph_from_markdown("[x](->>)")]
+        );
         assert_eq!(
             nodes("[x](->>)")[0].sole_link().map(|l| l.destination),
             Some("->>".to_string())
@@ -2954,7 +3501,11 @@ headings
         use crate::document::{LinkOp, RefsToTarget};
         assert_eq!(
             nodes("[posts](->> :post (refs-to self))"),
-            vec![thread_expr(label("posts"), "post", vec![LinkOp::RefsTo(RefsToTarget::SelfRef)])]
+            vec![thread_expr(
+                label("posts"),
+                "post",
+                vec![LinkOp::RefsTo(RefsToTarget::SelfRef)]
+            )]
         );
     }
 
@@ -2978,7 +3529,8 @@ headings
              [posts](/post/<name>) {#posts}\noccurs\n: *\ntype\n: link(post)\n",
         )
         .expect("schema parses");
-        let src = "# Default Author\n\nA bio.\n\n[posts](->> :post (refs-to self))\n\n----\n\nBody.\n";
+        let src =
+            "# Default Author\n\nA bio.\n\n[posts](->> :post (refs-to self))\n\n----\n\nBody.\n";
         let doc = parse_and_assign(src, &grammar).unwrap();
         let posts = doc
             .preamble
@@ -2988,7 +3540,11 @@ headings
         let got: Vec<_> = posts.elements.iter().map(|e| e.node.clone()).collect();
         assert_eq!(
             got,
-            vec![thread_expr(label("posts"), "post", vec![LinkOp::RefsTo(RefsToTarget::SelfRef)])]
+            vec![thread_expr(
+                label("posts"),
+                "post",
+                vec![LinkOp::RefsTo(RefsToTarget::SelfRef)]
+            )]
         );
     }
 
@@ -3018,7 +3574,8 @@ headings
         let not_expr = |md: &str| {
             let got = nodes(md);
             assert!(
-                !got.iter().any(|n| matches!(n, ContentElement::LinkExpression { .. })),
+                !got.iter()
+                    .any(|n| matches!(n, ContentElement::LinkExpression { .. })),
                 "{md:?}: {got:?}"
             );
         };
@@ -3039,10 +3596,7 @@ headings
 
     #[test]
     fn thread_first_is_rejected() {
-        assert_eq!(
-            nodes("[x](-> :post)"),
-            vec![para("[x](-> :post)")]
-        );
+        assert_eq!(nodes("[x](-> :post)"), vec![para("[x](-> :post)")]);
         assert!(super::parse_link_target("(-> :post)").is_err());
         assert!(super::parse_link_target("-> :post").is_err());
     }
@@ -3086,7 +3640,8 @@ headings
     fn marker_on_its_own_line_is_not_a_link_expression() {
         let got = nodes("[x](->> :post)\n{#news}");
         assert!(
-            !got.iter().any(|n| matches!(n, ContentElement::LinkExpression { .. })),
+            !got.iter()
+                .any(|n| matches!(n, ContentElement::LinkExpression { .. })),
             "{got:?}"
         );
     }
@@ -3097,10 +3652,7 @@ headings
         // it does not mark the link expression above it.
         assert_eq!(
             nodes("[x](->> :post)\n\n{#news}"),
-            vec![
-                thread_expr(label("x"), "post", vec![]),
-                para("{#news}"),
-            ]
+            vec![thread_expr(label("x"), "post", vec![]), para("{#news}"),]
         );
     }
 
@@ -3117,10 +3669,19 @@ headings
                 "news",
             )
         };
-        assert_eq!(nodes("[x](:fragments/header) {#news}"), vec![path_ref("fragments/header", "x")]);
+        assert_eq!(
+            nodes("[x](:fragments/header) {#news}"),
+            vec![path_ref("fragments/header", "x")]
+        );
         assert_eq!(nodes("[x](<:a b>) {#news}"), vec![path_ref("a b", "x")]);
-        assert_eq!(nodes("[x](:a\\&amp;b) {#news}"), vec![path_ref("a&amp;b", "x")]);
-        let legacy = vec![marked(thread_expr(label("p"), "post", vec![LinkOp::Take(4)]), "news")];
+        assert_eq!(
+            nodes("[x](:a\\&amp;b) {#news}"),
+            vec![path_ref("a&amp;b", "x")]
+        );
+        let legacy = vec![marked(
+            thread_expr(label("p"), "post", vec![LinkOp::Take(4)]),
+            "news",
+        )];
         assert_eq!(nodes("[p](<(-\\>\\> :post (take 4))>) {#news}"), legacy);
         assert_eq!(nodes("[p]((->>%20:post%20(take%204))) {#news}"), legacy);
     }
@@ -3180,7 +3741,11 @@ headings
             "text (aside) {#x}",
         ] {
             assert_eq!(nodes(md), vec![para(md)], "{md:?}");
-            assert_eq!(nodes(&format!("\n  {md}  \n")), vec![para(md)], "{md:?} (padded)");
+            assert_eq!(
+                nodes(&format!("\n  {md}  \n")),
+                vec![para(md)],
+                "{md:?} (padded)"
+            );
         }
     }
 
@@ -3198,10 +3763,21 @@ headings
     #[test]
     fn a_leading_link_followed_by_text_keeps_the_text() {
         let got = nodes("[a](/x) trailing");
-        let [ContentElement::Paragraph { content, marker: None }] = got.as_slice() else {
+        let [
+            ContentElement::Paragraph {
+                content,
+                marker: None,
+            },
+        ] = got.as_slice()
+        else {
             panic!("{got:?}")
         };
-        let [Inline::Link { destination, text, .. }, Inline::Text(rest)] = content.as_slice()
+        let [
+            Inline::Link {
+                destination, text, ..
+            },
+            Inline::Text(rest),
+        ] = content.as_slice()
         else {
             panic!("{content:?}")
         };
@@ -3227,7 +3803,10 @@ headings
         assert_eq!(nodes("[a](/x)"), vec![link.clone()]);
         assert_eq!(nodes("  [a](/x)  "), vec![link.clone()]);
         assert!(link.sole_link().is_some());
-        assert!(nodes("[a](/x) <!-- c -->")[0].sole_link().is_some(), "a comment does not count");
+        assert!(
+            nodes("[a](/x) <!-- c -->")[0].sole_link().is_some(),
+            "a comment does not count"
+        );
     }
 
     /// Stage 5b.
@@ -3244,14 +3823,23 @@ headings
     #[test]
     fn image_inside_text_stays_inline() {
         let got = nodes("See ![c](c.png) here.");
-        let [ContentElement::Paragraph { content, marker: None }] = got.as_slice() else {
+        let [
+            ContentElement::Paragraph {
+                content,
+                marker: None,
+            },
+        ] = got.as_slice()
+        else {
             panic!("{got:?}")
         };
-        assert!(matches!(
-            content.as_slice(),
-            [Inline::Text(a), Inline::Image { alt, .. }, Inline::Text(b)]
-                if a == "See " && alt.as_slice() == [Inline::Text("c".to_string())] && b == " here."
-        ), "{content:?}");
+        assert!(
+            matches!(
+                content.as_slice(),
+                [Inline::Text(a), Inline::Image { alt, .. }, Inline::Text(b)]
+                    if a == "See " && alt.as_slice() == [Inline::Text("c".to_string())] && b == " here."
+            ),
+            "{content:?}"
+        );
     }
 
     #[test]
@@ -3261,7 +3849,10 @@ headings
         assert_eq!(first, "See ![c](c.png) here.");
         let again = parse_document(&first).unwrap();
         assert_eq!(nodes(&first), nodes("See ![c](c.png) here."));
-        assert_eq!(crate::serializer::serialize_elements(&again.elements), first);
+        assert_eq!(
+            crate::serializer::serialize_elements(&again.elements),
+            first
+        );
     }
 
     /// `\# x` is the literal text `# x`: stored without the backslash, and
@@ -3269,15 +3860,23 @@ headings
     #[test]
     fn escaped_paragraph_reloads_without_backslash() {
         let got = nodes("\\# x");
-        let [ContentElement::Paragraph { content, .. }] = got.as_slice() else { panic!("{got:?}") };
+        let [ContentElement::Paragraph { content, .. }] = got.as_slice() else {
+            panic!("{got:?}")
+        };
         assert_eq!(content.as_slice(), &[Inline::Text("# x".to_string())]);
         let doc = parse_document("\\# x\n").unwrap();
-        assert_eq!(crate::serializer::serialize_elements(&doc.elements), "\\# x");
+        assert_eq!(
+            crate::serializer::serialize_elements(&doc.elements),
+            "\\# x"
+        );
     }
 
     #[test]
     fn a_leading_link_followed_by_text_and_a_marker_is_kept_whole() {
-        assert_eq!(nodes("[a](/x) trailing {#x}"), vec![para("[a](/x) trailing {#x}")]);
+        assert_eq!(
+            nodes("[a](/x) trailing {#x}"),
+            vec![para("[a](/x) trailing {#x}")]
+        );
     }
 
     #[test]
@@ -3334,7 +3933,10 @@ headings
         let s = |x: &str| x.to_string();
         let cases = [
             // 1. A candidate whose destination does not parse.
-            ("[x](->> :post (map :t)) {#news}", D::Malformed(E::UnknownOp(s("map")))),
+            (
+                "[x](->> :post (map :t)) {#news}",
+                D::Malformed(E::UnknownOp(s("map"))),
+            ),
             (
                 "[p]((->>%20:post%20(map%20:x))) {#news}",
                 D::Malformed(E::ExpectedWhitespace { at: 3 }),
@@ -3344,25 +3946,40 @@ headings
             ("{#a b}", D::StrayMarker(s("a b"))),
             // 3. A marked expression spanning lines.
             ("[x\ny](:p) {#n}", D::MarkedExpressionSpansLines(s("n"))),
-            ("[x\ny](->> :post) {#n}", D::MarkedExpressionSpansLines(s("n"))),
+            (
+                "[x\ny](->> :post) {#n}",
+                D::MarkedExpressionSpansLines(s("n")),
+            ),
             // 4. An invalid marker name on a one-line expression.
             ("[x](->> :post) {#a b}", D::InvalidSlotMarker(s("a b"))),
             ("[x](:p) {#a b}", D::InvalidSlotMarker(s("a b"))),
-            ("[p]((->>%20:post%20(take%204))) {#a b}", D::InvalidSlotMarker(s("a b"))),
+            (
+                "[p]((->>%20:post%20(take%204))) {#a b}",
+                D::InvalidSlotMarker(s("a b")),
+            ),
             // 5. A marker on anything else.
             ("[a](/x) {#s}", D::MarkerNotOnLinkExpression(s("s"))),
-            ("![c](i.jpg) {#cover}", D::MarkerNotOnLinkExpression(s("cover"))),
+            (
+                "![c](i.jpg) {#cover}",
+                D::MarkerNotOnLinkExpression(s("cover")),
+            ),
             ("text (aside) {#x}", D::MarkerNotOnLinkExpression(s("x"))),
             ("a\nb (c) {#x}", D::MarkerNotOnLinkExpression(s("x"))),
             ("[a](/x) {#a b}", D::MarkerNotOnLinkExpression(s("a b"))),
             ("text {#x}", D::MarkerNotOnLinkExpression(s("x"))),
-            ("Summary text {#summary}", D::MarkerNotOnLinkExpression(s("summary"))),
+            (
+                "Summary text {#summary}",
+                D::MarkerNotOnLinkExpression(s("summary")),
+            ),
             ("text {#a b}", D::MarkerNotOnLinkExpression(s("a b"))),
             ("text {#}", D::MarkerNotOnLinkExpression(s(""))),
             ("a\nb {#x}", D::MarkerNotOnLinkExpression(s("x"))),
             // A named divider is marker misuse until ADR-060 P2.
             ("---- {#notes}", D::MarkerNotOnLinkExpression(s("notes"))),
-            ("a [p](->> :post) b {#x}", D::MarkerNotOnLinkExpression(s("x"))),
+            (
+                "a [p](->> :post) b {#x}",
+                D::MarkerNotOnLinkExpression(s("x")),
+            ),
             // 6. A bare marker line after a link expression.
             ("[x](->> :post)\n{#news}", D::MarkerOnOwnLine(s("news"))),
             ("[x](:p)\n{#n}", D::MarkerOnOwnLine(s("n"))),
@@ -3376,7 +3993,9 @@ headings
             assert_eq!(diagnose_marker_paragraph(md), expected, "{md:?}");
         }
         assert!(
-            D::StrayMarker(s("x")).to_string().contains("`{#x}` on its own is not allowed"),
+            D::StrayMarker(s("x"))
+                .to_string()
+                .contains("`{#x}` on its own is not allowed"),
             "{}",
             D::StrayMarker(s("x"))
         );
@@ -3402,7 +4021,10 @@ headings
     #[test]
     fn parse_link_target_path_ref_strips_colon() {
         let target = super::parse_link_target(":fragments/header").unwrap();
-        assert_eq!(target, crate::document::LinkTarget::PathRef("fragments/header".to_string()));
+        assert_eq!(
+            target,
+            crate::document::LinkTarget::PathRef("fragments/header".to_string())
+        );
     }
 
     #[test]
@@ -3425,8 +4047,7 @@ headings
 
     #[test]
     fn parse_link_target_filter_op() {
-        let target =
-            super::parse_link_target(r#"(->> :post (filter :category "news"))"#).unwrap();
+        let target = super::parse_link_target(r#"(->> :post (filter :category "news"))"#).unwrap();
         match target {
             crate::document::LinkTarget::ThreadExpr { operations, .. } => {
                 assert_eq!(
@@ -3459,21 +4080,32 @@ headings
     /// The link destinations of the paragraph whose markdown is `source`,
     /// read from its inline nodes.
     fn link_destinations(source: &str) -> Vec<String> {
-        let ContentElement::Paragraph { content, .. } = ContentElement::paragraph_from_markdown(source)
+        let ContentElement::Paragraph { content, .. } =
+            ContentElement::paragraph_from_markdown(source)
         else {
             panic!("a paragraph");
         };
-        content.link_destinations().into_iter().map(str::to_string).collect()
+        content
+            .link_destinations()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
     fn link_destinations_marker_shaped() {
-        assert_eq!(link_destinations("[A](/author/a) {#nope}"), vec!["/author/a"]);
+        assert_eq!(
+            link_destinations("[A](/author/a) {#nope}"),
+            vec!["/author/a"]
+        );
     }
 
     #[test]
     fn link_destinations_running_text() {
-        assert_eq!(link_destinations("Some text [A](/author/a) more"), vec!["/author/a"]);
+        assert_eq!(
+            link_destinations("Some text [A](/author/a) more"),
+            vec!["/author/a"]
+        );
     }
 
     #[test]

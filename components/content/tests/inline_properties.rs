@@ -53,8 +53,8 @@
 //! (mutations that would produce them are refused as `NotWritable`).
 
 use content::inline::{
-    parse_inlines, serialize_inlines, AssetRef, Inline, InlineContext, InlineHtml, Inlines,
-    LinkDestination, SearchReplaceError,
+    AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination, SearchReplaceError,
+    parse_inlines, serialize_inlines,
 };
 use content::{AsPlainText, Comment};
 
@@ -120,7 +120,11 @@ fn gen_inlines(rng: &mut Rng, depth: usize) -> Inlines {
     // forbid must be flattened when the parent is normalised. One in three is
     // built as link text instead, which keeps the edge whitespace that a
     // top-level run would lose (N7), so that N4 has something to move.
-    let ctx = if rng.below(3) == 0 { InlineContext::LinkText } else { InlineContext::Paragraph };
+    let ctx = if rng.below(3) == 0 {
+        InlineContext::LinkText
+    } else {
+        InlineContext::Paragraph
+    };
     Inlines::new(gen_items(rng, depth), ctx)
 }
 
@@ -156,13 +160,22 @@ fn assert_normal(items: &[Inline], ctx: InlineContext, single_line: bool, seed: 
         match item {
             Inline::Text(s) => {
                 assert!(!s.is_empty(), "N1 seed {seed}");
-                assert!(!matches!(items.get(i + 1), Some(Inline::Text(_))), "N2 seed {seed}");
+                assert!(
+                    !matches!(items.get(i + 1), Some(Inline::Text(_))),
+                    "N2 seed {seed}"
+                );
                 for bad in [" \n", "\t\n", "\n ", "\n\t", "\n\n", "\r"] {
                     assert!(!s.contains(bad), "N5 {bad:?} in {s:?} seed {seed}");
                 }
-                assert!(!(single_line && s.contains('\n')), "N5 newline in {ctx:?} seed {seed}");
+                assert!(
+                    !(single_line && s.contains('\n')),
+                    "N5 newline in {ctx:?} seed {seed}"
+                );
                 if i > 0 && items[i - 1] == Inline::LineBreak {
-                    assert!(!s.starts_with([' ', '\t']), "N5 after break {s:?} seed {seed}");
+                    assert!(
+                        !s.starts_with([' ', '\t']),
+                        "N5 after break {s:?} seed {seed}"
+                    );
                 }
             }
             Inline::Emph(c) | Inline::Strong(c) => {
@@ -195,7 +208,10 @@ fn assert_normal(items: &[Inline], ctx: InlineContext, single_line: bool, seed: 
                 assert_normal(inner, ctx, single_line, seed);
             }
             Inline::Code(s) => {
-                assert!(!s.is_empty() && !s.contains(['\n', '\r']), "N6 {s:?} seed {seed}");
+                assert!(
+                    !s.is_empty() && !s.contains(['\n', '\r']),
+                    "N6 {s:?} seed {seed}"
+                );
             }
             Inline::LineBreak => assert!(!single_line, "line break in {ctx:?} seed {seed}"),
             Inline::Link { text, .. } => {
@@ -217,7 +233,10 @@ fn assert_normal(items: &[Inline], ctx: InlineContext, single_line: bool, seed: 
 /// N7: a top-level run in a heading, paragraph or cell has no edge space, tab,
 /// newline or hard break.
 fn assert_edges(items: &[Inline], ctx: InlineContext, seed: u64) {
-    if !matches!(ctx, InlineContext::Heading | InlineContext::Paragraph | InlineContext::Cell) {
+    if !matches!(
+        ctx,
+        InlineContext::Heading | InlineContext::Paragraph | InlineContext::Cell
+    ) {
         return;
     }
     let edge = [' ', '\t', '\n'];
@@ -287,7 +306,9 @@ fn render(items: &[Inline]) -> Vec<Rendered> {
     for item in items {
         match item {
             Inline::Text(s) => out.push(Rendered::Text(s.clone())),
-            Inline::Emph(c) | Inline::Strong(c) => out.push(Rendered::Element(render(c.as_slice()))),
+            Inline::Emph(c) | Inline::Strong(c) => {
+                out.push(Rendered::Element(render(c.as_slice())))
+            }
             Inline::Code(s) => out.push(Rendered::Element(vec![Rendered::Text(s.clone())])),
             // `<br>` followed by the newline push_html writes after it.
             Inline::LineBreak => {
@@ -337,21 +358,97 @@ const WORDS: &[&str] = &["a", "word", "x1", "\u{e9}", "Bc"];
 
 /// Texts that need escapes, or look like markup, and are fine as text.
 const SPECIAL_TEXTS: &[&str] = &[
-    "a", "word", "b c", "\u{e9}", "x1", " lead", "trail ", "a  b", "*", " * ", "a*b", "_", "a_b",
-    "_x", "x_", "`", "[x]", "]", "<b>", "a < b", "&amp;", "a & b", "AT&T", "\\", "x\\y", "\\*",
-    "{#x}", "see {#x}", "a {#x} b", "#", "# h", "1. n", "- n", "+ n", "> q", "---", "***", "```",
-    "~~~", "[x](->> :post)", "[r]: /u", "a|b", "!", "a!", "\u{a0}", "a\u{a0}b", "\u{200b}",
-    "\ta", "x\n- y", "x\n# y", "x\n1. y", "x\n> q", "x\n---", "x\n===", "x\n***", "x\n```",
-    "a | b\n--|--", "x\n\\", "x\n+ y", "1) y", "x\n1) y", "&#35;", "&nbsp;", "\u{2003}x",
+    "a",
+    "word",
+    "b c",
+    "\u{e9}",
+    "x1",
+    " lead",
+    "trail ",
+    "a  b",
+    "*",
+    " * ",
+    "a*b",
+    "_",
+    "a_b",
+    "_x",
+    "x_",
+    "`",
+    "[x]",
+    "]",
+    "<b>",
+    "a < b",
+    "&amp;",
+    "a & b",
+    "AT&T",
+    "\\",
+    "x\\y",
+    "\\*",
+    "{#x}",
+    "see {#x}",
+    "a {#x} b",
+    "#",
+    "# h",
+    "1. n",
+    "- n",
+    "+ n",
+    "> q",
+    "---",
+    "***",
+    "```",
+    "~~~",
+    "[x](->> :post)",
+    "[r]: /u",
+    "a|b",
+    "!",
+    "a!",
+    "\u{a0}",
+    "a\u{a0}b",
+    "\u{200b}",
+    "\ta",
+    "x\n- y",
+    "x\n# y",
+    "x\n1. y",
+    "x\n> q",
+    "x\n---",
+    "x\n===",
+    "x\n***",
+    "x\n```",
+    "a | b\n--|--",
+    "x\n\\",
+    "x\n+ y",
+    "1) y",
+    "x\n1) y",
+    "&#35;",
+    "&nbsp;",
+    "\u{2003}x",
 ];
-const WRITABLE_CODES: &[&str] =
-    &["x", "a b", "a`b", "``", " x ", "  ", "`", "a|b", " ", "*x*", "<b>", "x\\"];
+const WRITABLE_CODES: &[&str] = &[
+    "x", "a b", "a`b", "``", " x ", "  ", "`", "a|b", " ", "*x*", "<b>", "x\\",
+];
 const LINK_DESTS: &[&str] = &[
-    "/a", "https://x.y/p", "a b", "a(b)", "x\\y", "x\\", "a&amp;b", "<x>", "#frag", "",
-    "mailto:me@example.com", "\u{e9}.png",
+    "/a",
+    "https://x.y/p",
+    "a b",
+    "a(b)",
+    "x\\y",
+    "x\\",
+    "a&amp;b",
+    "<x>",
+    "#frag",
+    "",
+    "mailto:me@example.com",
+    "\u{e9}.png",
 ];
 const IMAGE_SOURCES: &[&str] = &["i.png", "a b.png", "x(1).png", "\u{e9}.png"];
-const TITLES: &[Option<&str>] = &[None, None, Some("t"), Some("a \"q\" b"), Some("x&amp;y"), Some("a\\b")];
+const TITLES: &[Option<&str>] = &[
+    None,
+    None,
+    Some("t"),
+    Some("a \"q\" b"),
+    Some("x&amp;y"),
+    Some("a\\b"),
+];
 const WRITABLE_HTMLS: &[&str] = &["<b>", "</b>", "<img src=x>", "<span class=\"x\">"];
 const WRITABLE_COMMENTS: &[&str] = &["<!-- c -->", "<!---->"];
 const AFTER_BREAK: &[&str] = &["b", " b", "- b", "# h", "\tb", "1. b"];
@@ -367,11 +464,36 @@ struct Shape {
 
 fn shape_of(ctx: InlineContext) -> Shape {
     match ctx {
-        InlineContext::Paragraph => Shape { links: true, images: true, html: true, breaks: true },
-        InlineContext::Heading => Shape { links: true, images: true, html: true, breaks: false },
-        InlineContext::Cell => Shape { links: true, images: true, html: false, breaks: false },
-        InlineContext::LinkText => Shape { links: false, images: true, html: false, breaks: true },
-        InlineContext::Alt => Shape { links: false, images: false, html: false, breaks: true },
+        InlineContext::Paragraph => Shape {
+            links: true,
+            images: true,
+            html: true,
+            breaks: true,
+        },
+        InlineContext::Heading => Shape {
+            links: true,
+            images: true,
+            html: true,
+            breaks: false,
+        },
+        InlineContext::Cell => Shape {
+            links: true,
+            images: true,
+            html: false,
+            breaks: false,
+        },
+        InlineContext::LinkText => Shape {
+            links: false,
+            images: true,
+            html: false,
+            breaks: true,
+        },
+        InlineContext::Alt => Shape {
+            links: false,
+            images: false,
+            html: false,
+            breaks: true,
+        },
     }
 }
 
@@ -391,22 +513,42 @@ fn gen_writable_run(rng: &mut Rng, depth: usize, shape: Shape) -> Vec<Inline> {
 /// Emphasis content: an alphanumeric text at each edge, anything in between.
 fn gen_emphasis_content(rng: &mut Rng, depth: usize, shape: Shape) -> Inlines {
     let mut content = vec![text(rng.pick(WORDS))];
-    content.extend(gen_writable_run(rng, depth + 1, Shape { html: false, ..shape }));
+    content.extend(gen_writable_run(
+        rng,
+        depth + 1,
+        Shape {
+            html: false,
+            ..shape
+        },
+    ));
     content.push(text(rng.pick(WORDS)));
     Inlines::new(content, InlineContext::Paragraph)
 }
 
 fn gen_writable_atom(rng: &mut Rng, depth: usize, shape: Shape, items: &mut Vec<Inline>) {
-    let nested = Shape { links: false, images: shape.images, html: false, breaks: false };
+    let nested = Shape {
+        links: false,
+        images: shape.images,
+        html: false,
+        breaks: false,
+    };
     match rng.below(100) {
         0..=39 => items.push(text(rng.pick(SPECIAL_TEXTS))),
         40..=54 if depth < 2 => {
             // A space on both sides keeps emphasis apart from emphasis; at
             // the top level a word also does (`a*b*c`).
-            let sep = if depth == 0 && rng.below(2) == 0 { rng.pick(WORDS) } else { " " };
+            let sep = if depth == 0 && rng.below(2) == 0 {
+                rng.pick(WORDS)
+            } else {
+                " "
+            };
             let content = gen_emphasis_content(rng, depth, shape);
             items.push(text(sep));
-            items.push(if rng.below(2) == 0 { Inline::Emph(content) } else { Inline::Strong(content) });
+            items.push(if rng.below(2) == 0 {
+                Inline::Emph(content)
+            } else {
+                Inline::Strong(content)
+            });
             items.push(text(sep));
         }
         55..=62 => {
@@ -417,13 +559,23 @@ fn gen_writable_atom(rng: &mut Rng, depth: usize, shape: Shape, items: &mut Vec<
         63..=71 if shape.links && depth < 2 => items.push(Inline::Link {
             destination: LinkDestination::new(rng.pick(LINK_DESTS)),
             title: rng.pick_option(TITLES),
-            text: Inlines::new(gen_writable_run(rng, depth + 1, nested), InlineContext::LinkText),
+            text: Inlines::new(
+                gen_writable_run(rng, depth + 1, nested),
+                InlineContext::LinkText,
+            ),
         }),
         72..=78 if shape.images && depth < 2 => items.push(Inline::Image {
             source: AssetRef::new(rng.pick(IMAGE_SOURCES)),
             title: rng.pick_option(TITLES),
             alt: Inlines::new(
-                gen_writable_run(rng, depth + 1, Shape { images: false, ..nested }),
+                gen_writable_run(
+                    rng,
+                    depth + 1,
+                    Shape {
+                        images: false,
+                        ..nested
+                    },
+                ),
                 InlineContext::Alt,
             ),
         }),
@@ -440,7 +592,9 @@ fn gen_writable_atom(rng: &mut Rng, depth: usize, shape: Shape, items: &mut Vec<
         }
         89..=91 if shape.html && depth == 0 => {
             items.push(text(rng.pick(WORDS)));
-            items.push(Inline::Comment(content::Comment::new(rng.pick(WRITABLE_COMMENTS)).expect("a comment")));
+            items.push(Inline::Comment(
+                content::Comment::new(rng.pick(WRITABLE_COMMENTS)).expect("a comment"),
+            ));
         }
         92..=95 if shape.links && depth < 2 => {
             // C4: an autolink.
@@ -473,7 +627,11 @@ fn inline_round_trip_on_generated_writable_trees() {
                 Ok(back) => assert_eq!(back, tree, "seed {seed} in {ctx:?}: wrote {written:?}"),
                 Err(e) => panic!("seed {seed} in {ctx:?}: {e}: wrote {written:?} for {tree:?}"),
             }
-            assert_eq!(tree.check_writable(ctx), Ok(()), "seed {seed} in {ctx:?}: {written:?}");
+            assert_eq!(
+                tree.check_writable(ctx),
+                Ok(()),
+                "seed {seed} in {ctx:?}: {written:?}"
+            );
             count += 1;
         }
     }
@@ -490,7 +648,8 @@ fn inline_round_trip_on_generated_writable_trees() {
 const CORPUS_JSON: &str = include_str!("../../../resources/test/inline-corpus.json");
 
 fn corpus_group(group: &str) -> Vec<String> {
-    let all: serde_json::Value = serde_json::from_str(CORPUS_JSON).expect("inline-corpus.json parses");
+    let all: serde_json::Value =
+        serde_json::from_str(CORPUS_JSON).expect("inline-corpus.json parses");
     all[group]
         .as_array()
         .unwrap_or_else(|| panic!("a `{group}` group"))
@@ -532,11 +691,56 @@ fn every_source_wrapped_as_a_heading_reads_back_without_fallback() {
 }
 
 const FRAGMENTS: &[&str] = &[
-    "word", "two words", "*em*", "**strong**", "_em_", "__strong__", "***both***", "`code`",
-    "``a`b``", "[l](/u)", "[l](/u \"t\")", "![alt](i.png)", "<me@e.com>", "<https://x.y>", "<b>",
-    "</b>", "<!-- c -->", "\\*", "\\_", "&amp;", "&nbsp;", "&#x200B;", "&copy;", "a_b", "5 * 3",
-    "x\\\\", "[not a link]", "\\[x\\]", "{#x}", "~~", "&", "<", ">", "#", "1.", "-", "+", "=", "|",
-    "!", "*", "_", "`", "\\", "\u{a0}", "\t", "**_x_**", "_**x**_", "*_x_*", "__*x*__",
+    "word",
+    "two words",
+    "*em*",
+    "**strong**",
+    "_em_",
+    "__strong__",
+    "***both***",
+    "`code`",
+    "``a`b``",
+    "[l](/u)",
+    "[l](/u \"t\")",
+    "![alt](i.png)",
+    "<me@e.com>",
+    "<https://x.y>",
+    "<b>",
+    "</b>",
+    "<!-- c -->",
+    "\\*",
+    "\\_",
+    "&amp;",
+    "&nbsp;",
+    "&#x200B;",
+    "&copy;",
+    "a_b",
+    "5 * 3",
+    "x\\\\",
+    "[not a link]",
+    "\\[x\\]",
+    "{#x}",
+    "~~",
+    "&",
+    "<",
+    ">",
+    "#",
+    "1.",
+    "-",
+    "+",
+    "=",
+    "|",
+    "!",
+    "*",
+    "_",
+    "`",
+    "\\",
+    "\u{a0}",
+    "\t",
+    "**_x_**",
+    "_**x**_",
+    "*_x_*",
+    "__*x*__",
 ];
 const SEPARATORS: &[&str] = &[" ", "", "\n", "\\\n", "  \n", " "];
 
@@ -574,12 +778,23 @@ fn check_fixed_point(source: &str) -> bool {
 fn inline_source_is_fixed_point_after_one_save() {
     let started = std::time::Instant::now();
     let corpus = corpus_group("corpus");
-    let corpus_ok = corpus.iter().filter(|source| check_fixed_point(source)).count();
-    assert!(corpus_ok >= corpus.len() - 10, "only {corpus_ok} corpus entries are inline content");
+    let corpus_ok = corpus
+        .iter()
+        .filter(|source| check_fixed_point(source))
+        .count();
+    assert!(
+        corpus_ok >= corpus.len() - 10,
+        "only {corpus_ok} corpus entries are inline content"
+    );
 
-    let generated_ok =
-        generated_sources().iter().filter(|source| check_fixed_point(source)).count();
-    assert!(generated_ok > 500, "only {generated_ok} generated sources are inline content");
+    let generated_ok = generated_sources()
+        .iter()
+        .filter(|source| check_fixed_point(source))
+        .count();
+    assert!(
+        generated_ok > 500,
+        "only {generated_ok} generated sources are inline content"
+    );
     eprintln!(
         "inline_source_is_fixed_point_after_one_save: {corpus_ok} corpus, {generated_ok} generated, {:?}",
         started.elapsed()
@@ -588,7 +803,18 @@ fn inline_source_is_fixed_point_after_one_save() {
 
 // ── SearchReplace ───────────────────────────────────────────────────────────
 
-const REPLACEMENTS: &[&str] = &["", "x", "new words", "*", "a\nb", " ", "`", "[l](u)", "\u{a0}", "_"];
+const REPLACEMENTS: &[&str] = &[
+    "",
+    "x",
+    "new words",
+    "*",
+    "a\nb",
+    " ",
+    "`",
+    "[l](u)",
+    "\u{a0}",
+    "_",
+];
 
 /// Links, images, raw HTML and comments, at any depth outside alt text:
 /// SearchReplace never removes them.
@@ -619,9 +845,13 @@ fn count_breaks(items: &[Inline]) -> usize {
 
 /// `items` without the `§` that `with_sentinels` put around them.
 fn strip_sentinels(mut items: Vec<Inline>) -> Option<Vec<Inline>> {
-    let Some(Inline::Text(first)) = items.first_mut() else { return None };
+    let Some(Inline::Text(first)) = items.first_mut() else {
+        return None;
+    };
     *first = first.strip_prefix('§')?.to_string();
-    let Some(Inline::Text(last)) = items.last_mut() else { return None };
+    let Some(Inline::Text(last)) = items.last_mut() else {
+        return None;
+    };
     *last = last.strip_suffix('§')?.to_string();
     Some(items)
 }
@@ -631,13 +861,16 @@ fn text_node(s: &str) -> Inline {
 }
 
 fn count_overlapping(text: &str, search: &str) -> usize {
-    text.char_indices().filter(|(i, _)| text[*i..].starts_with(search)).count()
+    text.char_indices()
+        .filter(|(i, _)| text[*i..].starts_with(search))
+        .count()
 }
 
 #[test]
 fn search_replace_result_is_normalised_and_writable() {
     let started = std::time::Instant::now();
-    let (mut ok, mut spans_atom, mut not_unique, mut not_writable) = (0usize, 0usize, 0usize, 0usize);
+    let (mut ok, mut spans_atom, mut not_unique, mut not_writable) =
+        (0usize, 0usize, 0usize, 0usize);
     for seed in WRITABLE_SEEDS {
         for (i, ctx) in CONTEXTS.into_iter().enumerate() {
             let mut rng = Rng::new(1_000_000 + seed * CONTEXTS.len() as u64 + i as u64);
@@ -726,7 +959,9 @@ fn search_replace_result_is_normalised_and_writable() {
                     assert_eq!(count, 1, "{what}");
                     assert!(!search.contains('\u{fffc}'), "{what}");
                 }
-                Err(SearchReplaceError::NotFound) => panic!("{what}: a stretch of the text is not found"),
+                Err(SearchReplaceError::NotFound) => {
+                    panic!("{what}: a stretch of the text is not found")
+                }
             }
         }
     }
@@ -735,7 +970,10 @@ fn search_replace_result_is_normalised_and_writable() {
         started.elapsed()
     );
     assert!(ok >= 500, "only {ok} replacements went through");
-    assert!(spans_atom > 0 && not_unique > 0, "the generator never hit an atom or a repeat");
+    assert!(
+        spans_atom > 0 && not_unique > 0,
+        "the generator never hit an atom or a repeat"
+    );
 }
 
 // ── Parsed trees are writable (P4) ──────────────────────────────────────────
@@ -753,8 +991,14 @@ fn parsed_trees_are_writable() {
     let mut checked = 0usize;
     let mut failures = Vec::new();
     for source in &sources {
-        for ctx in [InlineContext::Paragraph, InlineContext::Heading, InlineContext::Cell] {
-            let Ok(tree) = parse_inlines(source, ctx) else { continue };
+        for ctx in [
+            InlineContext::Paragraph,
+            InlineContext::Heading,
+            InlineContext::Cell,
+        ] {
+            let Ok(tree) = parse_inlines(source, ctx) else {
+                continue;
+            };
             checked += 1;
             if tree.check_writable(ctx).is_err() {
                 failures.push(format!(
@@ -776,6 +1020,11 @@ fn parsed_trees_are_writable() {
         "{} parsed trees are not writable; first {}:\n{}",
         failures.len(),
         failures.len().min(12),
-        failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+        failures
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

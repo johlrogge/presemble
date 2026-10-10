@@ -12,7 +12,7 @@ pub enum DocSource {
 pub struct DocEntry {
     pub name: String,
     pub doc: String,
-    pub arglists: Vec<String>,   // e.g. ["[coll]", "[n coll]"]
+    pub arglists: Vec<String>, // e.g. ["[coll]", "[n coll]"]
     pub source: DocSource,
 }
 
@@ -35,7 +35,10 @@ impl DocRegistry {
     }
 
     pub fn register(&self, entry: DocEntry) {
-        self.entries.write().unwrap().insert(entry.name.clone(), entry);
+        self.entries
+            .write()
+            .unwrap()
+            .insert(entry.name.clone(), entry);
     }
 
     pub fn lookup(&self, name: &str) -> Option<DocEntry> {

@@ -6,8 +6,8 @@
 //! three under a single store write lock at accept time, and resolve and
 //! prepare under a read lock at creation time.
 
-use content_store::edit::{BODY_KIND, SLOT_KIND, Target, UNASSIGNED_KIND};
 use content_store::BLOCK_KINDS;
+use content_store::edit::{BODY_KIND, SLOT_KIND, Target, UNASSIGNED_KIND};
 use editorial_types::{BlockEditCause, NedMutation, StaleCause, SuggestionPreview, TargetKind};
 use node_store::NodeStore;
 
@@ -34,7 +34,8 @@ pub(crate) fn check_drift(
     // out of date.
     if let (NedMutation::InsertChild(_), Target::Container { container, .. }) = (mutation, target)
         && preview.base.markdown.trim().is_empty()
-        && !store.children(*container).is_empty()    {
+        && !store.children(*container).is_empty()
+    {
         return Err(StaleCause::Drifted);
     }
     if !matches!(
@@ -109,19 +110,19 @@ pub(crate) fn already_in_place(
 /// A short, actionable hint for a suggestion rejected at creation time.
 pub(crate) fn creation_hint(cause: &StaleCause, kind: TargetKind) -> Option<&'static str> {
     match cause {
-        StaleCause::WrongKind { expected: TargetKind::Text | TargetKind::TextScope, found }
-            if BLOCK_KINDS.contains(&found.as_str()) =>
-        {
+        StaleCause::WrongKind {
+            expected: TargetKind::Text | TargetKind::TextScope,
+            found,
+        } if BLOCK_KINDS.contains(&found.as_str()) => {
             Some("address the block's text with (ned/text-in <block address>)")
         }
-        StaleCause::WrongKind { expected: TargetKind::Text | TargetKind::TextScope, found }
-            if found == SLOT_KIND || found == BODY_KIND || found == UNASSIGNED_KIND =>
-        {
-            Some(
-                "address one block's text with (ned/text-in (ned/children <slot address>)) \
+        StaleCause::WrongKind {
+            expected: TargetKind::Text | TargetKind::TextScope,
+            found,
+        } if found == SLOT_KIND || found == BODY_KIND || found == UNASSIGNED_KIND => Some(
+            "address one block's text with (ned/text-in (ned/children <slot address>)) \
                  or (ned/text-in (ned/nth-of-kind (ned/children <slot>) \"paragraph\" i))",
-            )
-        }
+        ),
         StaleCause::Ambiguous { .. }
             if matches!(kind, TargetKind::Text | TargetKind::TextScope) =>
         {
@@ -145,8 +146,10 @@ mod tests {
 
     #[test]
     fn insert_next_to_a_block_that_reads_as_the_proposal_is_not_in_place() {
-        use content::{Document, ContentElement};
-        use node_store_bridge::content_bridge::{DocumentMeta, document_to_store, find_child_by_name};
+        use content::{ContentElement, Document};
+        use node_store_bridge::content_bridge::{
+            DocumentMeta, document_to_store, find_child_by_name,
+        };
         use schema::{Span, Spanned};
 
         let doc = Document {
@@ -170,12 +173,9 @@ mod tests {
         let root = document_to_store(&doc, &mut store, Some(&meta));
         let body = find_child_by_name(&store, root, "body").unwrap();
         let block = store.children(body)[0];
-        let target = content_store::edit::resolve(
-            &store,
-            &ned::Selection::single(block),
-            TargetKind::Block,
-        )
-        .unwrap();
+        let target =
+            content_store::edit::resolve(&store, &ned::Selection::single(block), TargetKind::Block)
+                .unwrap();
         let preview = SuggestionPreview {
             base: editorial_types::PreviewText::new("X"),
             proposed: editorial_types::PreviewText::new("X"),
@@ -198,20 +198,47 @@ mod tests {
 
     #[test]
     fn hints_match_causes() {
-        let wrong = StaleCause::WrongKind { expected: TargetKind::Text, found: "heading".into() };
-        assert!(creation_hint(&wrong, TargetKind::Text).unwrap().contains("ned/text-in"));
-        let slot = StaleCause::WrongKind { expected: TargetKind::Text, found: "slot".into() };
-        assert!(creation_hint(&slot, TargetKind::Text).unwrap().contains("ned/text-in"));
-        let unassigned =
-            StaleCause::WrongKind { expected: TargetKind::Text, found: "unassigned".into() };
-        assert!(creation_hint(&unassigned, TargetKind::Text).unwrap().contains("ned/text-in"));
+        let wrong = StaleCause::WrongKind {
+            expected: TargetKind::Text,
+            found: "heading".into(),
+        };
+        assert!(
+            creation_hint(&wrong, TargetKind::Text)
+                .unwrap()
+                .contains("ned/text-in")
+        );
+        let slot = StaleCause::WrongKind {
+            expected: TargetKind::Text,
+            found: "slot".into(),
+        };
+        assert!(
+            creation_hint(&slot, TargetKind::Text)
+                .unwrap()
+                .contains("ned/text-in")
+        );
+        let unassigned = StaleCause::WrongKind {
+            expected: TargetKind::Text,
+            found: "unassigned".into(),
+        };
+        assert!(
+            creation_hint(&unassigned, TargetKind::Text)
+                .unwrap()
+                .contains("ned/text-in")
+        );
         let amb = StaleCause::Ambiguous { matches: 2 };
-        assert!(creation_hint(&amb, TargetKind::Text).unwrap().contains("ned/nth-of-kind"));
+        assert!(
+            creation_hint(&amb, TargetKind::Text)
+                .unwrap()
+                .contains("ned/nth-of-kind")
+        );
         assert!(creation_hint(&amb, TargetKind::Block).is_none());
         assert!(creation_hint(&StaleCause::Unresolved, TargetKind::Block).is_some());
         assert!(
-            creation_hint(&StaleCause::SearchNotUnique { occurrences: 2 }, TargetKind::Text)
-                .is_some()
+            creation_hint(
+                &StaleCause::SearchNotUnique { occurrences: 2 },
+                TargetKind::Text
+            )
+            .is_some()
         );
         assert!(creation_hint(&StaleCause::NoChange, TargetKind::Text).is_none());
     }

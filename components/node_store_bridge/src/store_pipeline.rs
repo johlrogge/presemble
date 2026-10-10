@@ -96,12 +96,13 @@ impl expressions::ThreadItem for SemItem<'_> {
             Node::Element(name) if store.resolve_name(*name) == "paragraph" => {
                 content_store::paragraph_plain_text(store, target)
             }
-            Node::Element(name) if store.resolve_name(*name) == "link" => {
-                store.children(target).into_iter().find_map(|c| match store.get(c) {
+            Node::Element(name) if store.resolve_name(*name) == "link" => store
+                .children(target)
+                .into_iter()
+                .find_map(|c| match store.get(c) {
                     Some(Node::Text(s)) => Some(s.clone()),
                     _ => None,
-                })
-            }
+                }),
             _ => None,
         }
     }
@@ -116,7 +117,7 @@ impl expressions::ThreadItem for SemItem<'_> {
 /// expressions are not page references. Images and thread expressions never
 /// count; the body is not read (see [`links_to_index`]).
 pub fn declared_references(store: &NodeStore, doc_root: NodeId) -> Vec<String> {
-    use crate::content_bridge::{find_child_by_name, slot_element_target, SlotElementTarget};
+    use crate::content_bridge::{SlotElementTarget, find_child_by_name, slot_element_target};
 
     let Some(preamble) = find_child_by_name(store, doc_root, "preamble") else {
         return Vec::new();
@@ -207,7 +208,10 @@ impl ThreadContext {
                 continue;
             }
             if let Some(stem) = get_attribute_text(store, sem, "stem") {
-                items_by_stem.entry(stem).or_default().push((normalise_url(url), sem));
+                items_by_stem
+                    .entry(stem)
+                    .or_default()
+                    .push((normalise_url(url), sem));
             }
         }
         for items in items_by_stem.values_mut() {
@@ -257,7 +261,11 @@ pub fn evaluate_thread(
         .map(|items| {
             items
                 .iter()
-                .map(|(url, sem)| SemItem { store, sem_root: *sem, url: url.clone() })
+                .map(|(url, sem)| SemItem {
+                    store,
+                    sem_root: *sem,
+                    url: url.clone(),
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -283,8 +291,8 @@ pub struct PreambleThread {
 /// The thread expressions in the preamble slots of `doc_root`, in document
 /// order. Thread expressions in `unassigned` are not included.
 pub fn preamble_threads(store: &NodeStore, doc_root: NodeId) -> Vec<PreambleThread> {
+    use crate::content_bridge::{SlotElementTarget, slot_element_target};
     use crate::content_bridge::{children_by_name, find_attr_text, find_child_by_name};
-    use crate::content_bridge::{slot_element_target, SlotElementTarget};
 
     let Some(preamble) = find_child_by_name(store, doc_root, "preamble") else {
         return Vec::new();
@@ -294,8 +302,14 @@ pub fn preamble_threads(store: &NodeStore, doc_root: NodeId) -> Vec<PreambleThre
         let name = find_attr_text(store, slot, "name").unwrap_or_default();
         let mut ordinal = 0;
         for el in store.children(slot) {
-            if let Some(SlotElementTarget::Thread { source, ops }) = slot_element_target(store, el) {
-                out.push(PreambleThread { slot: name.clone(), ordinal, source, ops });
+            if let Some(SlotElementTarget::Thread { source, ops }) = slot_element_target(store, el)
+            {
+                out.push(PreambleThread {
+                    slot: name.clone(),
+                    ordinal,
+                    source,
+                    ops,
+                });
                 ordinal += 1;
             }
         }
@@ -379,7 +393,11 @@ pub fn thread_admits(
         return false;
     };
     let (url, sem_root) = &items[index];
-    let item = SemItem { store, sem_root: *sem_root, url: url.clone() };
+    let item = SemItem {
+        store,
+        sem_root: *sem_root,
+        url: url.clone(),
+    };
     !expressions::apply_link_ops(vec![item], &thread.ops, &normalise_url(page), &ctx.links_to)
         .is_empty()
 }
@@ -399,15 +417,19 @@ pub fn snapshot_query_results<'a>(
     let mut by_key: HashMap<(String, String), Parts> = HashMap::new();
     for &stem_node in stem_nodes {
         for q in queries_over(store, stem_node) {
-            let (Some(page), Some(slot)) =
-                (get_attribute_text(store, q, "page"), get_attribute_text(store, q, "slot"))
-            else {
+            let (Some(page), Some(slot)) = (
+                get_attribute_text(store, q, "page"),
+                get_attribute_text(store, q, "slot"),
+            ) else {
                 continue;
             };
             let ordinal = get_attribute_text(store, q, "ordinal")
                 .and_then(|o| o.parse().ok())
                 .unwrap_or(0);
-            by_key.entry((page, slot)).or_default().push((ordinal, query_result(store, q)));
+            by_key
+                .entry((page, slot))
+                .or_default()
+                .push((ordinal, query_result(store, q)));
         }
     }
     by_key
@@ -446,8 +468,8 @@ pub fn resolve_page_link_expressions(
     ctx: &ThreadContext,
 ) {
     use crate::content_bridge::{
-        element_link_targets, find_child_by_name, find_slot_by_name, slot_element_target,
-        SlotElementTarget,
+        SlotElementTarget, element_link_targets, find_child_by_name, find_slot_by_name,
+        slot_element_target,
     };
 
     let query_edge = store.intern(QUERY_EDGE);
@@ -490,7 +512,10 @@ pub fn resolve_page_link_expressions(
             .into_iter()
             .filter_map(|el| slot_element_target(store, el).map(|t| (el, t)))
             .collect();
-        if !elements.iter().any(|(_, t)| matches!(t, SlotElementTarget::Thread { .. })) {
+        if !elements
+            .iter()
+            .any(|(_, t)| matches!(t, SlotElementTarget::Thread { .. }))
+        {
             continue;
         }
 
@@ -502,7 +527,10 @@ pub fn resolve_page_link_expressions(
                 SlotElementTarget::Thread { source, ops } => {
                     let evaluated = evaluate_thread(store, ctx, source, ops, page_url);
                     targets.extend(evaluated.iter().map(|(_, sem)| *sem));
-                    results.push((source.clone(), evaluated.into_iter().map(|(u, _)| u).collect()));
+                    results.push((
+                        source.clone(),
+                        evaluated.into_iter().map(|(u, _)| u).collect(),
+                    ));
                 }
                 url_target => targets.extend(element_link_targets(
                     store,
@@ -521,7 +549,13 @@ pub fn resolve_page_link_expressions(
         if slot.max_count() == 1 {
             store.remove_reference(sem_root, name);
             if let Some(&first) = targets.first() {
-                store.add_edge(sem_root, Edge::Reference { name, target: first });
+                store.add_edge(
+                    sem_root,
+                    Edge::Reference {
+                        name,
+                        target: first,
+                    },
+                );
             }
         } else {
             let collection = store
@@ -534,7 +568,13 @@ pub fn resolve_page_link_expressions(
                 None if !targets.is_empty() => {
                     let collection = store.add_node(Node::Collection);
                     store.set_children(collection, &targets);
-                    store.add_edge(sem_root, Edge::ConsistsOf { name, part: collection });
+                    store.add_edge(
+                        sem_root,
+                        Edge::ConsistsOf {
+                            name,
+                            part: collection,
+                        },
+                    );
                 }
                 None => {}
             }
@@ -544,7 +584,12 @@ pub fn resolve_page_link_expressions(
         for (ordinal, (source, urls)) in results.into_iter().enumerate() {
             let stem_node = ctx.stem_nodes.get(&source).copied();
             let reusable = match existing.remove(&(slot_name.to_string(), ordinal)) {
-                Some(q) if get_attribute_text(store, q, "source").as_deref() == Some(source.as_str()) => Some(q),
+                Some(q)
+                    if get_attribute_text(store, q, "source").as_deref()
+                        == Some(source.as_str()) =>
+                {
+                    Some(q)
+                }
                 Some(q) => {
                     remove_query_node(store, q);
                     None
@@ -560,16 +605,30 @@ pub fn resolve_page_link_expressions(
                     crate::content_bridge::add_text_attr(store, q, "slot", slot_name);
                     crate::content_bridge::add_text_attr(store, q, "ordinal", &ordinal.to_string());
                     crate::content_bridge::add_text_attr(store, q, "source", &source);
-                    store.add_edge(sem_root, Edge::Derived { name: query_edge, target: q });
+                    store.add_edge(
+                        sem_root,
+                        Edge::Derived {
+                            name: query_edge,
+                            target: q,
+                        },
+                    );
                     if let Some(stem_node) = stem_node {
-                        store.add_edge(q, Edge::Derived { name: over_edge, target: stem_node });
+                        store.add_edge(
+                            q,
+                            Edge::Derived {
+                                name: over_edge,
+                                target: stem_node,
+                            },
+                        );
                     }
                     q
                 }
             };
             let old_children = store.children(q);
-            let new_children: Vec<NodeId> =
-                urls.into_iter().map(|u| store.add_node(Node::Text(u))).collect();
+            let new_children: Vec<NodeId> = urls
+                .into_iter()
+                .map(|u| store.add_node(Node::Text(u)))
+                .collect();
             store.set_children(q, &new_children);
             for old in old_children {
                 store.remove_node(old);
@@ -620,18 +679,26 @@ pub fn store_fingerprint(store: &mut NodeStore, doc_root: NodeId, fingerprint: u
         }
     }
     let value = store.add_node(Node::Text(format!("{fingerprint:016x}")));
-    store.add_edge(doc_root, Edge::Derived { name, target: value });
+    store.add_edge(
+        doc_root,
+        Edge::Derived {
+            name,
+            target: value,
+        },
+    );
 }
 
 /// The fingerprint stored on `doc_root`, if any.
 pub fn fingerprint_of(store: &NodeStore, doc_root: NodeId) -> Option<u64> {
     let name = store.lookup_name(FINGERPRINT_EDGE)?;
-    store.derived(doc_root).into_iter().find(|(n, _)| *n == name).and_then(|(_, v)| {
-        match store.get(v) {
+    store
+        .derived(doc_root)
+        .into_iter()
+        .find(|(n, _)| *n == name)
+        .and_then(|(_, v)| match store.get(v) {
             Some(Node::Text(hex)) => u64::from_str_radix(hex, 16).ok(),
             _ => None,
-        }
-    })
+        })
 }
 
 fn element_name(store: &NodeStore, id: NodeId) -> Option<String> {
@@ -657,45 +724,44 @@ pub fn resolve_cross_references_in_store(
     }
 }
 
-fn resolve_element_cross_refs(
-    store: &mut NodeStore,
-    element_id: NodeId,
-    url_index: &NodeUrlIndex,
-) {
+fn resolve_element_cross_refs(store: &mut NodeStore, element_id: NodeId, url_index: &NodeUrlIndex) {
     let href = get_attribute_text(store, element_id, "href");
     if let Some(href_val) = href
         && let Some(&target_root) = url_index.get(&href_val)
     {
-            // Collect existing reference names on element_id to avoid duplicates.
-            let existing_names: Vec<String> = store
-                .references(element_id)
-                .iter()
-                .map(|(name, _)| store.resolve_name(*name).to_string())
-                .collect();
+        // Collect existing reference names on element_id to avoid duplicates.
+        let existing_names: Vec<String> = store
+            .references(element_id)
+            .iter()
+            .map(|(name, _)| store.resolve_name(*name).to_string())
+            .collect();
 
-            // Collect target page's fields upfront (avoids borrow issues).
-            // Fields live on both ConsistsOf (structural) and Reference (cross-doc) edges.
-            let mut target_fields: Vec<(String, NodeId)> = store
-                .consists_of(target_root)
+        // Collect target page's fields upfront (avoids borrow issues).
+        // Fields live on both ConsistsOf (structural) and Reference (cross-doc) edges.
+        let mut target_fields: Vec<(String, NodeId)> = store
+            .consists_of(target_root)
+            .iter()
+            .map(|(name, node)| (store.resolve_name(*name).to_string(), *node))
+            .collect();
+        target_fields.extend(
+            store
+                .references(target_root)
                 .iter()
-                .map(|(name, node)| (store.resolve_name(*name).to_string(), *node))
-                .collect();
-            target_fields.extend(
-                store
-                    .references(target_root)
-                    .iter()
-                    .map(|(name, node)| (store.resolve_name(*name).to_string(), *node)),
-            );
+                .map(|(name, node)| (store.resolve_name(*name).to_string(), *node)),
+        );
 
-            for (name_str, target_value) in target_fields {
-                if name_str != "href"
-                    && name_str != "text"
-                    && !existing_names.contains(&name_str)
-                {
-                    let name = store.intern(&name_str);
-                    store.add_edge(element_id, Edge::Reference { name, target: target_value });
-                }
+        for (name_str, target_value) in target_fields {
+            if name_str != "href" && name_str != "text" && !existing_names.contains(&name_str) {
+                let name = store.intern(&name_str);
+                store.add_edge(
+                    element_id,
+                    Edge::Reference {
+                        name,
+                        target: target_value,
+                    },
+                );
             }
+        }
     }
 
     // Also recurse into Collection children (for List values).
@@ -780,7 +846,13 @@ pub fn inject_collections_in_store(
         for (stem, &collection_id) in &stem_collections {
             let name = interned_stems[stem];
             if !existing.contains(&name) {
-                store.add_edge(*sem_root, Edge::Reference { name, target: collection_id });
+                store.add_edge(
+                    *sem_root,
+                    Edge::Reference {
+                        name,
+                        target: collection_id,
+                    },
+                );
             }
         }
     }
@@ -822,10 +894,34 @@ mod tests {
         let stem_val1 = store.add_node(Node::Text("post".into()));
         let url_val1 = store.add_node(Node::Text("/post/one".into()));
         let kind_val1 = store.add_node(Node::Text("item".into()));
-        store.add_edge(sem1, Edge::Reference { name: title_name, target: title1 });
-        store.add_edge(sem1, Edge::Attribute { name: stem_name, value: stem_val1 });
-        store.add_edge(sem1, Edge::Attribute { name: url_name, value: url_val1 });
-        store.add_edge(sem1, Edge::Attribute { name: kind_name, value: kind_val1 });
+        store.add_edge(
+            sem1,
+            Edge::Reference {
+                name: title_name,
+                target: title1,
+            },
+        );
+        store.add_edge(
+            sem1,
+            Edge::Attribute {
+                name: stem_name,
+                value: stem_val1,
+            },
+        );
+        store.add_edge(
+            sem1,
+            Edge::Attribute {
+                name: url_name,
+                value: url_val1,
+            },
+        );
+        store.add_edge(
+            sem1,
+            Edge::Attribute {
+                name: kind_name,
+                value: kind_val1,
+            },
+        );
 
         // --- Page 2 ---
         let sem2 = store.add_node(Node::Element(page_name));
@@ -833,10 +929,34 @@ mod tests {
         let stem_val2 = store.add_node(Node::Text("post".into()));
         let url_val2 = store.add_node(Node::Text("/post/two".into()));
         let kind_val2 = store.add_node(Node::Text("item".into()));
-        store.add_edge(sem2, Edge::Reference { name: title_name, target: title2 });
-        store.add_edge(sem2, Edge::Attribute { name: stem_name, value: stem_val2 });
-        store.add_edge(sem2, Edge::Attribute { name: url_name, value: url_val2 });
-        store.add_edge(sem2, Edge::Attribute { name: kind_name, value: kind_val2 });
+        store.add_edge(
+            sem2,
+            Edge::Reference {
+                name: title_name,
+                target: title2,
+            },
+        );
+        store.add_edge(
+            sem2,
+            Edge::Attribute {
+                name: stem_name,
+                value: stem_val2,
+            },
+        );
+        store.add_edge(
+            sem2,
+            Edge::Attribute {
+                name: url_name,
+                value: url_val2,
+            },
+        );
+        store.add_edge(
+            sem2,
+            Edge::Attribute {
+                name: kind_name,
+                value: kind_val2,
+            },
+        );
 
         (store, sem1, sem2)
     }
@@ -863,13 +983,31 @@ mod tests {
         let sem = store.add_node(Node::Element(page_name));
         let kind_val = store.add_node(Node::Text("collection".into()));
         let stem_val = store.add_node(Node::Text("post".into()));
-        store.add_edge(sem, Edge::Attribute { name: kind_name, value: kind_val });
-        store.add_edge(sem, Edge::Attribute { name: stem_name, value: stem_val });
+        store.add_edge(
+            sem,
+            Edge::Attribute {
+                name: kind_name,
+                value: kind_val,
+            },
+        );
+        store.add_edge(
+            sem,
+            Edge::Attribute {
+                name: stem_name,
+                value: stem_val,
+            },
+        );
 
         let roots = vec![("/post".to_string(), sem)];
         let (url_idx, stem_idx) = build_indexes_from_store(&store, &roots);
-        assert!(url_idx.is_empty(), "collection pages should not appear in url_index");
-        assert!(stem_idx.is_empty(), "collection pages should not appear in stem_index");
+        assert!(
+            url_idx.is_empty(),
+            "collection pages should not appear in url_index"
+        );
+        assert!(
+            stem_idx.is_empty(),
+            "collection pages should not appear in stem_index"
+        );
     }
 
     #[test]
@@ -929,7 +1067,13 @@ mod tests {
         // Pre-add a "post" reference to sem1 pointing at a dummy node.
         let dummy = store.add_node(Node::Text("existing".into()));
         let post_name = store.intern("post");
-        store.add_edge(sem1, Edge::Reference { name: post_name, target: dummy });
+        store.add_edge(
+            sem1,
+            Edge::Reference {
+                name: post_name,
+                target: dummy,
+            },
+        );
 
         let roots = vec![
             ("/post/one".to_string(), sem1),
@@ -944,8 +1088,15 @@ mod tests {
             .iter()
             .filter(|(name, _)| store.resolve_name(*name) == "post")
             .collect();
-        assert_eq!(post_refs.len(), 1, "exactly one 'post' reference should exist");
-        assert_eq!(post_refs[0].1, dummy, "existing reference must not be replaced");
+        assert_eq!(
+            post_refs.len(),
+            1,
+            "exactly one 'post' reference should exist"
+        );
+        assert_eq!(
+            post_refs[0].1, dummy,
+            "existing reference must not be replaced"
+        );
     }
 
     #[test]
@@ -981,7 +1132,10 @@ mod tests {
                 .iter()
                 .filter(|(name, _)| store.resolve_name(*name) == "post")
                 .count();
-            assert_eq!(post_ref_count, 1, "each root should have exactly one 'post' reference after idempotent calls");
+            assert_eq!(
+                post_ref_count, 1,
+                "each root should have exactly one 'post' reference after idempotent calls"
+            );
         }
     }
 
@@ -997,7 +1151,13 @@ mod tests {
         }
         let title_name = store.intern("title");
         let title_val = store.add_node(Node::Text(title.into()));
-        store.add_edge(sem, Edge::Reference { name: title_name, target: title_val });
+        store.add_edge(
+            sem,
+            Edge::Reference {
+                name: title_name,
+                target: title_val,
+            },
+        );
         sem
     }
 
@@ -1017,7 +1177,10 @@ mod tests {
         let (_, from_forward) = build_indexes_from_store(&store, &forward);
         let (_, from_reversed) = build_indexes_from_store(&store, &reversed);
 
-        assert_eq!(from_forward["post"], forward, "stem_index must be URL ascending");
+        assert_eq!(
+            from_forward["post"], forward,
+            "stem_index must be URL ascending"
+        );
         assert_eq!(
             from_reversed["post"], from_forward["post"],
             "stem_index must not depend on root order"
@@ -1050,10 +1213,12 @@ mod tests {
         .unwrap();
         let reg = template::NullRegistry;
         let ctx = template::RenderContext::editorial(&reg);
-        let html =
-            template::serialize_nodes(&template::transform(nodes, &prefixed, &ctx).unwrap());
+        let html = template::serialize_nodes(&template::transform(nodes, &prefixed, &ctx).unwrap());
 
-        let pos = |t: &str| html.find(t).unwrap_or_else(|| panic!("{t} missing in {html}"));
+        let pos = |t: &str| {
+            html.find(t)
+                .unwrap_or_else(|| panic!("{t} missing in {html}"))
+        };
         assert!(
             pos("Alpha") < pos("Beta") && pos("Beta") < pos("Gamma"),
             "items must be listed in URL order: {html}"
@@ -1073,22 +1238,52 @@ mod tests {
         let target_root = store.add_node(Node::Element(page_name));
         let kind_val = store.add_node(Node::Text("item".into()));
         let stem_val = store.add_node(Node::Text("post".into()));
-        store.add_edge(target_root, Edge::Attribute { name: kind_name, value: kind_val });
-        store.add_edge(target_root, Edge::Attribute { name: stem_name, value: stem_val });
+        store.add_edge(
+            target_root,
+            Edge::Attribute {
+                name: kind_name,
+                value: kind_val,
+            },
+        );
+        store.add_edge(
+            target_root,
+            Edge::Attribute {
+                name: stem_name,
+                value: stem_val,
+            },
+        );
 
         let headline_name = store.intern("headline");
         let headline_val = store.add_node(Node::Text("The Headline".into()));
-        store.add_edge(target_root, Edge::ConsistsOf { name: headline_name, part: headline_val });
+        store.add_edge(
+            target_root,
+            Edge::ConsistsOf {
+                name: headline_name,
+                part: headline_val,
+            },
+        );
 
         // Build a source page that has a link element pointing to the target.
         let href_name = store.intern("href");
         let link_elem = store.add_node(Node::Element(a_name));
         let href_val = store.add_node(Node::Text("/target".into()));
-        store.add_edge(link_elem, Edge::Attribute { name: href_name, value: href_val });
+        store.add_edge(
+            link_elem,
+            Edge::Attribute {
+                name: href_name,
+                value: href_val,
+            },
+        );
 
         let link_ref_name = store.intern("link");
         let sem_root = store.add_node(Node::Element(page_name));
-        store.add_edge(sem_root, Edge::Reference { name: link_ref_name, target: link_elem });
+        store.add_edge(
+            sem_root,
+            Edge::Reference {
+                name: link_ref_name,
+                target: link_elem,
+            },
+        );
 
         // Build url_index mapping "/target" -> target_root.
         let mut url_index = NodeUrlIndex::new();
@@ -1101,12 +1296,15 @@ mod tests {
         let has_headline = link_refs
             .iter()
             .any(|(name, _)| store.resolve_name(*name) == "headline");
-        assert!(has_headline, "link element should have inherited 'headline' from target page");
+        assert!(
+            has_headline,
+            "link element should have inherited 'headline' from target page"
+        );
     }
 
     // ── Link-expression evaluation ──────────────────────────────────────────
 
-    use crate::content_bridge::{create_semantic_content, document_to_store, DocumentMeta};
+    use crate::content_bridge::{DocumentMeta, create_semantic_content, document_to_store};
     use expressions::ThreadItem;
 
     const POST: &str = "# Post title {#title}\noccurs\n: exactly once\n\n\
@@ -1170,7 +1368,13 @@ mod tests {
             stem_nodes: HashMap::new(),
             page: page.clone(),
         };
-        add_doc(&mut site, "/post/one", "post", "# One\n\n2\n\n[a](/author/a)\n\n----\n\nBody.\n", &post);
+        add_doc(
+            &mut site,
+            "/post/one",
+            "post",
+            "# One\n\n2\n\n[a](/author/a)\n\n----\n\nBody.\n",
+            &post,
+        );
         add_doc(
             &mut site,
             "/post/two",
@@ -1195,17 +1399,25 @@ mod tests {
     #[test]
     fn links_to_index_counts_declared_references_only() {
         let site = site();
-        let docs: Vec<(String, NodeId)> =
-            site.url_to_root.iter().map(|(u, &r)| (u.clone(), r)).collect();
+        let docs: Vec<(String, NodeId)> = site
+            .url_to_root
+            .iter()
+            .map(|(u, &r)| (u.clone(), r))
+            .collect();
         let index = links_to_index(&site.store, &docs);
         let sources = |target: &str| {
-            let mut s: Vec<String> =
-                index.get(target).map(|s| s.iter().cloned().collect()).unwrap_or_default();
+            let mut s: Vec<String> = index
+                .get(target)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
             s.sort();
             s
         };
         // Preamble link slots and a normalised PathRef.
-        assert_eq!(sources("/author/a"), vec!["/page/home", "/post/one", "/post/two"]);
+        assert_eq!(
+            sources("/author/a"),
+            vec!["/page/home", "/post/one", "/post/two"]
+        );
         // An inline link in an unassigned paragraph, normalised.
         assert_eq!(sources("/author/b"), vec!["/post/two"]);
         // Images and body links never count.
@@ -1254,7 +1466,11 @@ mod tests {
         let sem = site.url_to_sem[page];
         let store = &site.store;
         let mut out = Vec::new();
-        for (name, target) in store.consists_of(sem).into_iter().chain(store.references(sem)) {
+        for (name, target) in store
+            .consists_of(sem)
+            .into_iter()
+            .chain(store.references(sem))
+        {
             if store.resolve_name(name) != slot {
                 continue;
             }
@@ -1271,7 +1487,10 @@ mod tests {
     fn resolve_page_applies_ops_records_a_query_and_is_idempotent() {
         let mut site = site();
         let ctx = site.ctx();
-        let (sem, root) = (site.url_to_sem["/page/home"], site.url_to_root["/page/home"]);
+        let (sem, root) = (
+            site.url_to_sem["/page/home"],
+            site.url_to_root["/page/home"],
+        );
         let page = site.page.clone();
         resolve_page_link_expressions(&mut site.store, sem, root, "/page/home", &page, &ctx);
         let expected = vec![site.url_to_sem["/post/two"], site.url_to_sem["/post/one"]];
@@ -1279,11 +1498,14 @@ mod tests {
 
         let queries = queries_over(&site.store, site.stem_nodes["post"]);
         assert_eq!(queries.len(), 1);
-        assert_eq!(query_result(&site.store, queries[0]), vec!["/post/two", "/post/one"]);
-        assert_eq!(reevaluate_query(&site.store, &ctx, queries[0]), Some(vec![
-            "/post/two".to_string(),
-            "/post/one".to_string(),
-        ]));
+        assert_eq!(
+            query_result(&site.store, queries[0]),
+            vec!["/post/two", "/post/one"]
+        );
+        assert_eq!(
+            reevaluate_query(&site.store, &ctx, queries[0]),
+            Some(vec!["/post/two".to_string(), "/post/one".to_string(),])
+        );
         assert_eq!(
             snapshot_query_results(&site.store, site.stem_nodes.values())
                 .get(&("/page/home".to_string(), "latest".to_string())),
@@ -1301,7 +1523,10 @@ mod tests {
     fn resolve_page_removes_queries_of_a_superseded_semantic_root() {
         let mut site = site();
         let page = site.page.clone();
-        let (sem, root) = (site.url_to_sem["/page/home"], site.url_to_root["/page/home"]);
+        let (sem, root) = (
+            site.url_to_sem["/page/home"],
+            site.url_to_root["/page/home"],
+        );
         let ctx = site.ctx();
         resolve_page_link_expressions(&mut site.store, sem, root, "/page/home", &page, &ctx);
         let old = queries_over(&site.store, site.stem_nodes["post"]);
@@ -1310,7 +1535,10 @@ mod tests {
         let src = "# Home\n\n[Latest](->> :post (take 1)) {#latest}\n\n----\n\nWelcome.\n";
         add_doc(&mut site, "/page/home", "page", src, &page);
         let ctx = site.ctx();
-        let (sem, root) = (site.url_to_sem["/page/home"], site.url_to_root["/page/home"]);
+        let (sem, root) = (
+            site.url_to_sem["/page/home"],
+            site.url_to_root["/page/home"],
+        );
         resolve_page_link_expressions(&mut site.store, sem, root, "/page/home", &page, &ctx);
 
         let new = queries_over(&site.store, site.stem_nodes["post"]);
@@ -1327,11 +1555,24 @@ mod tests {
         let src = "# Home\n\n[Owner](->> :post (sort-by :published :desc)) {#owner}\n\n----\n\nWelcome.\n";
         add_doc(&mut site, "/page/other", "page", src, &page);
         let ctx = site.ctx();
-        let (sem, root) = (site.url_to_sem["/page/other"], site.url_to_root["/page/other"]);
+        let (sem, root) = (
+            site.url_to_sem["/page/other"],
+            site.url_to_root["/page/other"],
+        );
         resolve_page_link_expressions(&mut site.store, sem, root, "/page/other", &page, &ctx);
-        assert_eq!(slot_targets(&site, "/page/other", "owner"), vec![site.url_to_sem["/post/one"]]);
+        assert_eq!(
+            slot_targets(&site, "/page/other", "owner"),
+            vec![site.url_to_sem["/post/one"]]
+        );
         let owner = site.store.intern("owner");
-        assert_eq!(site.store.references(sem).iter().filter(|(n, _)| *n == owner).count(), 1);
+        assert_eq!(
+            site.store
+                .references(sem)
+                .iter()
+                .filter(|(n, _)| *n == owner)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1358,11 +1599,29 @@ mod tests {
         let post = schema::parse_schema(POST).unwrap();
         let fp = |site: &Site, url: &str| preamble_fingerprint(&site.store, site.url_to_root[url]);
         let original = fp(&site, "/post/one");
-        add_doc(&mut site, "/post/one", "post", "# One\n\n2\n\n[a](/author/a)\n\n----\n\nNew body.\n", &post);
+        add_doc(
+            &mut site,
+            "/post/one",
+            "post",
+            "# One\n\n2\n\n[a](/author/a)\n\n----\n\nNew body.\n",
+            &post,
+        );
         assert_eq!(fp(&site, "/post/one"), original, "body-only edit");
-        add_doc(&mut site, "/post/one", "post", "# One\n\n3\n\n[a](/author/a)\n\n----\n\nNew body.\n", &post);
+        add_doc(
+            &mut site,
+            "/post/one",
+            "post",
+            "# One\n\n3\n\n[a](/author/a)\n\n----\n\nNew body.\n",
+            &post,
+        );
         assert_ne!(fp(&site, "/post/one"), original, "preamble edit");
-        add_doc(&mut site, "/post/one", "post", "# One\n\n2\n\n[a](/author/a)\n\nStray.\n\n----\n\nNew body.\n", &post);
+        add_doc(
+            &mut site,
+            "/post/one",
+            "post",
+            "# One\n\n2\n\n[a](/author/a)\n\nStray.\n\n----\n\nNew body.\n",
+            &post,
+        );
         assert_ne!(fp(&site, "/post/one"), original, "unassigned edit");
 
         let root = site.url_to_root["/post/one"];
@@ -1371,6 +1630,13 @@ mod tests {
         store_fingerprint(&mut site.store, root, original);
         assert_eq!(fingerprint_of(&site.store, root), Some(original));
         let name = site.store.intern(FINGERPRINT_EDGE);
-        assert_eq!(site.store.derived(root).iter().filter(|(n, _)| *n == name).count(), 1);
+        assert_eq!(
+            site.store
+                .derived(root)
+                .iter()
+                .filter(|(n, _)| *n == name)
+                .count(),
+            1
+        );
     }
 }

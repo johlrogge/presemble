@@ -1,4 +1,4 @@
-use schema::{HeadingLevel, Span, SlotName, Spanned};
+use schema::{HeadingLevel, SlotName, Span, Spanned};
 
 /// A sequence of blocks with the comments between them (ADR-062): the top
 /// level of a document, or the inside of a blockquote (ADR-059 §13).
@@ -25,7 +25,11 @@ pub struct Blocks {
 impl PartialEq for Blocks {
     fn eq(&self, other: &Self) -> bool {
         self.elements.len() == other.elements.len()
-            && self.elements.iter().zip(other.elements.iter()).all(|(a, b)| a.node == b.node)
+            && self
+                .elements
+                .iter()
+                .zip(other.elements.iter())
+                .all(|(a, b)| a.node == b.node)
             && self.comments.len() == other.comments.len()
             && self
                 .comments
@@ -38,7 +42,10 @@ impl PartialEq for Blocks {
 impl Blocks {
     /// Blocks with no comments.
     pub fn from_elements(elements: im::Vector<Spanned<ContentElement>>) -> Self {
-        Blocks { elements, comments: im::Vector::new() }
+        Blocks {
+            elements,
+            comments: im::Vector::new(),
+        }
     }
 }
 
@@ -177,7 +184,10 @@ pub enum ContentElement {
     // (ADR-059 §12); there are no block kinds for them. Readers go through
     // `ContentElement::sole_link` and `sole_image`.
     Separator,
-    CodeBlock { language: Option<String>, code: String },
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
     /// A table (ADR-059 stage 6.2): its columns, each with a header and an
     /// alignment, and its body rows. Every row has exactly one cell per column;
     /// cells are inline content ([`crate::inline::InlineContext::Cell`]).
@@ -187,13 +197,19 @@ pub enum ContentElement {
     },
     /// A CommonMark HTML block, kept verbatim (trimmed source), never
     /// rendered, always an Error (ADR-062).
-    HtmlBlock { source: String },
+    HtmlBlock {
+        source: String,
+    },
     /// A blockquote (ADR-059 §13): a container of any blocks, nested
     /// blockquotes included, with the comments between them. An empty quote
     /// is kept.
-    Blockquote { blocks: Blocks },
+    Blockquote {
+        blocks: Blocks,
+    },
     /// A list (ADR-059 §13): a container of items, each holding blocks.
-    List { list: List },
+    List {
+        list: List,
+    },
     /// A link expression: `[text](target)`, optionally followed by a slot
     /// marker `{#slot}` (ADR-058, decision 9).
     LinkExpression {
@@ -222,7 +238,9 @@ pub struct List {
 pub enum ListKind {
     Bullet,
     /// Numbered from `start`.
-    Ordered { start: u64 },
+    Ordered {
+        start: u64,
+    },
 }
 
 /// Whether the items of a list are written on consecutive lines (tight) or
@@ -247,7 +265,10 @@ impl List {
     /// list without one is written, and read back, tight.
     fn has_a_blank_line_when_loose(&self) -> bool {
         self.items.len() > 1
-            || self.items.iter().any(|item| item.elements.len() + item.comments.len() > 1)
+            || self
+                .items
+                .iter()
+                .any(|item| item.elements.len() + item.comments.len() > 1)
     }
 
     /// The same list as it reads back from its markdown: loose if it is tight
@@ -270,7 +291,11 @@ impl List {
             ListKind::Bullet => true,
             ListKind::Ordered { start } => start == 1,
         };
-        starts_so && self.items.first().is_some_and(|item| !item.elements.is_empty())
+        starts_so
+            && self
+                .items
+                .first()
+                .is_some_and(|item| !item.elements.is_empty())
     }
 }
 
@@ -293,7 +318,9 @@ impl Blocks {
         };
         one_first
             && self.elements.iter().enumerate().skip(1).all(|(at, e)| {
-                let ContentElement::List { list } = &e.node else { return true };
+                let ContentElement::List { list } = &e.node else {
+                    return true;
+                };
                 let after_paragraph = matches!(
                     self.elements[at - 1].node,
                     ContentElement::Paragraph { .. } | ContentElement::LinkExpression { .. }
@@ -348,12 +375,15 @@ pub struct Column {
 /// inline content.
 #[cfg(test)]
 pub(crate) fn table(headers: &[&str], rows: &[&[&str]]) -> ContentElement {
-    use crate::inline::{parse_inlines, InlineContext};
+    use crate::inline::{InlineContext, parse_inlines};
     let cell = |s: &&str| parse_inlines(s, InlineContext::Cell).expect("a cell");
     ContentElement::Table {
         columns: headers
             .iter()
-            .map(|h| Column { header: cell(h), align: Align::Default })
+            .map(|h| Column {
+                header: cell(h),
+                align: Align::Default,
+            })
             .collect(),
         rows: rows.iter().map(|r| r.iter().map(cell).collect()).collect(),
     }
@@ -401,7 +431,10 @@ impl Keyword {
 
     /// Whether `name` is a valid keyword: non-empty, `[A-Za-z0-9_-]` only.
     pub fn is_valid(name: &str) -> bool {
-        !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     }
 
     pub fn as_str(&self) -> &str {
@@ -456,7 +489,10 @@ pub enum SortDirection {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkOp {
     /// (sort-by :field :asc/:desc)
-    SortBy { field: Keyword, direction: SortDirection },
+    SortBy {
+        field: Keyword,
+        direction: SortDirection,
+    },
     /// (take n)
     Take(usize),
     /// (filter :field "value")
@@ -513,9 +549,15 @@ mod tests {
     fn link_expression_thread_expr_with_ops() {
         let kw = |s: &str| Keyword::new(s).unwrap();
         let ops = vec![
-            LinkOp::SortBy { field: kw("published"), direction: SortDirection::Descending },
+            LinkOp::SortBy {
+                field: kw("published"),
+                direction: SortDirection::Descending,
+            },
             LinkOp::Take(4),
-            LinkOp::Filter { field: kw("category"), value: "news".to_string() },
+            LinkOp::Filter {
+                field: kw("category"),
+                value: "news".to_string(),
+            },
         ];
         let elem = ContentElement::LinkExpression {
             text: LinkText::Label("posts".to_string()),
@@ -539,15 +581,24 @@ mod tests {
 
     #[test]
     fn keyword_rejects_other_characters() {
-        for bad in ["", ":post", "a b", "a(b", "a)", "ünï", "a/b", "a.b", "\"x\""] {
-            assert_eq!(Keyword::new(bad), Err(KeywordError(bad.to_string())), "{bad:?}");
+        for bad in [
+            "", ":post", "a b", "a(b", "a)", "ünï", "a/b", "a.b", "\"x\"",
+        ] {
+            assert_eq!(
+                Keyword::new(bad),
+                Err(KeywordError(bad.to_string())),
+                "{bad:?}"
+            );
         }
     }
 
     #[test]
     fn link_text_variants_are_distinct() {
         assert_ne!(LinkText::Empty, LinkText::Static("x".to_string()));
-        assert_ne!(LinkText::Static("a".to_string()), LinkText::Label("a".to_string()));
+        assert_ne!(
+            LinkText::Static("a".to_string()),
+            LinkText::Label("a".to_string())
+        );
         assert_eq!(LinkText::Empty, LinkText::Empty);
     }
 

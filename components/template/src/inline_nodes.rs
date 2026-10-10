@@ -38,7 +38,11 @@ fn push_all(inlines: &Inlines, out: &mut Vec<Node>) {
                 attrs: Vec::new(),
                 children: Vec::new(),
             })),
-            Inline::Link { destination, title, text } => {
+            Inline::Link {
+                destination,
+                title,
+                text,
+            } => {
                 let mut attrs = vec![attr("href", percent_encode_url(destination.as_str()))];
                 push_title(&mut attrs, title.as_deref());
                 out.push(element("a", attrs, text));
@@ -64,7 +68,11 @@ fn push_all(inlines: &Inlines, out: &mut Vec<Node>) {
 fn element(name: &str, attrs: Vec<(String, Form)>, content: &Inlines) -> Node {
     let mut children = Vec::new();
     push_all(content, &mut children);
-    Node::Element(Element { name: name.to_string(), attrs, children })
+    Node::Element(Element {
+        name: name.to_string(),
+        attrs,
+        children,
+    })
 }
 
 fn attr(name: &str, value: String) -> (String, Form) {
@@ -90,8 +98,8 @@ fn push_text(out: &mut Vec<Node>, s: &str) {
 mod tests {
     use super::*;
     use crate::dom::Element;
-    use content::inline::{parse_inlines, InlineContext};
     use content::AsPlainText;
+    use content::inline::{InlineContext, parse_inlines};
 
     /// The old markdown path as an oracle: the nodes of a paragraph's markdown,
     /// unwrapped from their `<p>`.
@@ -148,7 +156,9 @@ mod tests {
         // The corpus reads the same on both paths.
         let mut checked = 0usize;
         for source in corpus_group("corpus") {
-            let Ok(tree) = parse_inlines(&source, InlineContext::Paragraph) else { continue };
+            let Ok(tree) = parse_inlines(&source, InlineContext::Paragraph) else {
+                continue;
+            };
             assert_eq!(inline_nodes(&tree), inline_children(&source), "{source:?}");
             checked += 1;
         }
@@ -170,8 +180,14 @@ mod tests {
     fn plain_text_equals_rendered_text_content() {
         let mut checked = 0usize;
         for source in corpus() {
-            for ctx in [InlineContext::Paragraph, InlineContext::Heading, InlineContext::Cell] {
-                let Ok(tree) = parse_inlines(&source, ctx) else { continue };
+            for ctx in [
+                InlineContext::Paragraph,
+                InlineContext::Heading,
+                InlineContext::Cell,
+            ] {
+                let Ok(tree) = parse_inlines(&source, ctx) else {
+                    continue;
+                };
                 let mut text = String::new();
                 rendered_text(&inline_nodes(&tree), &mut text);
                 let normalised = text.split_whitespace().collect::<Vec<_>>().join(" ");

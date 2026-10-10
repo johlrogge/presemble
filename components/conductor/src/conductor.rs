@@ -4,7 +4,9 @@ use std::sync::{Arc, RwLock};
 
 use rayon::prelude::*;
 
-use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, RenderMode, Response};
+use crate::protocol::{
+    Command, ConductorEvent, DependentFile, FileClassification, RenderMode, Response,
+};
 use crate::suggestion_apply::{self, DOCUMENT_KIND};
 use content_store::edit;
 
@@ -78,7 +80,10 @@ impl std::error::Error for ProgramError {}
 /// What applying one NED mutation did (see `Conductor::apply_ned_mutation`).
 enum MutationOutcome {
     /// The document changed: its pages were re-rendered.
-    Changed { pages: Vec<String>, failed: Vec<String> },
+    Changed {
+        pages: Vec<String>,
+        failed: Vec<String>,
+    },
     /// The content already reads as the mutation wants it: nothing was
     /// written, marked dirty or rebuilt.
     AlreadyInPlace,
@@ -93,26 +98,41 @@ pub struct CommandResult {
 
 /// The event that tells subscribers these documents were written to disk.
 fn saved_event<'a>(files: impl IntoIterator<Item = &'a PathBuf>) -> ConductorEvent {
-    let mut files: Vec<String> = files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let mut files: Vec<String> = files
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     files.sort();
     ConductorEvent::DocumentsSaved { files }
 }
 
 impl CommandResult {
     fn ok() -> Self {
-        Self { response: Response::Ok, events: vec![] }
+        Self {
+            response: Response::Ok,
+            events: vec![],
+        }
     }
 
     fn ok_with_events(events: Vec<ConductorEvent>) -> Self {
-        Self { response: Response::Ok, events }
+        Self {
+            response: Response::Ok,
+            events,
+        }
     }
 
     fn error(msg: impl Into<String>) -> Self {
-        Self { response: Response::Error(msg.into()), events: vec![] }
+        Self {
+            response: Response::Error(msg.into()),
+            events: vec![],
+        }
     }
 
     fn with_response(response: Response) -> Self {
-        Self { response, events: vec![] }
+        Self {
+            response,
+            events: vec![],
+        }
     }
 }
 
@@ -202,14 +222,29 @@ fn body_element_kind(el: &content::ContentElement) -> Option<String> {
 /// them: `templates/<name>/item.{hiccup,html}` and `templates/<name>.{hiccup,html}`.
 /// Sorted and deduplicated.
 fn template_names(site_dir: &Path) -> Vec<String> {
-    let is_template = |p: &Path| matches!(p.extension().and_then(|e| e.to_str()), Some("hiccup" | "html"));
+    let is_template = |p: &Path| {
+        matches!(
+            p.extension().and_then(|e| e.to_str()),
+            Some("hiccup" | "html")
+        )
+    };
     let mut names = std::collections::BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(site_dir.join("templates")) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(site_dir.join("templates")) else {
+        return Vec::new();
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
+        let Some(stem) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
         if path.is_dir() {
-            if ["item.hiccup", "item.html"].iter().any(|f| path.join(f).is_file())
+            if ["item.hiccup", "item.html"]
+                .iter()
+                .any(|f| path.join(f).is_file())
                 && let Some(name) = path.file_name().and_then(|n| n.to_str())
             {
                 names.insert(name.to_string());
@@ -289,14 +324,19 @@ pub(crate) struct DocChange {
 
 /// Extract the title from a document's preamble in the NodeStore.
 /// Walks: document → preamble → slot(name="title") → first child element → first child text.
-fn find_document_title(store: &node_store::NodeStore, doc_root: node_store::NodeId) -> Option<String> {
-    let preamble = node_store_bridge::content_bridge::find_child_by_name(store, doc_root, "preamble")?;
+fn find_document_title(
+    store: &node_store::NodeStore,
+    doc_root: node_store::NodeId,
+) -> Option<String> {
+    let preamble =
+        node_store_bridge::content_bridge::find_child_by_name(store, doc_root, "preamble")?;
 
     // Look through slots for one named "title"
     for child_id in store.children(preamble) {
         if let Some(node_store::Node::Element(name)) = store.get(child_id)
             && store.resolve_name(*name) == "slot"
-            && let Some(slot_name) = node_store_bridge::content_bridge::find_attr_text(store, child_id, "name")
+            && let Some(slot_name) =
+                node_store_bridge::content_bridge::find_attr_text(store, child_id, "name")
             && slot_name == "title"
         {
             for grandchild in store.children(child_id) {
@@ -416,7 +456,10 @@ impl Conductor {
     }
 
     /// Create a conductor with a pre-built repository. Used in tests.
-    pub fn with_repo(site_dir: PathBuf, repo: site_repository::SiteRepository) -> Result<Self, String> {
+    pub fn with_repo(
+        site_dir: PathBuf,
+        repo: site_repository::SiteRepository,
+    ) -> Result<Self, String> {
         let conductor = Self::load_with_repo(site_dir, repo)?;
         conductor.migrate_suggestion_records();
         // Build all pages during startup so the output directory is populated immediately.
@@ -425,7 +468,10 @@ impl Conductor {
     }
 
     /// Everything [`Conductor::with_repo`] does except rendering pages.
-    fn load_with_repo(site_dir: PathBuf, repo: site_repository::SiteRepository) -> Result<Self, String> {
+    fn load_with_repo(
+        site_dir: PathBuf,
+        repo: site_repository::SiteRepository,
+    ) -> Result<Self, String> {
         let site_dir = site_dir.canonicalize().unwrap_or(site_dir);
         let site_index = site_index::SiteIndex::new(site_dir.clone());
 
@@ -478,7 +524,10 @@ impl Conductor {
         // Load persisted NED suggestions from disk (read only: a load never
         // writes to `.presemble`, see `migrate_suggestion_records`)
         let ned_suggestions = Self::load_ned_suggestions(&conductor.ned_suggestions_dir());
-        *conductor.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()) = ned_suggestions;
+        *conductor
+            .ned_suggestions
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = ned_suggestions;
 
         // Populate the node store from the site repository
         conductor.populate_node_store(&[]);
@@ -537,7 +586,11 @@ impl Conductor {
                 .collect();
             let mut discarded: Vec<String> = Vec::new();
             for suggestion in pending {
-                if !step.kinds.iter().any(|kind| self.touches_kind(&suggestion, kind)) {
+                if !step
+                    .kinds
+                    .iter()
+                    .any(|kind| self.touches_kind(&suggestion, kind))
+                {
                     continue;
                 }
                 let file = dir.join(format!("{}.json", suggestion.id));
@@ -564,7 +617,9 @@ impl Conductor {
             }
         }
 
-        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&marker, last.name)) {
+        if let Err(e) =
+            std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&marker, last.name))
+        {
             eprintln!("conductor: could not write {}: {e}", marker.display());
         }
     }
@@ -601,9 +656,7 @@ impl Conductor {
             return false;
         };
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let is_kind = |id: node_store::NodeId| {
-            matches!(store.get(id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == kind)
-        };
+        let is_kind = |id: node_store::NodeId| matches!(store.get(id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == kind);
         selection.iter().any(|id| {
             // The node and its structural ancestors (semantic collections are
             // not structure).
@@ -630,7 +683,10 @@ impl Conductor {
     /// The validation diagnostics from the latest population of the node
     /// store: every schema and content file of the site.
     pub fn validation_report(&self) -> validation::ValidationReport {
-        self.validation_report.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.validation_report
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn site_dir(&self) -> &Path {
@@ -673,7 +729,10 @@ impl Conductor {
     /// after writing it.
     fn stamp_disk(&self, rel: &Path) {
         let stamp = crate::dirty::DiskStamp::of(&self.site_dir.join(rel));
-        self.disk_stamps.write().unwrap_or_else(|e| e.into_inner()).record(rel, stamp);
+        self.disk_stamps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(rel, stamp);
     }
 
     /// Write a document's text and remember the resulting file as the base of
@@ -681,10 +740,14 @@ impl Conductor {
     /// one way a path becomes a file to write) and refused if it is not.
     fn write_document(&self, rel: &Path, text: &[u8]) -> std::io::Result<()> {
         let refuse = |e: editorial_types::PathError| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{}: {e}", rel.display()))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{}: {e}", rel.display()),
+            )
         };
         let site_path = editorial_types::SitePath::parse(&rel.to_string_lossy()).map_err(refuse)?;
-        let abs = crate::site_resolve::resolve_in_site(&self.site_dir, &site_path).map_err(refuse)?;
+        let abs =
+            crate::site_resolve::resolve_in_site(&self.site_dir, &site_path).map_err(refuse)?;
         crate::self_write_tracker::write_source_file(&abs, text, &self.self_write_tracker)?;
         self.stamp_disk(rel);
         Ok(())
@@ -728,7 +791,9 @@ impl Conductor {
             .unwrap_or_else(|_| std::time::SystemTime::now());
         dirty
             .mark_conflict(rel.to_path_buf(), disk_mtime)
-            .then(|| ConductorEvent::DiskConflict { file: rel.to_string_lossy().to_string() })
+            .then(|| ConductorEvent::DiskConflict {
+                file: rel.to_string_lossy().to_string(),
+            })
     }
 
     /// The text of every dirty document (by site-relative path) except those in
@@ -747,7 +812,10 @@ impl Conductor {
             .filter(|path| !disk_wins.contains(path))
             .collect();
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let mut failures = self.repopulate_failures.write().unwrap_or_else(|e| e.into_inner());
+        let mut failures = self
+            .repopulate_failures
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         dirty
             .into_iter()
             .filter_map(|path| {
@@ -755,11 +823,14 @@ impl Conductor {
                 match node_store_bridge::serialize_from_store(&store, root) {
                     Ok(text) => Some((path, text)),
                     Err(e) => {
-                        let url = node_store_bridge::content_bridge::find_attr_text(&store, root, "url")
-                            .unwrap_or_else(|| path.to_string_lossy().to_string());
+                        let url =
+                            node_store_bridge::content_bridge::find_attr_text(&store, root, "url")
+                                .unwrap_or_else(|| path.to_string_lossy().to_string());
                         failures.push((
                             url,
-                            format!("unsaved edits could not be kept: {e}; the file on disk was loaded"),
+                            format!(
+                                "unsaved edits could not be kept: {e}; the file on disk was loaded"
+                            ),
                         ));
                         None
                     }
@@ -773,7 +844,10 @@ impl Conductor {
     /// `BuildFailed` event.
     fn flush_repopulate_failures(&self) -> Vec<String> {
         let failures = std::mem::take(
-            &mut *self.repopulate_failures.write().unwrap_or_else(|e| e.into_inner()),
+            &mut *self
+                .repopulate_failures
+                .write()
+                .unwrap_or_else(|e| e.into_inner()),
         );
         let mut errors = self.build_errors.write().unwrap_or_else(|e| e.into_inner());
         let mut pages = Vec::new();
@@ -811,7 +885,9 @@ impl Conductor {
         // Validation diagnostics for every schema and content file (ADR-061).
         let mut report = validation::ValidationReport::default();
         let relative = |path: PathBuf| -> PathBuf {
-            path.strip_prefix(&self.site_dir).map(Path::to_path_buf).unwrap_or(path)
+            path.strip_prefix(&self.site_dir)
+                .map(Path::to_path_buf)
+                .unwrap_or(path)
         };
         // Site-relative path of the schema stored under schema cache `key`.
         let schema_file = |key: &str| -> PathBuf {
@@ -829,7 +905,8 @@ impl Conductor {
         let schema_cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
         let mut grammars: HashMap<String, schema::Grammar> = HashMap::new();
         // Schema cache keys whose schema failed to parse.
-        let mut failed_schemas: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut failed_schemas: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for (stem_key, src) in schema_cache.iter() {
             match schema::parse_schema(src) {
                 Ok(grammar) => {
@@ -934,10 +1011,22 @@ impl Conductor {
                             file,
                             page_kind: "item".to_string(),
                         };
-                        let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+                        let root = node_store_bridge::content_bridge::document_to_store(
+                            &doc,
+                            &mut store,
+                            Some(&meta),
+                        );
                         url_index.insert(url.clone(), root);
-                        stem_index.entry(stem_str.to_string()).or_default().insert(url.clone(), root);
-                        doc_entries.push(DocEntry { url, root, grammar_key, meta });
+                        stem_index
+                            .entry(stem_str.to_string())
+                            .or_default()
+                            .insert(url.clone(), root);
+                        doc_entries.push(DocEntry {
+                            url,
+                            root,
+                            grammar_key,
+                            meta,
+                        });
                     }
                 }
             }
@@ -986,25 +1075,49 @@ impl Conductor {
                         file,
                         page_kind: "collection".to_string(),
                     };
-                    let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+                    let root = node_store_bridge::content_bridge::document_to_store(
+                        &doc,
+                        &mut store,
+                        Some(&meta),
+                    );
                     url_index.insert(url.clone(), root);
-                    stem_index.entry(stem_str.to_string()).or_default().insert(url.clone(), root);
-                    doc_entries.push(DocEntry { url, root, grammar_key, meta });
+                    stem_index
+                        .entry(stem_str.to_string())
+                        .or_default()
+                        .insert(url.clone(), root);
+                    doc_entries.push(DocEntry {
+                        url,
+                        root,
+                        grammar_key,
+                        meta,
+                    });
                 }
             }
         }
 
         // Pass 2: Create semantic content. Process items before collections
         // so that collection pages' link slots can resolve to item semantic roots.
-        doc_entries.sort_by_key(|e| if e.meta.page_kind == "collection" { 1 } else { 0 });
+        doc_entries.sort_by_key(|e| {
+            if e.meta.page_kind == "collection" {
+                1
+            } else {
+                0
+            }
+        });
         let stem_lists = stem_root_lists(&stem_index);
         for entry in &doc_entries {
-            if let Some(grammar) = grammars.get(&entry.grammar_key)
+            if let Some(grammar) = grammars
+                .get(&entry.grammar_key)
                 .or_else(|| grammars.get(&entry.meta.stem))
             {
                 let sem = node_store_bridge::content_bridge::create_semantic_content(
-                    &mut store, entry.root, grammar, &entry.meta,
-                    &stem_lists, &url_index, Some(&semantic_index),
+                    &mut store,
+                    entry.root,
+                    grammar,
+                    &entry.meta,
+                    &stem_lists,
+                    &url_index,
+                    Some(&semantic_index),
                 );
                 semantic_index.insert(entry.url.clone(), sem);
             }
@@ -1053,19 +1166,49 @@ impl Conductor {
                 // Required metadata attributes
                 let url_name = store.intern("url");
                 let url_val = store.add_node(node_store::Node::Text("/".to_string()));
-                store.add_edge(root, node_store::Edge::Attribute { name: url_name, value: url_val });
+                store.add_edge(
+                    root,
+                    node_store::Edge::Attribute {
+                        name: url_name,
+                        value: url_val,
+                    },
+                );
                 let stem_name = store.intern("stem");
                 let stem_val = store.add_node(node_store::Node::Text(String::new()));
-                store.add_edge(root, node_store::Edge::Attribute { name: stem_name, value: stem_val });
+                store.add_edge(
+                    root,
+                    node_store::Edge::Attribute {
+                        name: stem_name,
+                        value: stem_val,
+                    },
+                );
                 let file_name = store.intern("file");
                 let file_val = store.add_node(node_store::Node::Text(String::new()));
-                store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+                store.add_edge(
+                    root,
+                    node_store::Edge::Attribute {
+                        name: file_name,
+                        value: file_val,
+                    },
+                );
                 let pk_name = store.intern("page-kind");
                 let pk_val = store.add_node(node_store::Node::Text("collection".to_string()));
-                store.add_edge(root, node_store::Edge::Attribute { name: pk_name, value: pk_val });
+                store.add_edge(
+                    root,
+                    node_store::Edge::Attribute {
+                        name: pk_name,
+                        value: pk_val,
+                    },
+                );
                 let sep_name = store.intern("has-separator");
                 let sep_val = store.add_node(node_store::Node::Boolean(false));
-                store.add_edge(root, node_store::Edge::Attribute { name: sep_name, value: sep_val });
+                store.add_edge(
+                    root,
+                    node_store::Edge::Attribute {
+                        name: sep_name,
+                        value: sep_val,
+                    },
+                );
                 // Required structural children: empty preamble and body
                 let preamble_name = store.intern("preamble");
                 let preamble = store.add_node(node_store::Node::Element(preamble_name));
@@ -1074,7 +1217,10 @@ impl Conductor {
                 let body = store.add_node(node_store::Node::Element(body_name));
                 store.add_edge(root, node_store::Edge::Child(body));
                 url_index.insert("/".to_string(), root);
-                stem_index.entry(String::new()).or_default().insert("/".to_string(), root);
+                stem_index
+                    .entry(String::new())
+                    .or_default()
+                    .insert("/".to_string(), root);
 
                 // Create semantic content for this synthetic collection page.
                 // Phase C needs all renderable pages in url_to_semantic.
@@ -1083,15 +1229,33 @@ impl Conductor {
 
                 let stem_attr_name = store.intern("stem");
                 let stem_attr_val = store.add_node(node_store::Node::Text(String::new()));
-                store.add_edge(sem, node_store::Edge::Attribute { name: stem_attr_name, value: stem_attr_val });
+                store.add_edge(
+                    sem,
+                    node_store::Edge::Attribute {
+                        name: stem_attr_name,
+                        value: stem_attr_val,
+                    },
+                );
 
                 let pk_attr_name = store.intern("page-kind");
                 let pk_attr_val = store.add_node(node_store::Node::Text("collection".to_string()));
-                store.add_edge(sem, node_store::Edge::Attribute { name: pk_attr_name, value: pk_attr_val });
+                store.add_edge(
+                    sem,
+                    node_store::Edge::Attribute {
+                        name: pk_attr_name,
+                        value: pk_attr_val,
+                    },
+                );
 
                 let url_attr_name = store.intern("url");
                 let url_attr_val = store.add_node(node_store::Node::Text("/".to_string()));
-                store.add_edge(sem, node_store::Edge::Attribute { name: url_attr_name, value: url_attr_val });
+                store.add_edge(
+                    sem,
+                    node_store::Edge::Attribute {
+                        name: url_attr_name,
+                        value: url_attr_val,
+                    },
+                );
 
                 semantic_index.insert("/".to_string(), sem);
             }
@@ -1106,10 +1270,22 @@ impl Conductor {
         // Commit indexes (drop store lock first to avoid write-write deadlock)
         drop(store);
         *self.url_to_root.write().unwrap_or_else(|e| e.into_inner()) = url_index;
-        *self.url_to_semantic.write().unwrap_or_else(|e| e.into_inner()) = semantic_index;
-        *self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner()) = stem_index;
-        *self.path_to_doc_root.write().unwrap_or_else(|e| e.into_inner()) = path_index;
-        *self.validation_report.write().unwrap_or_else(|e| e.into_inner()) = report.sorted();
+        *self
+            .url_to_semantic
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = semantic_index;
+        *self
+            .stem_to_roots
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = stem_index;
+        *self
+            .path_to_doc_root
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = path_index;
+        *self
+            .validation_report
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = report.sorted();
 
         // Query nodes, stem nodes and preamble fingerprints for the fresh store.
         self.establish_derived_state();
@@ -1120,7 +1296,9 @@ impl Conductor {
     /// (as `populate_node_store` does). Parsed on demand.
     pub(crate) fn grammar_for_page(&self, stem: &str, slug: &str) -> Option<schema::Grammar> {
         let key = site_index::schema_cache_key(stem, slug);
-        let src = self.schema_source(&key).or_else(|| self.schema_source(stem))?;
+        let src = self
+            .schema_source(&key)
+            .or_else(|| self.schema_source(stem))?;
         schema::parse_schema(&src).ok()
     }
 
@@ -1140,9 +1318,20 @@ impl Conductor {
     /// Snapshot of the live URL indexes, for building a `ThreadContext`.
     fn index_snapshots(
         &self,
-    ) -> (HashMap<String, node_store::NodeId>, HashMap<String, node_store::NodeId>) {
-        let sem = self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner()).clone();
-        let roots = self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).clone();
+    ) -> (
+        HashMap<String, node_store::NodeId>,
+        HashMap<String, node_store::NodeId>,
+    ) {
+        let sem = self
+            .url_to_semantic
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let roots = self
+            .url_to_root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         (sem, roots)
     }
 
@@ -1206,12 +1395,17 @@ impl Conductor {
             .collect();
 
         let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
-        self.stem_nodes.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.stem_nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         // Every document stem, schema stem and thread source gets a stem
         // node, so every query node has exactly one `over` edge.
         let mut stems: std::collections::BTreeSet<String> = schema_stems.into_iter().collect();
         for &root in url_to_root.values() {
-            if let Some(stem) = node_store_bridge::content_bridge::find_attr_text(&store, root, "stem") {
+            if let Some(stem) =
+                node_store_bridge::content_bridge::find_attr_text(&store, root, "stem")
+            {
                 stems.insert(stem);
             }
             stems.extend(
@@ -1223,7 +1417,11 @@ impl Conductor {
         for stem in &stems {
             self.ensure_stem_node(&mut store, stem);
         }
-        let stem_nodes = self.stem_nodes.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let stem_nodes = self
+            .stem_nodes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         for &root in url_to_root.values() {
             let fp = node_store_bridge::store_pipeline::preamble_fingerprint(&store, root);
@@ -1280,7 +1478,8 @@ impl Conductor {
         let mut pending = Vec::with_capacity(changes.len());
         for change in changes {
             render.insert(change.url.clone());
-            let old_fp = sp::fingerprint_of(&store, change.previous_root.unwrap_or(change.doc_root));
+            let old_fp =
+                sp::fingerprint_of(&store, change.previous_root.unwrap_or(change.doc_root));
             let new_fp = sp::preamble_fingerprint(&store, change.doc_root);
             sp::store_fingerprint(&mut store, change.doc_root, new_fp);
             let preamble_changed = old_fp != Some(new_fp);
@@ -1290,7 +1489,11 @@ impl Conductor {
             }
             self.ensure_stem_node(&mut store, &change.stem);
             let needs_ctx = preamble_changed || !threads.is_empty();
-            pending.push(Pending { change, preamble_changed, needs_ctx });
+            pending.push(Pending {
+                change,
+                preamble_changed,
+                needs_ctx,
+            });
         }
 
         // 2. The context, only if some change needs it.
@@ -1298,7 +1501,11 @@ impl Conductor {
             return render;
         }
         let (url_to_semantic, url_to_root) = self.index_snapshots();
-        let stem_nodes = self.stem_nodes.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let stem_nodes = self
+            .stem_nodes
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let ctx = sp::ThreadContext::build(&store, url_to_semantic, url_to_root, stem_nodes);
 
         let mut grammars = HashMap::new();
@@ -1321,8 +1528,10 @@ impl Conductor {
                 let Some((page, thread)) = sp::query_thread(&store, &ctx, q) else {
                     continue;
                 };
-                let has_take =
-                    thread.ops.iter().any(|op| matches!(op, content::LinkOp::Take(_)));
+                let has_take = thread
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, content::LinkOp::Take(_)));
                 // D3a, the conservative interim rule: when X is in the
                 // result, its page re-renders even if the result is
                 // unchanged. The goal is that a change to a referenced page
@@ -1404,12 +1613,20 @@ impl Conductor {
 
     /// Get cached schema source for a stem.
     pub fn schema_source(&self, stem: &str) -> Option<String> {
-        self.schema_cache.read().unwrap_or_else(|e| e.into_inner()).get(stem).cloned()
+        self.schema_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(stem)
+            .cloned()
     }
 
     /// Look up a document root NodeId by URL path.
     pub fn document_by_url(&self, url: &str) -> Option<node_store::NodeId> {
-        self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).get(url).copied()
+        self.url_to_root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(url)
+            .copied()
     }
 
     /// Resolve the canonical schema URL for a given content page URL.
@@ -1443,8 +1660,7 @@ impl Conductor {
         drop(url_to_root);
 
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-        let stem =
-            node_store_bridge::content_bridge::find_attr_text(&store, root_id, "stem")?;
+        let stem = node_store_bridge::content_bridge::find_attr_text(&store, root_id, "stem")?;
         let page_kind =
             node_store_bridge::content_bridge::find_attr_text(&store, root_id, "page-kind")?;
         drop(store);
@@ -1493,7 +1709,11 @@ impl Conductor {
 
                 // First item in URL order (documents_for_stem is URL-ordered).
                 roots.iter().find_map(|&root| {
-                    let pk = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
+                    let pk = node_store_bridge::content_bridge::find_attr_text(
+                        &store,
+                        root,
+                        "page-kind",
+                    )?;
                     if pk != "item" {
                         return None;
                     }
@@ -1509,12 +1729,20 @@ impl Conductor {
     /// matching the `file` attribute stored on document root nodes.
     #[allow(dead_code)] // consumed by B3
     pub(crate) fn doc_root_for_path(&self, content_path: &Path) -> Option<node_store::NodeId> {
-        self.path_to_doc_root.read().ok()?.get(content_path).copied()
+        self.path_to_doc_root
+            .read()
+            .ok()?
+            .get(content_path)
+            .copied()
     }
 
     /// Look up a semantic content NodeId by URL path.
     pub fn semantic_content_by_url(&self, url: &str) -> Option<node_store::NodeId> {
-        self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner()).get(url).copied()
+        self.url_to_semantic
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(url)
+            .copied()
     }
 
     /// Get all document root NodeIds for a given schema stem, in URL order.
@@ -1530,13 +1758,17 @@ impl Conductor {
     /// Materialize a DataGraph from a document's NodeStore subtree.
     /// Uses the pass-through approach: reconstruct Document from nodes,
     /// then call the existing build_article_graph.
-    pub fn datagraph_for_document(&self, doc_root: node_store::NodeId) -> Option<template::DataGraph> {
+    pub fn datagraph_for_document(
+        &self,
+        doc_root: node_store::NodeId,
+    ) -> Option<template::DataGraph> {
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
 
         // Get the stem attribute to find the grammar
         let stem = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "stem")?;
         let url = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "url")?;
-        let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "page-kind");
+        let page_kind =
+            node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "page-kind");
         // Derive _presemble_file before releasing the store lock.
         let presemble_file =
             node_store_bridge::content_bridge::presemble_file_for_root(&store, doc_root);
@@ -1611,7 +1843,8 @@ impl Conductor {
             .into_iter()
             .filter_map(|root| {
                 let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
+                let page_kind =
+                    node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
                 if page_kind != "item" {
                     return None;
                 }
@@ -1626,7 +1859,10 @@ impl Conductor {
     /// Get a snapshot of the url→root index (URL string → NodeId).
     /// Used by evaluator primitives.
     pub fn url_to_root_index(&self) -> HashMap<String, node_store::NodeId> {
-        self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.url_to_root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// List all content item URL paths (page-kind=item) from the NodeStore.
@@ -1636,8 +1872,13 @@ impl Conductor {
         let mut urls: Vec<String> = url_to_root
             .iter()
             .filter_map(|(url, &root)| {
-                let pk = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
-                if pk == "item" { Some(url.clone()) } else { None }
+                let pk =
+                    node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
+                if pk == "item" {
+                    Some(url.clone())
+                } else {
+                    None
+                }
             })
             .collect();
         urls.sort();
@@ -1648,13 +1889,21 @@ impl Conductor {
     /// the NodeStore, for evaluating link expressions at the REPL.
     pub fn build_expression_indexes_from_store_pub(
         &self,
-    ) -> (expressions::UrlIndex, expressions::StemIndex, expressions::LinksToIndex) {
+    ) -> (
+        expressions::UrlIndex,
+        expressions::StemIndex,
+        expressions::LinksToIndex,
+    ) {
         self.build_expression_indexes_from_store()
     }
 
     fn build_expression_indexes_from_store(
         &self,
-    ) -> (expressions::UrlIndex, expressions::StemIndex, expressions::LinksToIndex) {
+    ) -> (
+        expressions::UrlIndex,
+        expressions::StemIndex,
+        expressions::LinksToIndex,
+    ) {
         // Collect all (stem, url, root) tuples for item documents without holding locks
         let items: Vec<(String, String, node_store::NodeId)> = {
             let stem_to_roots = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner());
@@ -1662,17 +1911,23 @@ impl Conductor {
             stem_to_roots
                 .iter()
                 .flat_map(|(stem_str, roots)| {
-                    roots.values().filter_map(|&root| {
-                        let page_kind =
-                            node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind");
-                        if page_kind.as_deref() != Some("item") {
-                            return None;
-                        }
-                        let url =
-                            node_store_bridge::content_bridge::find_attr_text(&store, root, "url")?;
-                        Some((stem_str.clone(), url, root))
-                    })
-                    .collect::<Vec<_>>()
+                    roots
+                        .values()
+                        .filter_map(|&root| {
+                            let page_kind = node_store_bridge::content_bridge::find_attr_text(
+                                &store,
+                                root,
+                                "page-kind",
+                            );
+                            if page_kind.as_deref() != Some("item") {
+                                return None;
+                            }
+                            let url = node_store_bridge::content_bridge::find_attr_text(
+                                &store, root, "url",
+                            )?;
+                            Some((stem_str.clone(), url, root))
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .collect()
         };
@@ -1687,7 +1942,10 @@ impl Conductor {
                 let schema_stem = site_index::SchemaStem::new(stem_str);
 
                 url_index.insert(url_path.clone(), data.clone());
-                stem_index.entry(schema_stem).or_default().push((url_path, data));
+                stem_index
+                    .entry(schema_stem)
+                    .or_default()
+                    .push((url_path, data));
             }
         }
 
@@ -1776,8 +2034,14 @@ impl Conductor {
                 );
 
                 // Cache NodeStore-native indexes for rebuild_page
-                *self.cached_node_url_index.write().unwrap_or_else(|e| e.into_inner()) = node_url_index;
-                *self.cached_node_stem_index.write().unwrap_or_else(|e| e.into_inner()) = node_stem_index;
+                *self
+                    .cached_node_url_index
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = node_url_index;
+                *self
+                    .cached_node_stem_index
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = node_stem_index;
             }
         }
         // === End NodeStore-native pipeline ===
@@ -1792,7 +2056,11 @@ impl Conductor {
         // Iterate over semantic content roots instead of DataGraphs.
         let semantic_pairs = self.semantic_pairs_by_url();
         // The document of each page, for the diagnostics of editorial pages.
-        let url_roots = self.url_to_root.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let url_roots = self
+            .url_to_root
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
 
@@ -1868,8 +2136,7 @@ impl Conductor {
 
                 // Use PrefixedGraphView — templates access data via input.field paths
                 let view = node_store_bridge::NodeStoreView::new(&store, *sem_root);
-                let prefixed =
-                    node_store_bridge::PrefixedGraphView::new("input".to_string(), view);
+                let prefixed = node_store_bridge::PrefixedGraphView::new("input".to_string(), view);
 
                 match template::transform(nodes, &prefixed, &ctx) {
                     Ok(transformed) => {
@@ -1948,18 +2215,27 @@ impl Conductor {
     /// Used in tests to populate the NodeStore without going through the full
     /// site-repository pipeline.
     pub fn insert_url_root(&self, url: &str, root: node_store::NodeId) {
-        self.url_to_root.write().unwrap_or_else(|e| e.into_inner()).insert(url.to_string(), root);
+        self.url_to_root
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(url.to_string(), root);
         // Also update stem index and path index if the node has the required attributes
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
         let stem = node_store_bridge::content_bridge::find_attr_text(&store, root, "stem");
         let file = node_store_bridge::content_bridge::find_attr_text(&store, root, "file");
         drop(store);
         if let Some(stem) = stem {
-            self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner())
-                .entry(stem).or_default().insert(url.to_string(), root);
+            self.stem_to_roots
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .entry(stem)
+                .or_default()
+                .insert(url.to_string(), root);
         }
         if let Some(file) = file {
-            self.path_to_doc_root.write().unwrap_or_else(|e| e.into_inner())
+            self.path_to_doc_root
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(PathBuf::from(file), root);
         }
     }
@@ -1967,7 +2243,9 @@ impl Conductor {
     /// Insert a URL→semantic NodeId mapping.
     /// Used in tests alongside insert_url_root.
     pub fn insert_url_semantic(&self, url: &str, sem: node_store::NodeId) {
-        self.url_to_semantic.write().unwrap_or_else(|e| e.into_inner())
+        self.url_to_semantic
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(url.to_string(), sem);
     }
 
@@ -1983,8 +2261,12 @@ impl Conductor {
     /// by source.
     pub fn query_edges_to(&self, target_url: &str) -> Vec<site_index::Edge> {
         let target = node_store_bridge::store_pipeline::normalise_url(target_url);
-        let mut sources: Vec<String> =
-            self.links_to().remove(&target).unwrap_or_default().into_iter().collect();
+        let mut sources: Vec<String> = self
+            .links_to()
+            .remove(&target)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         sources.sort();
         sources
             .into_iter()
@@ -2041,13 +2323,19 @@ impl Conductor {
             .into_iter()
             .filter_map(|root| {
                 // Only item documents (not collections)
-                let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
+                let page_kind =
+                    node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind")?;
                 if page_kind != "item" {
                     return None;
                 }
 
                 let url = node_store_bridge::content_bridge::find_attr_text(&store, root, "url")?;
-                let slug = url.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+                let slug = url
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
 
                 // Get title from the document's preamble
                 let title = find_document_title(&store, root).unwrap_or_else(|| slug.clone());
@@ -2089,7 +2377,9 @@ impl Conductor {
         let path = pattern.split('#').next().unwrap_or(pattern);
         let path = path.split('?').next().unwrap_or(path);
         // Split on '/' and find the first non-empty, non-placeholder segment
-        let stem = path.split('/').find(|seg| !seg.is_empty() && !seg.contains('<') && !seg.contains('>'))?;
+        let stem = path
+            .split('/')
+            .find(|seg| !seg.is_empty() && !seg.contains('<') && !seg.contains('>'))?;
         Some(stem.to_string())
     }
 
@@ -2109,7 +2399,8 @@ impl Conductor {
 
     pub fn list_schemas(&self) -> Vec<String> {
         let cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
-        let mut stems: Vec<String> = cache.keys()
+        let mut stems: Vec<String> = cache
+            .keys()
             .filter(|k| !k.contains('/')) // exclude collection schemas like "post/index"
             .cloned()
             .collect();
@@ -2125,7 +2416,10 @@ impl Conductor {
     /// re-ingests source text nor evaluates link expressions.
     ///
     /// Returns the list of URL paths that were rendered, or an error string.
-    pub(crate) fn render_page_output(&self, doc_root: node_store::NodeId) -> Result<Vec<String>, String> {
+    pub(crate) fn render_page_output(
+        &self,
+        doc_root: node_store::NodeId,
+    ) -> Result<Vec<String>, String> {
         // Read stem, url, and file from the document root's attributes
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
         let stem = node_store_bridge::content_bridge::find_attr_text(&store, doc_root, "stem")
@@ -2157,13 +2451,17 @@ impl Conductor {
             let (node_url_index, node_stem_index) = self.cached_node_indexes();
             let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
             node_store_bridge::store_pipeline::resolve_cross_references_in_store(
-                &mut store, sem_root, &node_url_index,
+                &mut store,
+                sem_root,
+                &node_url_index,
             );
             // Inject collections: build from cached stem index
             // We need ALL semantic roots for collection injection
             let all_roots = self.semantic_pairs_by_url();
             node_store_bridge::store_pipeline::inject_collections_in_store(
-                &mut store, &all_roots, &node_stem_index,
+                &mut store,
+                &all_roots,
+                &node_stem_index,
             );
         }
 
@@ -2176,22 +2474,23 @@ impl Conductor {
             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
             node_store_bridge::content_bridge::find_attr_text(&store, sem_root, "page-kind")
         };
-        let (tmpl_src, is_hiccup) = if slug == "index" || page_kind.as_deref() == Some("collection") {
-            fresh_repo.collection_template_source(&stem_obj)
-                .or_else(|| fresh_repo.item_template_source(&stem_obj))
-                .or_else(|| fresh_repo.partial_template_source(&stem))
-        } else {
-            fresh_repo.item_template_source(&stem_obj)
-                .or_else(|| fresh_repo.partial_template_source(&stem))
-        }
-        .ok_or_else(|| format!("no template for {stem}"))?;
+        let (tmpl_src, is_hiccup) =
+            if slug == "index" || page_kind.as_deref() == Some("collection") {
+                fresh_repo
+                    .collection_template_source(&stem_obj)
+                    .or_else(|| fresh_repo.item_template_source(&stem_obj))
+                    .or_else(|| fresh_repo.partial_template_source(&stem))
+            } else {
+                fresh_repo
+                    .item_template_source(&stem_obj)
+                    .or_else(|| fresh_repo.partial_template_source(&stem))
+            }
+            .ok_or_else(|| format!("no template for {stem}"))?;
 
         let raw_nodes = if is_hiccup {
-            template::parse_template_hiccup(&tmpl_src)
-                .map_err(|e| format!("{e}"))?
+            template::parse_template_hiccup(&tmpl_src).map_err(|e| format!("{e}"))?
         } else {
-            template::parse_template_xml(&tmpl_src)
-                .map_err(|e| format!("{e}"))?
+            template::parse_template_xml(&tmpl_src).map_err(|e| format!("{e}"))?
         };
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
@@ -2216,11 +2515,9 @@ impl Conductor {
         // Write output
         let output_path = site_index::output_path_for_stem_slug(&self.output_dir, &stem, &slug);
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("mkdir error: {e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir error: {e}"))?;
         }
-        std::fs::write(&output_path, &html)
-            .map_err(|e| format!("write error: {e}"))?;
+        std::fs::write(&output_path, &html).map_err(|e| format!("write error: {e}"))?;
 
         Ok(vec![url_path])
     }
@@ -2251,7 +2548,12 @@ impl Conductor {
                 let stem = node_store_bridge::content_bridge::find_attr_text(&store, root, "stem");
                 if let (Some(url), Some(stem)) = (url, stem) {
                     path_of_url.insert(url.clone(), path);
-                    changes.push(DocChange { url, stem, doc_root: root, previous_root: None });
+                    changes.push(DocChange {
+                        url,
+                        stem,
+                        doc_root: root,
+                        previous_root: None,
+                    });
                 }
             }
         }
@@ -2300,7 +2602,12 @@ impl Conductor {
         &self,
         content_path: &Path,
     ) -> Result<(String, String, String, schema::Grammar), String> {
-        let stem = match self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(content_path) {
+        let stem = match self
+            .site_index
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .classify(content_path)
+        {
             site_index::FileKind::Content { schema_stem } => schema_stem.to_string(),
             _ => return Err(format!("not a content file: {}", content_path.display())),
         };
@@ -2313,8 +2620,8 @@ impl Conductor {
         let schema_src = self
             .schema_source(&schema_key)
             .ok_or_else(|| format!("no schema for {schema_key}"))?;
-        let grammar = schema::parse_schema(&schema_src)
-            .map_err(|e| format!("schema error: {e:?}"))?;
+        let grammar =
+            schema::parse_schema(&schema_src).map_err(|e| format!("schema error: {e:?}"))?;
         let url = site_index::url_for_stem_slug(&stem, &slug);
         Ok((stem, slug, url, grammar))
     }
@@ -2351,11 +2658,15 @@ impl Conductor {
             url: url.clone(),
             stem: stem.clone(),
             file: site_index::content_file_path(&stem, &slug),
-            page_kind: if slug == "index" { "collection" } else { "item" }.to_string(),
+            page_kind: if slug == "index" {
+                "collection"
+            } else {
+                "item"
+            }
+            .to_string(),
         };
-        let stem_roots = stem_root_lists(
-            &self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner()),
-        );
+        let stem_roots =
+            stem_root_lists(&self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner()));
         let (url_to_semantic, url_to_root) = self.index_snapshots();
 
         let mut store = self.node_store.write().unwrap_or_else(|e| e.into_inner());
@@ -2462,11 +2773,15 @@ impl Conductor {
         text: &str,
         grammar: &schema::Grammar,
     ) -> Result<node_store::NodeId, String> {
-        let page_kind = if slug == "index" { "collection" } else { "item" };
+        let page_kind = if slug == "index" {
+            "collection"
+        } else {
+            "item"
+        };
         let file = site_index::content_file_path(stem, slug);
 
-        let doc = content::parse_and_assign(text, grammar)
-            .map_err(|e| format!("parse error: {e}"))?;
+        let doc =
+            content::parse_and_assign(text, grammar).map_err(|e| format!("parse error: {e}"))?;
 
         let meta = node_store_bridge::content_bridge::DocumentMeta {
             url: url.to_string(),
@@ -2499,16 +2814,15 @@ impl Conductor {
 
         // Store the document (creates new nodes; the old subtree stays behind
         // as a retired, superseded root, see above)
-        let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+        let root =
+            node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
 
         // Build stem_to_roots and url_to_root snapshots for link resolution.
         // We need ALL documents' roots so link expressions can resolve cross-document.
         let url_to_root_snapshot: HashMap<String, node_store::NodeId> = {
             let existing = self.url_to_root.read().unwrap_or_else(|e| e.into_inner());
-            let mut map: HashMap<String, node_store::NodeId> = existing
-                .iter()
-                .map(|(k, &v)| (k.clone(), v))
-                .collect();
+            let mut map: HashMap<String, node_store::NodeId> =
+                existing.iter().map(|(k, &v)| (k.clone(), v)).collect();
             map.insert(url.to_string(), root);
             map
         };
@@ -2516,8 +2830,14 @@ impl Conductor {
         // Keyed by URL: inserting replaces this URL's old root in place, so
         // the stem's documents stay in URL order.
         let stem_to_roots_snapshot: StemRoots = {
-            let mut map = self.stem_to_roots.read().unwrap_or_else(|e| e.into_inner()).clone();
-            map.entry(stem.to_string()).or_default().insert(url.to_string(), root);
+            let mut map = self
+                .stem_to_roots
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            map.entry(stem.to_string())
+                .or_default()
+                .insert(url.to_string(), root);
             map
         };
 
@@ -2525,8 +2845,12 @@ impl Conductor {
         // The write lock on node_store must be held during this call.
         // Pass url_to_semantic so links resolve to semantic roots when available
         let sem_snapshot: std::collections::HashMap<String, node_store::NodeId> = {
-            self.url_to_semantic.read().unwrap_or_else(|e| e.into_inner())
-                .iter().map(|(k, &v)| (k.clone(), v)).collect()
+            self.url_to_semantic
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(k, &v)| (k.clone(), v))
+                .collect()
         };
         let sem = node_store_bridge::content_bridge::create_semantic_content(
             &mut store,
@@ -2552,7 +2876,10 @@ impl Conductor {
             .insert(url.to_string(), sem);
 
         {
-            let mut stem_roots = self.stem_to_roots.write().unwrap_or_else(|e| e.into_inner());
+            let mut stem_roots = self
+                .stem_to_roots
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             let roots = stem_roots.entry(stem.to_string()).or_default();
             // The snapshot already has the correct roots (this URL's root
             // replaced). Replace the live entry with the snapshot value.
@@ -2595,7 +2922,12 @@ impl Conductor {
     /// Map a cursor line to the structural anchor of the nearest body element.
     ///
     /// Returns `None` if the document cannot be parsed or has no relevant elements.
-    fn body_element_anchor_at_line(&self, src: &str, path: &str, line: u32) -> Option<editorial_types::StructuralAnchor> {
+    fn body_element_anchor_at_line(
+        &self,
+        src: &str,
+        path: &str,
+        line: u32,
+    ) -> Option<editorial_types::StructuralAnchor> {
         // Derive schema stem from path.
         // "content/post/my-post.md" → "post"
         // "content/index.md" or "content/hello.md" → "" (root collection)
@@ -2657,7 +2989,11 @@ impl Conductor {
     /// Reads the document from the in-memory buffer (or disk), parses it, and
     /// delegates to [`body_idx_to_structural`].  Returns `None` if the document
     /// cannot be found/parsed or the index is out of range.
-    fn compute_body_anchor(&self, file: &str, body_idx: usize) -> Option<editorial_types::StructuralAnchor> {
+    fn compute_body_anchor(
+        &self,
+        file: &str,
+        body_idx: usize,
+    ) -> Option<editorial_types::StructuralAnchor> {
         // Derive schema stem from path: content/{stem}/file.md → stem, content/file.md → ""
         let bpath = std::path::Path::new(file);
         let bcomponents: Vec<_> = bpath.components().collect();
@@ -2683,7 +3019,10 @@ impl Conductor {
 
     /// Path to the `.presemble/suggestions/ned/` directory.
     fn ned_suggestions_dir(&self) -> PathBuf {
-        self.site_dir.join(".presemble").join("suggestions").join("ned")
+        self.site_dir
+            .join(".presemble")
+            .join("suggestions")
+            .join("ned")
     }
 
     /// Delete legacy top-level `sug-*.json` files from `.presemble/suggestions/`.
@@ -2706,17 +3045,23 @@ impl Conductor {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if name.starts_with("sug-") && name.ends_with(".json")
+            if name.starts_with("sug-")
+                && name.ends_with(".json")
                 && let Err(e) = std::fs::remove_file(&path)
             {
-                eprintln!("conductor: failed to delete legacy suggestion {}: {e}", path.display());
+                eprintln!(
+                    "conductor: failed to delete legacy suggestion {}: {e}",
+                    path.display()
+                );
             }
         }
     }
 
     /// Load all NED suggestions from the `.presemble/suggestions/ned/` directory.
     /// Loads all statuses (Pending, Accepted, Rejected, Stale) — callers filter as needed.
-    fn load_ned_suggestions(dir: &Path) -> HashMap<editorial_types::SuggestionId, editorial_types::NedSuggestion> {
+    fn load_ned_suggestions(
+        dir: &Path,
+    ) -> HashMap<editorial_types::SuggestionId, editorial_types::NedSuggestion> {
         let mut map = HashMap::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -2736,8 +3081,8 @@ impl Conductor {
         let dir = self.ned_suggestions_dir();
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", sug.id));
-        let json = serde_json::to_string_pretty(sug)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(sug).map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, json)
     }
 
@@ -2802,10 +3147,15 @@ impl Conductor {
 
         let mut events = Vec::new();
         if !rebuilt_pages.is_empty() || has_stylesheet_change {
-            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
+            events.push(ConductorEvent::PagesRebuilt {
+                pages: rebuilt_pages,
+                anchor: None,
+            });
         }
         if !failed_pages.is_empty() {
-            events.push(ConductorEvent::BuildFailed { error_pages: failed_pages });
+            events.push(ConductorEvent::BuildFailed {
+                error_pages: failed_pages,
+            });
         }
         events
     }
@@ -2817,7 +3167,10 @@ impl Conductor {
             site_index::FileKind::Content { schema_stem } => schema_stem.as_str().to_string(),
             _ => return None,
         };
-        let slug = content_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let slug = content_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
         Some(site_index::url_for_stem_slug(&stem, slug))
     }
 
@@ -2960,8 +3313,12 @@ impl Conductor {
             // The file check comes first: a block in another document is
             // never "in place" and never drift.
             let document_file = PathBuf::from(
-                node_store_bridge::content_bridge::find_attr_text(&store, target.document(), "file")
-                    .unwrap_or_default(),
+                node_store_bridge::content_bridge::find_attr_text(
+                    &store,
+                    target.document(),
+                    "file",
+                )
+                .unwrap_or_default(),
             );
             if document_file != file {
                 return Err(editorial_types::StaleCause::Unresolved);
@@ -3060,12 +3417,16 @@ impl Conductor {
         if let Err(e) = self.persist_ned_suggestion(&sug) {
             return CommandResult::error(format!("persist error: {e}"));
         }
-        self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner())
+        self.ned_suggestions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(id.clone(), sug.clone());
 
         CommandResult {
             response: Response::SuggestionCreated(id),
-            events: vec![ConductorEvent::NedSuggestionCreated { suggestion: Box::new(sug) }],
+            events: vec![ConductorEvent::NedSuggestionCreated {
+                suggestion: Box::new(sug),
+            }],
         }
     }
 
@@ -3095,15 +3456,19 @@ impl Conductor {
             }
             Err(e) => return Err(refuse(BlockEditCause::Unaddressable, e.to_string())),
         };
-        let edit::Target::Block { block, container, document } = target else {
+        let edit::Target::Block {
+            block,
+            container,
+            document,
+        } = target
+        else {
             return Err(refuse(
                 BlockEditCause::Unaddressable,
                 "the selection does not address a block".to_string(),
             ));
         };
-        let doc_file =
-            node_store_bridge::content_bridge::find_attr_text(&store, document, "file")
-                .unwrap_or_default();
+        let doc_file = node_store_bridge::content_bridge::find_attr_text(&store, document, "file")
+            .unwrap_or_default();
         if Path::new(&doc_file) != Path::new(req.file.as_str()) {
             return Err(refuse(
                 BlockEditCause::Unaddressable,
@@ -3112,7 +3477,9 @@ impl Conductor {
         }
         // The block's index in `body`, for the scroll anchor (ADR-046).
         let body_idx = match store.get(container) {
-            Some(node_store::Node::Element(name)) if store.resolve_name(*name) == edit::BODY_KIND => {
+            Some(node_store::Node::Element(name))
+                if store.resolve_name(*name) == edit::BODY_KIND =>
+            {
                 store.children(container).iter().position(|c| *c == block)
             }
             _ => None,
@@ -3142,14 +3509,18 @@ impl Conductor {
         let refuse = |cause, message: String| BlockEditError { cause, message };
         let target = edit::resolve(store, sel, TargetKind::Container)
             .map_err(|e| refuse(BlockEditCause::Unaddressable, e.to_string()))?;
-        let edit::Target::Container { container, document } = target else {
+        let edit::Target::Container {
+            container,
+            document,
+        } = target
+        else {
             return Err(refuse(
                 BlockEditCause::Unaddressable,
                 "the selection does not address a slot".to_string(),
             ));
         };
-        let doc_file =
-            node_store_bridge::content_bridge::find_attr_text(store, document, "file").unwrap_or_default();
+        let doc_file = node_store_bridge::content_bridge::find_attr_text(store, document, "file")
+            .unwrap_or_default();
         if Path::new(&doc_file) != Path::new(req.file.as_str()) {
             return Err(refuse(
                 BlockEditCause::Unaddressable,
@@ -3163,7 +3534,12 @@ impl Conductor {
             ));
         }
         let slot_name = node_store_bridge::content_bridge::find_attr_text(store, container, "name")
-            .ok_or_else(|| refuse(BlockEditCause::Unaddressable, "the slot has no name".to_string()))?;
+            .ok_or_else(|| {
+                refuse(
+                    BlockEditCause::Unaddressable,
+                    "the slot has no name".to_string(),
+                )
+            })?;
         let grammar = self
             .load_grammar_for_file(req.file.as_str())
             .map_err(|e| refuse(BlockEditCause::Unaddressable, e))?;
@@ -3172,7 +3548,10 @@ impl Conductor {
             .iter()
             .find(|s| s.name.as_str() == slot_name)
             .ok_or_else(|| {
-                refuse(BlockEditCause::Unaddressable, format!("slot '{slot_name}' is not in the schema"))
+                refuse(
+                    BlockEditCause::Unaddressable,
+                    format!("slot '{slot_name}' is not in the schema"),
+                )
             })?;
         let like = match &slot.element {
             schema::Element::Heading { level } => content::ContentElement::heading_from_markdown(
@@ -3181,7 +3560,12 @@ impl Conductor {
             ),
             _ => content::ContentElement::paragraph_from_markdown(""),
         };
-        node_store_bridge::block_edit::lower_into_empty_slot(&req.selection, &like, &req.base, &req.proposed)
+        node_store_bridge::block_edit::lower_into_empty_slot(
+            &req.selection,
+            &like,
+            &req.base,
+            &req.proposed,
+        )
     }
 
     /// Handle [`Command::BlockEdit`]: lower, then apply now or store a
@@ -3189,15 +3573,13 @@ impl Conductor {
     fn block_edit(&self, req: &editorial_types::BlockEditRequest) -> CommandResult {
         use editorial_types::{BlockEditOutcome, BlockEditResponse};
         match self.lower_block_edit(req) {
-            Ok((node_store_bridge::block_edit::Lowering::Lowered(lowered), body_idx)) => self.run_lowered(
-                req.intent,
-                &req.file,
-                lowered,
-                body_idx,
-                req.reason.clone(),
-            ),
+            Ok((node_store_bridge::block_edit::Lowering::Lowered(lowered), body_idx)) => {
+                self.run_lowered(req.intent, &req.file, lowered, body_idx, req.reason.clone())
+            }
             Ok((node_store_bridge::block_edit::Lowering::NoChange, _)) => CommandResult {
-                response: Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::NoChange)),
+                response: Response::BlockEdited(BlockEditResponse::Done(
+                    BlockEditOutcome::NoChange,
+                )),
                 events: vec![],
             },
             Err(e) => CommandResult {
@@ -3209,9 +3591,7 @@ impl Conductor {
 
     /// The refusal cause for an Apply that could not run. A search that no
     /// longer matches means the block changed since the lowering: drift.
-    fn apply_refusal_cause(
-        cause: &editorial_types::StaleCause,
-    ) -> editorial_types::BlockEditCause {
+    fn apply_refusal_cause(cause: &editorial_types::StaleCause) -> editorial_types::BlockEditCause {
         use editorial_types::{BlockEditCause, StaleCause};
         match cause {
             StaleCause::Drifted
@@ -3246,7 +3626,10 @@ impl Conductor {
             events,
         };
         let refused = |cause, message: String| {
-            respond(BlockEditResponse::Refused(BlockEditError { cause, message }), vec![])
+            respond(
+                BlockEditResponse::Refused(BlockEditError { cause, message }),
+                vec![],
+            )
         };
 
         match intent {
@@ -3267,15 +3650,19 @@ impl Conductor {
                             events.push(ConductorEvent::PagesRebuilt {
                                 pages: pages.clone(),
                                 // After the rebuild: the anchor reads the new body.
-                                anchor: body_idx.and_then(|idx| {
-                                    self.compute_body_anchor(file.as_str(), idx)
-                                }),
+                                anchor: body_idx
+                                    .and_then(|idx| self.compute_body_anchor(file.as_str(), idx)),
                             });
                         }
                         if !failed.is_empty() {
-                            events.push(ConductorEvent::BuildFailed { error_pages: failed });
+                            events.push(ConductorEvent::BuildFailed {
+                                error_pages: failed,
+                            });
                         }
-                        respond(BlockEditResponse::Done(BlockEditOutcome::Applied { pages }), events)
+                        respond(
+                            BlockEditResponse::Done(BlockEditOutcome::Applied { pages }),
+                            events,
+                        )
                     }
                     Err(cause) => refused(Self::apply_refusal_cause(&cause), cause.to_string()),
                 }
@@ -3394,13 +3781,24 @@ impl Conductor {
         };
         let mut events = Vec::new();
         if !rebuilt_pages.is_empty() {
-            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages.clone(), anchor: None });
+            events.push(ConductorEvent::PagesRebuilt {
+                pages: rebuilt_pages.clone(),
+                anchor: None,
+            });
         }
         if !failed_pages.is_empty() {
-            events.push(ConductorEvent::BuildFailed { error_pages: failed_pages.clone() });
+            events.push(ConductorEvent::BuildFailed {
+                error_pages: failed_pages.clone(),
+            });
         }
         Ok((
-            ProgramOutcome { dirty_paths, rebuilt_pages, failed_pages, applied: steps - skipped, skipped },
+            ProgramOutcome {
+                dirty_paths,
+                rebuilt_pages,
+                failed_pages,
+                applied: steps - skipped,
+                skipped,
+            },
             events,
         ))
     }
@@ -3425,8 +3823,12 @@ impl Conductor {
             Err(e @ ProgramError::Eval(_)) => return CommandResult::error(e.to_string()),
         };
 
-        let ProgramOutcome { dirty_paths, rebuilt_pages: rebuilt_urls, failed_pages: failed_urls, .. } =
-            outcome;
+        let ProgramOutcome {
+            dirty_paths,
+            rebuilt_pages: rebuilt_urls,
+            failed_pages: failed_urls,
+            ..
+        } = outcome;
         let dirty_path_count = dirty_paths.len();
 
         CommandResult {
@@ -3441,7 +3843,9 @@ impl Conductor {
 
     fn stem_from_url_path(url: &str) -> String {
         let trimmed = url.trim_start_matches('/');
-        if trimmed.is_empty() { return String::new(); }
+        if trimmed.is_empty() {
+            return String::new();
+        }
         trimmed.split('/').next().unwrap_or("").to_string()
     }
 
@@ -3474,36 +3878,43 @@ impl Conductor {
                     schema::SchemaKind::Item => {
                         let item_key = format!("{stem}/item");
                         let c = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
-                        if c.contains_key(&item_key) { item_key } else { stem.clone() }
+                        if c.contains_key(&item_key) {
+                            item_key
+                        } else {
+                            stem.clone()
+                        }
                     }
                 };
                 let grammar_src = {
                     let c = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
                     c.get(&grammar_key).cloned()
-                }.ok_or_else(|| format!("no schema for {url_path} (key={grammar_key})"))?;
-                let grammar = schema::parse_schema(&grammar_src)
-                    .map_err(|e| format!("schema parse: {e}"))?;
+                }
+                .ok_or_else(|| format!("no schema for {url_path} (key={grammar_key})"))?;
+                let grammar =
+                    schema::parse_schema(&grammar_src).map_err(|e| format!("schema parse: {e}"))?;
                 let doc = node_store_bridge::synthesize_schema_document(&grammar, kind);
-                let article_graph = template::build_article_graph(
-                    &doc,
-                    &grammar,
-                    template::OutputMode::Editorial,
-                );
+                let article_graph =
+                    template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial);
                 let mut ctx_graph = template::DataGraph::new();
                 ctx_graph.insert("_presemble_stem", template::Value::Text(stem.clone()));
                 ctx_graph.insert("_presemble_file", template::Value::Text(String::new()));
                 ctx_graph.insert("url", template::Value::Text(url_path.to_string()));
                 ctx_graph.insert("input", template::Value::Record(article_graph));
-                let fresh_repo = site_repository::SiteRepository::builder().from_dir(&self.site_dir).build();
+                let fresh_repo = site_repository::SiteRepository::builder()
+                    .from_dir(&self.site_dir)
+                    .build();
                 let stem_obj = site_index::SchemaStem::new(&stem);
                 let tmpl = if matches!(kind, schema::SchemaKind::Index) {
-                    fresh_repo.collection_template_source(&stem_obj)
+                    fresh_repo
+                        .collection_template_source(&stem_obj)
                         .or_else(|| fresh_repo.item_template_source(&stem_obj))
                         .or_else(|| fresh_repo.partial_template_source(&stem))
                 } else {
-                    fresh_repo.item_template_source(&stem_obj)
+                    fresh_repo
+                        .item_template_source(&stem_obj)
                         .or_else(|| fresh_repo.partial_template_source(&stem))
-                }.ok_or_else(|| format!("no template for stem {stem}"))?;
+                }
+                .ok_or_else(|| format!("no template for stem {stem}"))?;
                 let (tmpl_src, is_hiccup) = tmpl;
                 let raw = if is_hiccup {
                     template::parse_template_hiccup(&tmpl_src).map_err(|e| format!("{e}"))?
@@ -3521,9 +3932,16 @@ impl Conductor {
                     .map_err(|e| format!("render: {e}"))?;
 
                 // T6: attach instance-count + sample-URL attrs to the first root element.
-                let count = self.site_index.read().unwrap_or_else(|e| e.into_inner())
-                    .content_files(&stem).len();
-                let sample_url = self.site_index.read().unwrap_or_else(|e| e.into_inner())
+                let count = self
+                    .site_index
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .content_files(&stem)
+                    .len();
+                let sample_url = self
+                    .site_index
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
                     .sample_url_for_stem(&stem);
                 let transformed = template::attach_schema_instance_attrs(
                     transformed,
@@ -3532,18 +3950,21 @@ impl Conductor {
                 );
 
                 // T7: attach included-by back-reference JSON attr.
-                let including_stems = self.site_index.read().unwrap_or_else(|e| e.into_inner())
+                let including_stems = self
+                    .site_index
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
                     .schemas_including(&stem);
-                let included_pairs_owned: Vec<(String, String)> = including_stems.iter()
+                let included_pairs_owned: Vec<(String, String)> = including_stems
+                    .iter()
                     .map(|s| (s.clone(), format!("/{s}/#_schema")))
                     .collect();
-                let included_pairs: Vec<(&str, &str)> = included_pairs_owned.iter()
+                let included_pairs: Vec<(&str, &str)> = included_pairs_owned
+                    .iter()
                     .map(|(s, u)| (s.as_str(), u.as_str()))
                     .collect();
-                let transformed = template::attach_schema_included_by_attr(
-                    transformed,
-                    &included_pairs,
-                );
+                let transformed =
+                    template::attach_schema_included_by_attr(transformed, &included_pairs);
 
                 Ok(template::serialize_nodes(&transformed))
             }
@@ -3591,16 +4012,21 @@ impl Conductor {
                 //    If the mtime matches a recorded self-write, the event is suppressed.
                 //    Deletions (no metadata) are always processed.
                 //    A path that resolves outside the site is not ours: it is dropped.
-                let external_paths: Vec<editorial_types::SitePath> = paths.iter().filter(|p| {
-                    let Ok(abs) = crate::site_resolve::resolve_in_site(&self.site_dir, p) else {
-                        return false;
-                    };
-                    let mtime = std::fs::metadata(&abs).ok().and_then(|m| m.modified().ok());
-                    match mtime {
-                        Some(mtime) => !self.self_write_tracker.should_ignore(&abs, mtime),
-                        None => true, // deletion — always process
-                    }
-                }).cloned().collect();
+                let external_paths: Vec<editorial_types::SitePath> = paths
+                    .iter()
+                    .filter(|p| {
+                        let Ok(abs) = crate::site_resolve::resolve_in_site(&self.site_dir, p)
+                        else {
+                            return false;
+                        };
+                        let mtime = std::fs::metadata(&abs).ok().and_then(|m| m.modified().ok());
+                        match mtime {
+                            Some(mtime) => !self.self_write_tracker.should_ignore(&abs, mtime),
+                            None => true, // deletion — always process
+                        }
+                    })
+                    .cloned()
+                    .collect();
 
                 // If every changed path was written by us, skip the rebuild entirely.
                 if external_paths.is_empty() {
@@ -3637,7 +4063,12 @@ impl Conductor {
                         conflict_events.extend(events);
                     } else if let Some(event) = self.record_disk_conflict(&rel) {
                         conflict_events.push(event);
-                    } else if !self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(&rel) {
+                    } else if !self
+                        .dirty_docs
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(&rel)
+                    {
                         disk_wins.push(rel);
                     }
                 }
@@ -3653,10 +4084,16 @@ impl Conductor {
                 };
 
                 // 6. Batch-render all pages using O(n) pipeline
-                let (rebuilt_pages, failed_pages, new_errors) = self.build_all_pages(template::OutputMode::Editorial);
+                let (rebuilt_pages, failed_pages, new_errors) =
+                    self.build_all_pages(template::OutputMode::Editorial);
 
                 // 7-8. Update build errors and build events
-                let mut events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, has_stylesheet_change);
+                let mut events = self.finalize_render(
+                    rebuilt_pages,
+                    failed_pages,
+                    new_errors,
+                    has_stylesheet_change,
+                );
                 events.extend(conflict_events);
 
                 if events.is_empty() {
@@ -3669,7 +4106,9 @@ impl Conductor {
                 // Throw away this document's unsaved edits and load it from
                 // disk (an editor attached is given the disk text). Every other document
                 // keeps its unsaved edits (the repopulate rule).
-                if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, path.as_site_path()) {
+                if let Err(e) =
+                    crate::site_resolve::resolve_in_site(&self.site_dir, path.as_site_path())
+                {
                     return CommandResult::error(format!("{path}: {e}"));
                 }
                 let rel = PathBuf::from(path.as_str());
@@ -3689,24 +4128,27 @@ impl Conductor {
                     self.build_all_pages(template::OutputMode::Editorial);
                 let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, false);
                 CommandResult {
-                    response: Response::Reloaded { discarded: was_dirty },
+                    response: Response::Reloaded {
+                        discarded: was_dirty,
+                    },
                     events,
                 }
             }
             Command::CursorMoved { path, line } => {
                 // An open editor's text is the one the line is in.
-                if let Some(src) = self.editor_text(&path).or_else(|| self.document_text(&path))
-                    && let Some(anchor) = self.body_element_anchor_at_line(&src, path.as_str(), line)
+                if let Some(src) = self
+                    .editor_text(&path)
+                    .or_else(|| self.document_text(&path))
+                    && let Some(anchor) =
+                        self.body_element_anchor_at_line(&src, path.as_str(), line)
                 {
-                    return CommandResult::ok_with_events(vec![
-                        ConductorEvent::CursorScrollTo { anchor },
-                    ]);
+                    return CommandResult::ok_with_events(vec![ConductorEvent::CursorScrollTo {
+                        anchor,
+                    }]);
                 }
                 CommandResult::ok()
             }
-            Command::ApplyNedProgram { program } => {
-                self.apply_ned_program(&program)
-            }
+            Command::ApplyNedProgram { program } => self.apply_ned_program(&program),
             Command::CreateContent { stem, slug } => {
                 // Use a fresh repo to find current schemas (self.repo may be stale after scaffold)
                 let fresh_repo = site_repository::SiteRepository::builder()
@@ -3730,7 +4172,10 @@ impl Conductor {
                         self.refresh_site_index();
                         // The new file is the one the disk wins for; unsaved
                         // edits in every other document are kept.
-                        let created = path.strip_prefix(&self.site_dir).unwrap_or(&path).to_path_buf();
+                        let created = path
+                            .strip_prefix(&self.site_dir)
+                            .unwrap_or(&path)
+                            .to_path_buf();
                         self.populate_node_store(&[created]);
 
                         let mut rebuilt_pages: Vec<String> = vec![];
@@ -3761,18 +4206,25 @@ impl Conductor {
                         if let Some(text) = self.document_text_at(&path) {
                             match self.rebuild_page(&path, &text) {
                                 Ok(mut pages) => rebuilt_pages.append(&mut pages),
-                                Err(e) => eprintln!("conductor: rebuild failed for new content {}: {e}", path.display()),
+                                Err(e) => eprintln!(
+                                    "conductor: rebuild failed for new content {}: {e}",
+                                    path.display()
+                                ),
                             }
                         }
 
                         // Rebuild the collection index page if it exists
-                        let collection_index = self.site_dir.join("content").join(&stem).join("index.md");
+                        let collection_index =
+                            self.site_dir.join("content").join(&stem).join("index.md");
                         if collection_index.exists()
                             && let Some(text) = self.document_text_at(&collection_index)
                         {
                             match self.rebuild_page(&collection_index, &text) {
                                 Ok(mut pages) => rebuilt_pages.append(&mut pages),
-                                Err(e) => eprintln!("conductor: rebuild failed for collection index {}: {e}", collection_index.display()),
+                                Err(e) => eprintln!(
+                                    "conductor: rebuild failed for collection index {}: {e}",
+                                    collection_index.display()
+                                ),
                             }
                         }
 
@@ -3783,19 +4235,30 @@ impl Conductor {
                         {
                             match self.rebuild_page(&site_index_path, &text) {
                                 Ok(mut pages) => rebuilt_pages.append(&mut pages),
-                                Err(e) => eprintln!("conductor: rebuild failed for site index {}: {e}", site_index_path.display()),
+                                Err(e) => eprintln!(
+                                    "conductor: rebuild failed for site index {}: {e}",
+                                    site_index_path.display()
+                                ),
                             }
                         }
 
                         let mut events = Vec::new();
                         if !rebuilt_pages.is_empty() {
-                            events.push(ConductorEvent::PagesRebuilt { pages: rebuilt_pages, anchor: None });
+                            events.push(ConductorEvent::PagesRebuilt {
+                                pages: rebuilt_pages,
+                                anchor: None,
+                            });
                         }
                         let failed = self.flush_repopulate_failures();
                         if !failed.is_empty() {
-                            events.push(ConductorEvent::BuildFailed { error_pages: failed });
+                            events.push(ConductorEvent::BuildFailed {
+                                error_pages: failed,
+                            });
                         }
-                        CommandResult { response: Response::ContentCreated(url), events }
+                        CommandResult {
+                            response: Response::ContentCreated(url),
+                            events,
+                        }
                     }
                     Err(e) => CommandResult::error(e),
                 }
@@ -3837,7 +4300,11 @@ impl Conductor {
 
                 // A save never overwrites a conflict without consent that
                 // names the file (ADR-065). Nothing is written.
-                if self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).is_conflicted(&rel_path)
+                if self
+                    .dirty_docs
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_conflicted(&rel_path)
                     && !consent.covers(path.as_str())
                 {
                     return CommandResult {
@@ -3847,7 +4314,12 @@ impl Conductor {
                 }
 
                 // Serialize from NodeStore and write.
-                if self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(&rel_path) {
+                if self
+                    .dirty_docs
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&rel_path)
+                {
                     let text = match self.doc_root_for_path(&rel_path) {
                         Some(root) => {
                             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
@@ -3860,12 +4332,17 @@ impl Conductor {
                                 }
                             }
                         }
-                        None => return CommandResult::error(format!("document not in store: {path}")),
+                        None => {
+                            return CommandResult::error(format!("document not in store: {path}"));
+                        }
                     };
                     if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
-                    self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(&rel_path);
+                    self.dirty_docs
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear(&rel_path);
                     return CommandResult::ok_with_events(vec![saved_event([&rel_path])]);
                 }
                 CommandResult::error(format!("buffer not dirty: {path}"))
@@ -3906,7 +4383,11 @@ impl Conductor {
                 }
 
                 // Save NED-dirty documents (NodeStore → disk)
-                let ned_docs = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).take();
+                let ned_docs = self
+                    .dirty_docs
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
                 // Documents that fail to decode or write stay dirty (and keep
                 // their conflict) and are reported after the remaining
                 // buffers have been saved.
@@ -3935,7 +4416,10 @@ impl Conductor {
                             }
                         }
                         None => {
-                            eprintln!("conductor: SaveAllBuffers: no store root for {}", rel_path.display());
+                            eprintln!(
+                                "conductor: SaveAllBuffers: no store root for {}",
+                                rel_path.display()
+                            );
                             keep_dirty(&self.dirty_docs);
                             failures.push(format!(
                                 "cannot save {}: document not in store",
@@ -3961,17 +4445,34 @@ impl Conductor {
                 CommandResult::ok_with_events(vec![saved_event(saved.iter())])
             }
             Command::GetNedSuggestionFiles => {
-                let suggestions = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
+                let suggestions = self
+                    .ned_suggestions
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 let files: Vec<String> = suggestions
                     .values()
-                    .filter(|s| matches!(s.status, editorial_types::NedSuggestionStatus::Pending | editorial_types::NedSuggestionStatus::Stale { .. }))
+                    .filter(|s| {
+                        matches!(
+                            s.status,
+                            editorial_types::NedSuggestionStatus::Pending
+                                | editorial_types::NedSuggestionStatus::Stale { .. }
+                        )
+                    })
                     .map(|s| s.file.to_string())
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
                 CommandResult::with_response(Response::NedSuggestionFiles(files))
             }
-            Command::ScaffoldSite { template_name, format, font_mood, seed_color, palette_type, complexity, theme } => {
+            Command::ScaffoldSite {
+                template_name,
+                format,
+                font_mood,
+                seed_color,
+                palette_type,
+                complexity,
+                theme,
+            } => {
                 match site_templates::template_by_name(&template_name) {
                     Some(template) => {
                         let style = site_templates::StyleConfig {
@@ -4003,7 +4504,8 @@ impl Conductor {
                                 self.populate_node_store(&[]);
 
                                 // Batch-render all pages using O(n) pipeline
-                                let (rebuilt, failed, errors) = self.build_all_pages(template::OutputMode::Editorial);
+                                let (rebuilt, failed, errors) =
+                                    self.build_all_pages(template::OutputMode::Editorial);
                                 let events = self.finalize_render(rebuilt, failed, errors, false);
 
                                 if events.is_empty() {
@@ -4019,23 +4521,30 @@ impl Conductor {
                 }
             }
             Command::Classify { path } => {
-                let Ok(abs_path) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) else {
+                let Ok(abs_path) = crate::site_resolve::resolve_in_site(&self.site_dir, &path)
+                else {
                     // Outside the site: not a site file.
                     return CommandResult::with_response(Response::FileClassification(
                         FileClassification::Unknown,
                     ));
                 };
-                let kind = self.site_index.read().unwrap_or_else(|e| e.into_inner()).classify(&abs_path);
+                let kind = self
+                    .site_index
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .classify(&abs_path);
                 let classification = match kind {
-                    site_index::FileKind::Content { schema_stem } => {
-                        FileClassification::Content { schema_stem: schema_stem.to_string() }
-                    }
+                    site_index::FileKind::Content { schema_stem } => FileClassification::Content {
+                        schema_stem: schema_stem.to_string(),
+                    },
                     site_index::FileKind::Template { schema_stem } => {
-                        FileClassification::Template { schema_stem: schema_stem.to_string() }
+                        FileClassification::Template {
+                            schema_stem: schema_stem.to_string(),
+                        }
                     }
-                    site_index::FileKind::Schema { stem } => {
-                        FileClassification::Schema { stem: stem.to_string() }
-                    }
+                    site_index::FileKind::Schema { stem } => FileClassification::Schema {
+                        stem: stem.to_string(),
+                    },
                     site_index::FileKind::Stylesheet => FileClassification::Stylesheet,
                     site_index::FileKind::Asset => FileClassification::Asset,
                     site_index::FileKind::Unknown => FileClassification::Unknown,
@@ -4061,24 +4570,34 @@ impl Conductor {
                 let target = self.resolve_link_target_stem(&source_stem, &slot);
                 CommandResult::with_response(Response::LinkTargetStem(target))
             }
-            Command::ListTemplateNames => {
-                CommandResult::with_response(Response::TemplateNames(template_names(&self.site_dir)))
-            }
+            Command::ListTemplateNames => CommandResult::with_response(Response::TemplateNames(
+                template_names(&self.site_dir),
+            )),
             Command::ListDependents { stem } => {
-                let site_files = self.site_index.read().unwrap_or_else(|e| e.into_inner()).dependents_of_schema(&stem);
+                let site_files = self
+                    .site_index
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .dependents_of_schema(&stem);
                 let dependents: Vec<DependentFile> = site_files
                     .into_iter()
                     .map(|sf| {
                         let path = sf.path.to_string_lossy().to_string();
                         let kind = match sf.kind {
                             site_index::FileKind::Content { schema_stem } => {
-                                FileClassification::Content { schema_stem: schema_stem.to_string() }
+                                FileClassification::Content {
+                                    schema_stem: schema_stem.to_string(),
+                                }
                             }
                             site_index::FileKind::Template { schema_stem } => {
-                                FileClassification::Template { schema_stem: schema_stem.to_string() }
+                                FileClassification::Template {
+                                    schema_stem: schema_stem.to_string(),
+                                }
                             }
                             site_index::FileKind::Schema { stem: s } => {
-                                FileClassification::Schema { stem: s.to_string() }
+                                FileClassification::Schema {
+                                    stem: s.to_string(),
+                                }
                             }
                             site_index::FileKind::Stylesheet => FileClassification::Stylesheet,
                             site_index::FileKind::Asset => FileClassification::Asset,
@@ -4095,14 +4614,12 @@ impl Conductor {
                 let mut paths = Vec::new();
                 for stem in &stems {
                     for file_path in site_index.content_files(stem) {
-                        let rel = file_path.strip_prefix(&self.site_dir)
-                            .unwrap_or(&file_path);
+                        let rel = file_path.strip_prefix(&self.site_dir).unwrap_or(&file_path);
                         paths.push(rel.to_string_lossy().to_string());
                     }
                 }
                 for file_path in site_index.content_files("") {
-                    let rel = file_path.strip_prefix(&self.site_dir)
-                        .unwrap_or(&file_path);
+                    let rel = file_path.strip_prefix(&self.site_dir).unwrap_or(&file_path);
                     paths.push(rel.to_string_lossy().to_string());
                 }
                 drop(site_index);
@@ -4113,32 +4630,59 @@ impl Conductor {
 
             // ── NED suggestion commands ───────────────────────────────────────
             Command::BlockEdit(req) => self.block_edit(&req),
-            Command::CreateNedSuggestion { file, selection, mutation, reason, author } => {
-                self.create_ned_suggestion(&file, selection, mutation, reason, author, None)
-            }
+            Command::CreateNedSuggestion {
+                file,
+                selection,
+                mutation,
+                reason,
+                author,
+            } => self.create_ned_suggestion(&file, selection, mutation, reason, author, None),
 
             Command::AcceptNedSuggestion { id } => {
                 // 1. Look up suggestion; must be Pending
                 let sug = {
-                    let map = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
+                    let map = self
+                        .ned_suggestions
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
                     match map.get(&id) {
-                        Some(s) if s.status == editorial_types::NedSuggestionStatus::Pending => s.clone(),
-                        Some(_) => return CommandResult::error(format!("ned suggestion {id} is not pending")),
-                        None => return CommandResult::error(format!("ned suggestion not found: {id}")),
+                        Some(s) if s.status == editorial_types::NedSuggestionStatus::Pending => {
+                            s.clone()
+                        }
+                        Some(_) => {
+                            return CommandResult::error(format!(
+                                "ned suggestion {id} is not pending"
+                            ));
+                        }
+                        None => {
+                            return CommandResult::error(format!("ned suggestion not found: {id}"));
+                        }
                     }
                 };
 
                 // Helper: mark Stale, persist, emit event, return Ok
-                let mark_stale = |conductor: &Conductor, mut s: editorial_types::NedSuggestion, cause: editorial_types::StaleCause| -> CommandResult {
+                let mark_stale = |conductor: &Conductor,
+                                  mut s: editorial_types::NedSuggestion,
+                                  cause: editorial_types::StaleCause|
+                 -> CommandResult {
                     let reason = cause.to_string();
-                    s.status = editorial_types::NedSuggestionStatus::Stale { reason: reason.clone(), cause };
+                    s.status = editorial_types::NedSuggestionStatus::Stale {
+                        reason: reason.clone(),
+                        cause,
+                    };
                     if let Err(e) = conductor.persist_ned_suggestion(&s) {
                         eprintln!("conductor: failed to persist stale ned suggestion: {e}");
                     }
-                    conductor.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(s.id.clone(), s.clone());
-                    CommandResult::ok_with_events(vec![
-                        ConductorEvent::NedSuggestionStaled { id: s.id, file: s.file.clone(), reason },
-                    ])
+                    conductor
+                        .ned_suggestions
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(s.id.clone(), s.clone());
+                    CommandResult::ok_with_events(vec![ConductorEvent::NedSuggestionStaled {
+                        id: s.id,
+                        file: s.file.clone(),
+                        reason,
+                    }])
                 };
 
                 // 2-4. Evaluate, resolve, check drift, validate and apply as
@@ -4165,7 +4709,10 @@ impl Conductor {
                     eprintln!("conductor: failed to persist accepted ned suggestion: {e}");
                 }
                 let accepted_file = updated.file.clone();
-                self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated);
+                self.ned_suggestions
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.clone(), updated);
 
                 let mut events = vec![ConductorEvent::NedSuggestionAccepted {
                     id,
@@ -4173,7 +4720,9 @@ impl Conductor {
                     pages,
                 }];
                 if !failed.is_empty() {
-                    events.push(ConductorEvent::BuildFailed { error_pages: failed });
+                    events.push(ConductorEvent::BuildFailed {
+                        error_pages: failed,
+                    });
                 }
                 CommandResult::ok_with_events(events)
             }
@@ -4181,15 +4730,28 @@ impl Conductor {
             Command::RejectNedSuggestion { id } => {
                 // Look up suggestion; must be Pending or Stale
                 let sug = {
-                    let map = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
+                    let map = self
+                        .ned_suggestions
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
                     match map.get(&id) {
-                        Some(s) if matches!(
-                            s.status,
-                            editorial_types::NedSuggestionStatus::Pending
-                                | editorial_types::NedSuggestionStatus::Stale { .. }
-                        ) => s.clone(),
-                        Some(_) => return CommandResult::error(format!("ned suggestion {id} is not pending or stale")),
-                        None => return CommandResult::error(format!("ned suggestion not found: {id}")),
+                        Some(s)
+                            if matches!(
+                                s.status,
+                                editorial_types::NedSuggestionStatus::Pending
+                                    | editorial_types::NedSuggestionStatus::Stale { .. }
+                            ) =>
+                        {
+                            s.clone()
+                        }
+                        Some(_) => {
+                            return CommandResult::error(format!(
+                                "ned suggestion {id} is not pending or stale"
+                            ));
+                        }
+                        None => {
+                            return CommandResult::error(format!("ned suggestion not found: {id}"));
+                        }
                     }
                 };
 
@@ -4198,46 +4760,41 @@ impl Conductor {
                 if let Err(e) = self.persist_ned_suggestion(&updated) {
                     eprintln!("conductor: failed to persist rejected ned suggestion: {e}");
                 }
-                self.ned_suggestions.write().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), updated.clone());
+                self.ned_suggestions
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.clone(), updated.clone());
 
-                CommandResult::ok_with_events(vec![
-                    ConductorEvent::NedSuggestionRejected {
-                        id,
-                        file: updated.file.clone(),
-                    },
-                ])
+                CommandResult::ok_with_events(vec![ConductorEvent::NedSuggestionRejected {
+                    id,
+                    file: updated.file.clone(),
+                }])
             }
 
             Command::GetNedSuggestions { file } => {
-                let map = self.ned_suggestions.read().unwrap_or_else(|e| e.into_inner());
-                let result: Vec<editorial_types::NedSuggestion> = map
-                    .values()
-                    .filter(|s| s.file == file)
-                    .cloned()
-                    .collect();
+                let map = self
+                    .ned_suggestions
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                let result: Vec<editorial_types::NedSuggestion> =
+                    map.values().filter(|s| s.file == file).cloned().collect();
                 CommandResult::with_response(Response::NedSuggestions(result))
             }
 
             // ── Phase D T4 stub: schema render endpoint ───────────────────────
-            Command::RenderPage { path, mode } => {
-                match self.render_page(&path, &mode) {
-                    Ok(html) => CommandResult::with_response(Response::PageRendered { html }),
-                    Err(e) => CommandResult::error(e),
-                }
-            }
+            Command::RenderPage { path, mode } => match self.render_page(&path, &mode) {
+                Ok(html) => CommandResult::with_response(Response::PageRendered { html }),
+                Err(e) => CommandResult::error(e),
+            },
 
             // ── Phase D Slice 1.5 Wave A: schema URL routing ─────────────────
-            Command::SchemaUrlForPage { page_url } => {
-                CommandResult::with_response(Response::SchemaUrl(
-                    self.schema_url_for_page(&page_url),
-                ))
-            }
+            Command::SchemaUrlForPage { page_url } => CommandResult::with_response(
+                Response::SchemaUrl(self.schema_url_for_page(&page_url)),
+            ),
 
-            Command::PageUrlForSchema { schema_url } => {
-                CommandResult::with_response(Response::PageUrl(
-                    self.page_url_for_schema(&schema_url),
-                ))
-            }
+            Command::PageUrlForSchema { schema_url } => CommandResult::with_response(
+                Response::PageUrl(self.page_url_for_schema(&schema_url)),
+            ),
         }
     }
 }
@@ -4294,17 +4851,28 @@ mod query_edges_tests {
         let meta = node_store_bridge::content_bridge::DocumentMeta {
             url: source_url.to_string(),
             stem: "post".to_string(),
-            file: format!("content/post/{}.md", source_url.rsplit('/').next().unwrap_or("x")),
+            file: format!(
+                "content/post/{}.md",
+                source_url.rsplit('/').next().unwrap_or("x")
+            ),
             page_kind: "item".to_string(),
         };
 
         let mut store = conductor.node_store.write().unwrap();
-        let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+        let root =
+            node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
         drop(store);
 
-        conductor.url_to_root.write().unwrap().insert(source_url.to_string(), root);
+        conductor
+            .url_to_root
+            .write()
+            .unwrap()
+            .insert(source_url.to_string(), root);
         conductor.path_to_doc_root.write().unwrap().insert(
-            PathBuf::from(format!("content/post/{}.md", source_url.rsplit('/').next().unwrap_or("x"))),
+            PathBuf::from(format!(
+                "content/post/{}.md",
+                source_url.rsplit('/').next().unwrap_or("x")
+            )),
             root,
         );
 
@@ -4331,12 +4899,16 @@ mod query_edges_tests {
         let meta = node_store_bridge::content_bridge::DocumentMeta {
             url: source_url.to_string(),
             stem: "post".to_string(),
-            file: format!("content/post/{}.md", source_url.rsplit('/').next().unwrap_or("x")),
+            file: format!(
+                "content/post/{}.md",
+                source_url.rsplit('/').next().unwrap_or("x")
+            ),
             page_kind: "item".to_string(),
         };
 
         let mut store = conductor.node_store.write().unwrap();
-        let root = node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
+        let root =
+            node_store_bridge::content_bridge::document_to_store(&doc, &mut store, Some(&meta));
         drop(store);
 
         conductor.insert_url_root(source_url, root);
@@ -4356,8 +4928,11 @@ mod query_edges_tests {
 
     #[test]
     fn query_edges_normalise_path_ref_targets() {
-        let conductor =
-            make_conductor_with_link_expression("/post/alpha", "author/alice", Placement::PreambleSlot);
+        let conductor = make_conductor_with_link_expression(
+            "/post/alpha",
+            "author/alice",
+            Placement::PreambleSlot,
+        );
         let edges = conductor.query_edges_to("/author/alice");
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].target, site_index::UrlPath::new("/author/alice"));
@@ -4407,7 +4982,10 @@ mod query_edges_tests {
         let conductor = make_conductor_with_no_link_expression("/post/beta");
 
         let edges = conductor.query_edges_to("/any/target");
-        assert!(edges.is_empty(), "documents without link-expressions should not produce edges");
+        assert!(
+            edges.is_empty(),
+            "documents without link-expressions should not produce edges"
+        );
     }
 }
 
@@ -4434,7 +5012,8 @@ mod smoke_tests {
         std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
 
         std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
-        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC)
+            .expect("write template");
         std::fs::write(root.join("content/post/hello.md"), CONTENT_SRC).expect("write content");
 
         tmp
@@ -4453,7 +5032,9 @@ mod smoke_tests {
     fn classify_absolute_content_path() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let cmd = Command::Classify { path: editorial_types::SitePath::parse("content/post/hello.md").expect("valid") };
+        let cmd = Command::Classify {
+            path: editorial_types::SitePath::parse("content/post/hello.md").expect("valid"),
+        };
         let result = conductor.handle_command(cmd);
         assert!(
             matches!(
@@ -4470,7 +5051,9 @@ mod smoke_tests {
     fn classify_absolute_template_path() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let cmd = Command::Classify { path: editorial_types::SitePath::parse("templates/post/item.hiccup").expect("valid") };
+        let cmd = Command::Classify {
+            path: editorial_types::SitePath::parse("templates/post/item.hiccup").expect("valid"),
+        };
         let result = conductor.handle_command(cmd);
         assert!(
             matches!(
@@ -4487,7 +5070,9 @@ mod smoke_tests {
     fn classify_absolute_schema_path() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let cmd = Command::Classify { path: editorial_types::SitePath::parse("schemas/post/item.md").expect("valid") };
+        let cmd = Command::Classify {
+            path: editorial_types::SitePath::parse("schemas/post/item.md").expect("valid"),
+        };
         let result = conductor.handle_command(cmd);
         assert!(
             matches!(
@@ -4504,10 +5089,15 @@ mod smoke_tests {
     fn classify_a_path_that_is_no_site_file_returns_unknown() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let cmd = Command::Classify { path: editorial_types::SitePath::parse("not-a-site/foo.md").expect("valid") };
+        let cmd = Command::Classify {
+            path: editorial_types::SitePath::parse("not-a-site/foo.md").expect("valid"),
+        };
         let result = conductor.handle_command(cmd);
         assert!(
-            matches!(result.response, Response::FileClassification(FileClassification::Unknown)),
+            matches!(
+                result.response,
+                Response::FileClassification(FileClassification::Unknown)
+            ),
             "expected Unknown classification for path outside site, got {:?}",
             result.response
         );
@@ -4517,7 +5107,9 @@ mod smoke_tests {
     fn get_schema_source_after_construction() {
         let tmp = build_minimal_site();
         let conductor = make_conductor(&tmp);
-        let cmd = Command::GetGrammar { stem: "post".into() };
+        let cmd = Command::GetGrammar {
+            stem: "post".into(),
+        };
         let result = conductor.handle_command(cmd);
         assert!(
             matches!(result.response, Response::SchemaSource(Some(_))),
@@ -4532,11 +5124,15 @@ mod smoke_tests {
         let conductor = make_conductor(&tmp);
 
         // Step 1: classify the content file (as the LSP does)
-        let classify_cmd = Command::Classify { path: editorial_types::SitePath::parse("content/post/hello.md").expect("valid") };
+        let classify_cmd = Command::Classify {
+            path: editorial_types::SitePath::parse("content/post/hello.md").expect("valid"),
+        };
         let classify_result = conductor.handle_command(classify_cmd);
 
         let stem = match classify_result.response {
-            Response::FileClassification(FileClassification::Content { schema_stem }) => schema_stem,
+            Response::FileClassification(FileClassification::Content { schema_stem }) => {
+                schema_stem
+            }
             other => panic!("expected Content classification, got {:?}", other),
         };
         assert_eq!(stem, "post");
@@ -4551,16 +5147,21 @@ mod smoke_tests {
         };
 
         // Step 3: parse schema and verify the title slot is present
-        let grammar = schema::parse_schema(&schema_src)
-            .expect("schema should parse successfully");
+        let grammar = schema::parse_schema(&schema_src).expect("schema should parse successfully");
 
         assert!(
-            grammar.preamble.iter().any(|slot| slot.name.as_str() == "title"),
+            grammar
+                .preamble
+                .iter()
+                .any(|slot| slot.name.as_str() == "title"),
             "grammar should have a 'title' slot; preamble slots: {:?}",
-            grammar.preamble.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+            grammar
+                .preamble
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
         );
     }
-
 }
 
 #[cfg(test)]
@@ -4595,7 +5196,10 @@ mod validation_report_tests {
         (tmp, site)
     }
 
-    fn errors_for(report: &validation::ValidationReport, file: &str) -> Vec<validation::SourceDiagnostic> {
+    fn errors_for(
+        report: &validation::ValidationReport,
+        file: &str,
+    ) -> Vec<validation::SourceDiagnostic> {
         report
             .iter()
             .filter(|d| d.file == Path::new(file) && d.severity == validation::Severity::Error)
@@ -4606,7 +5210,9 @@ mod validation_report_tests {
     #[test]
     fn valid_site_has_no_errors() {
         let (_tmp, site) = valid_site();
-        let report = Conductor::load(site).expect("conductor").validation_report();
+        let report = Conductor::load(site)
+            .expect("conductor")
+            .validation_report();
         assert!(
             !report.has_errors(),
             "expected no errors, got: {:#?}",
@@ -4619,10 +5225,16 @@ mod validation_report_tests {
         let (_tmp, site) = valid_site();
         // An H2 where the title slot needs an H1.
         std::fs::write(site.join("content/post/x.md"), "## Not a title\n").expect("write");
-        let report = Conductor::load(site).expect("conductor").validation_report();
+        let report = Conductor::load(site)
+            .expect("conductor")
+            .validation_report();
 
         let errors = errors_for(&report, "content/post/x.md");
-        assert!(!errors.is_empty(), "expected errors for x.md, got: {:#?}", report.iter().collect::<Vec<_>>());
+        assert!(
+            !errors.is_empty(),
+            "expected errors for x.md, got: {:#?}",
+            report.iter().collect::<Vec<_>>()
+        );
         assert!(
             errors.iter().any(|d| d.at.is_some()),
             "expected a positioned error, got: {errors:#?}"
@@ -4639,7 +5251,9 @@ mod validation_report_tests {
             "# Title {#title}\ncontent\n: shouty\n",
         )
         .expect("write");
-        let report = Conductor::load(site).expect("conductor").validation_report();
+        let report = Conductor::load(site)
+            .expect("conductor")
+            .validation_report();
 
         let schema_errors = errors_for(&report, "schemas/post/item.md");
         assert_eq!(schema_errors.len(), 1, "got: {schema_errors:#?}");
@@ -4694,10 +5308,8 @@ mod validation_report_tests {
 mod populate_collection_tests {
     use super::*;
 
-    const ITEM_SCHEMA_SRC: &str =
-        "# Post title {#title}\noccurs\n: exactly once\n";
-    const COLLECTION_SCHEMA_SRC: &str =
-        "# Heading {#heading}\noccurs\n: exactly once\n";
+    const ITEM_SCHEMA_SRC: &str = "# Post title {#title}\noccurs\n: exactly once\n";
+    const COLLECTION_SCHEMA_SRC: &str = "# Heading {#heading}\noccurs\n: exactly once\n";
     const ITEM_TEMPLATE_SRC: &str = "[:div]";
     const COLLECTION_TEMPLATE_SRC: &str = "[:div]";
     const ITEM_CONTENT_SRC: &str = "title: Hello\n";
@@ -4728,14 +5340,23 @@ mod populate_collection_tests {
         std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
 
         // Item schema + template + content
-        std::fs::write(root.join("schemas/post/item.md"), ITEM_SCHEMA_SRC).expect("write item schema");
-        std::fs::write(root.join("templates/post/item.hiccup"), ITEM_TEMPLATE_SRC).expect("write item template");
-        std::fs::write(root.join("content/post/hello.md"), ITEM_CONTENT_SRC).expect("write item content");
+        std::fs::write(root.join("schemas/post/item.md"), ITEM_SCHEMA_SRC)
+            .expect("write item schema");
+        std::fs::write(root.join("templates/post/item.hiccup"), ITEM_TEMPLATE_SRC)
+            .expect("write item template");
+        std::fs::write(root.join("content/post/hello.md"), ITEM_CONTENT_SRC)
+            .expect("write item content");
 
         // Collection schema + template + content
-        std::fs::write(root.join("schemas/post/index.md"), COLLECTION_SCHEMA_SRC).expect("write collection schema");
-        std::fs::write(root.join("templates/post/index.hiccup"), COLLECTION_TEMPLATE_SRC).expect("write collection template");
-        std::fs::write(root.join("content/post/index.md"), COLLECTION_CONTENT_SRC).expect("write collection content");
+        std::fs::write(root.join("schemas/post/index.md"), COLLECTION_SCHEMA_SRC)
+            .expect("write collection schema");
+        std::fs::write(
+            root.join("templates/post/index.hiccup"),
+            COLLECTION_TEMPLATE_SRC,
+        )
+        .expect("write collection template");
+        std::fs::write(root.join("content/post/index.md"), COLLECTION_CONTENT_SRC)
+            .expect("write collection content");
 
         tmp
     }
@@ -4746,11 +5367,13 @@ mod populate_collection_tests {
         let conductor = make_conductor(&tmp);
 
         // Verify via NodeStore that /post/ is indexed as a collection page
-        let root = conductor.document_by_url("/post/")
+        let root = conductor
+            .document_by_url("/post/")
             .unwrap_or_else(|| panic!("expected node at /post/ in NodeStore"));
 
         let store = conductor.node_store.read().unwrap();
-        let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind");
+        let page_kind =
+            node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind");
         assert_eq!(
             page_kind.as_deref(),
             Some("collection"),
@@ -4772,9 +5395,12 @@ mod populate_collection_tests {
         std::fs::create_dir_all(root.join("content")).expect("create content");
 
         // Root collection schema, content, template
-        std::fs::write(root.join("schemas/index.md"), COLLECTION_SCHEMA_SRC).expect("write root schema");
-        std::fs::write(root.join("templates/index.hiccup"), COLLECTION_TEMPLATE_SRC).expect("write root template");
-        std::fs::write(root.join("content/index.md"), "heading: Home\n").expect("write root content");
+        std::fs::write(root.join("schemas/index.md"), COLLECTION_SCHEMA_SRC)
+            .expect("write root schema");
+        std::fs::write(root.join("templates/index.hiccup"), COLLECTION_TEMPLATE_SRC)
+            .expect("write root template");
+        std::fs::write(root.join("content/index.md"), "heading: Home\n")
+            .expect("write root content");
 
         tmp
     }
@@ -4785,11 +5411,13 @@ mod populate_collection_tests {
         let conductor = make_conductor(&tmp);
 
         // Verify via NodeStore that / is indexed as a collection page
-        let root = conductor.document_by_url("/")
+        let root = conductor
+            .document_by_url("/")
             .unwrap_or_else(|| panic!("expected node at / in NodeStore"));
 
         let store = conductor.node_store.read().unwrap();
-        let page_kind = node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind");
+        let page_kind =
+            node_store_bridge::content_bridge::find_attr_text(&store, root, "page-kind");
         assert_eq!(
             page_kind.as_deref(),
             Some("collection"),
@@ -4814,11 +5442,14 @@ mod populate_collection_tests {
         std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
 
         // Item schema + content (no collection schema/content for root)
-        std::fs::write(root.join("schemas/post/item.md"), ITEM_SCHEMA_SRC).expect("write item schema");
-        std::fs::write(root.join("content/post/hello.md"), ITEM_CONTENT_SRC).expect("write item content");
+        std::fs::write(root.join("schemas/post/item.md"), ITEM_SCHEMA_SRC)
+            .expect("write item schema");
+        std::fs::write(root.join("content/post/hello.md"), ITEM_CONTENT_SRC)
+            .expect("write item content");
 
         // Root collection template only — no root schema or content
-        std::fs::write(root.join("templates/index.hiccup"), COLLECTION_TEMPLATE_SRC).expect("write root template");
+        std::fs::write(root.join("templates/index.hiccup"), COLLECTION_TEMPLATE_SRC)
+            .expect("write root template");
 
         tmp
     }
@@ -4893,7 +5524,8 @@ mod node_store_index_tests {
         std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
 
         std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
-        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC)
+            .expect("write template");
         std::fs::write(root.join("content/post/hello.md"), CONTENT_SRC).expect("write content 1");
         std::fs::write(root.join("content/post/second.md"), CONTENT_SRC2).expect("write content 2");
 
@@ -4962,10 +5594,12 @@ mod node_store_index_tests {
         let tmp = build_site_with_two_posts();
         let conductor = make_conductor(&tmp);
 
-        let root = conductor.document_by_url("/post/hello")
+        let root = conductor
+            .document_by_url("/post/hello")
             .expect("should find /post/hello in index");
 
-        let data = conductor.datagraph_for_document(root)
+        let data = conductor
+            .datagraph_for_document(root)
             .expect("datagraph_for_document should succeed");
 
         match data.resolve(&["title"]) {
@@ -4983,10 +5617,12 @@ mod node_store_index_tests {
         let tmp = build_site_with_two_posts();
         let conductor = make_conductor(&tmp);
 
-        let root = conductor.document_by_url("/post/hello")
+        let root = conductor
+            .document_by_url("/post/hello")
             .expect("should find /post/hello in index");
 
-        let data = conductor.datagraph_for_document(root)
+        let data = conductor
+            .datagraph_for_document(root)
             .expect("datagraph_for_document should succeed");
 
         // url field
@@ -5059,15 +5695,12 @@ mod node_store_index_tests {
         std::fs::write(
             root.join("schemas/index.md"),
             "# Heading {#heading}\noccurs\n: exactly once\n",
-        ).expect("write root schema");
-        std::fs::write(
-            root.join("templates/index.hiccup"),
-            "[:div [:h1 heading]]",
-        ).expect("write root template");
-        std::fs::write(
-            root.join("content/index.md"),
-            "heading: Home\n",
-        ).expect("write root content");
+        )
+        .expect("write root schema");
+        std::fs::write(root.join("templates/index.hiccup"), "[:div [:h1 heading]]")
+            .expect("write root template");
+        std::fs::write(root.join("content/index.md"), "heading: Home\n")
+            .expect("write root content");
 
         tmp
     }
@@ -5086,16 +5719,12 @@ mod node_store_index_tests {
         std::fs::write(
             root.join("schemas/post/item.md"),
             "# Title {#title}\noccurs\n: exactly once\n",
-        ).expect("write item schema");
-        std::fs::write(
-            root.join("content/post/hello.md"),
-            "title: Hello\n",
-        ).expect("write item content");
+        )
+        .expect("write item schema");
+        std::fs::write(root.join("content/post/hello.md"), "title: Hello\n")
+            .expect("write item content");
         // Root template only — no schema, no content/index.md
-        std::fs::write(
-            root.join("templates/index.hiccup"),
-            "[:div]",
-        ).expect("write root template");
+        std::fs::write(root.join("templates/index.hiccup"), "[:div]").expect("write root template");
 
         tmp
     }
@@ -5105,10 +5734,12 @@ mod node_store_index_tests {
         let tmp = build_root_index_site();
         let conductor = make_conductor(&tmp);
 
-        let root = conductor.document_by_url("/")
+        let root = conductor
+            .document_by_url("/")
             .expect("should find / in NodeStore after building root index site");
 
-        let data = conductor.datagraph_for_document(root)
+        let data = conductor
+            .datagraph_for_document(root)
             .expect("datagraph_for_document should succeed for root index");
 
         match data.resolve(&["_presemble_file"]) {
@@ -5126,10 +5757,12 @@ mod node_store_index_tests {
         let conductor = make_conductor(&tmp);
 
         // Legacy fallback creates a synthetic node at / with file = ""
-        let root = conductor.document_by_url("/")
+        let root = conductor
+            .document_by_url("/")
             .expect("should find / in NodeStore (legacy fallback creates synthetic root)");
 
-        let data = conductor.datagraph_for_document(root)
+        let data = conductor
+            .datagraph_for_document(root)
             .expect("datagraph_for_document should succeed for legacy fallback root");
 
         match data.resolve(&["_presemble_file"]) {
@@ -5137,7 +5770,9 @@ mod node_store_index_tests {
                 f, "content/index.md",
                 "_presemble_file should be 'content/index.md' for legacy fallback root (stem=''), got {f:?}"
             ),
-            other => panic!("expected _presemble_file Text value for legacy fallback root, got {other:?}"),
+            other => panic!(
+                "expected _presemble_file Text value for legacy fallback root, got {other:?}"
+            ),
         }
     }
 }
@@ -5160,7 +5795,8 @@ mod update_document_in_store_tests {
         std::fs::create_dir_all(root.join("content/post")).expect("create content/post");
 
         std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
-        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC)
+            .expect("write template");
         std::fs::write(root.join("content/post/hello.md"), CONTENT_V1).expect("write content");
 
         tmp
@@ -5180,7 +5816,8 @@ mod update_document_in_store_tests {
         let tmp = build_single_post_site();
         let conductor = make_conductor(&tmp);
 
-        let old_root = conductor.document_by_url("/post/hello")
+        let old_root = conductor
+            .document_by_url("/post/hello")
             .expect("initial populate_node_store should index /post/hello");
 
         let grammar = schema::parse_schema(SCHEMA_SRC).expect("parse schema");
@@ -5188,7 +5825,8 @@ mod update_document_in_store_tests {
             .update_document_in_store("/post/hello", "post", "hello", CONTENT_V2, &grammar)
             .expect("update_document_in_store should succeed");
 
-        let new_root = conductor.document_by_url("/post/hello")
+        let new_root = conductor
+            .document_by_url("/post/hello")
             .expect("url_to_root should still contain /post/hello after update");
 
         // The new root must differ from the old one (re-parse creates new nodes)
@@ -5198,7 +5836,8 @@ mod update_document_in_store_tests {
         );
 
         // The returned sem NodeId must equal what url_to_semantic holds
-        let sem_from_index = conductor.semantic_content_by_url("/post/hello")
+        let sem_from_index = conductor
+            .semantic_content_by_url("/post/hello")
             .expect("url_to_semantic should contain /post/hello after update");
         assert_eq!(
             new_sem, sem_from_index,
@@ -5272,7 +5911,11 @@ mod update_document_in_store_tests {
         let new_root = conductor
             .document_by_url("/about")
             .expect("/about should be indexed");
-        assert_eq!(roots, vec![new_root], "root stem must list the edited item exactly once");
+        assert_eq!(
+            roots,
+            vec![new_root],
+            "root stem must list the edited item exactly once"
+        );
     }
 
     /// The new document root should reflect the updated document text.
@@ -5288,10 +5931,12 @@ mod update_document_in_store_tests {
             .update_document_in_store("/post/hello", "post", "hello", CONTENT_V2, &grammar)
             .expect("update_document_in_store should succeed");
 
-        let new_root = conductor.document_by_url("/post/hello")
+        let new_root = conductor
+            .document_by_url("/post/hello")
             .expect("should find updated document");
 
-        let data = conductor.datagraph_for_document(new_root)
+        let data = conductor
+            .datagraph_for_document(new_root)
             .expect("datagraph_for_document should succeed on new root");
 
         match data.resolve(&["title"]) {
@@ -5331,8 +5976,12 @@ mod update_document_in_store_tests {
 
     fn rebuild_hello_twice(conductor: &Conductor, tmp: &tempfile::TempDir) {
         let path = tmp.path().join("content/post/hello.md");
-        conductor.rebuild_page(&path, CONTENT_V2).expect("first rebuild_page");
-        conductor.rebuild_page(&path, CONTENT_V1).expect("second rebuild_page");
+        conductor
+            .rebuild_page(&path, CONTENT_V2)
+            .expect("first rebuild_page");
+        conductor
+            .rebuild_page(&path, CONTENT_V1)
+            .expect("second rebuild_page");
     }
 
     #[test]
@@ -5342,7 +5991,10 @@ mod update_document_in_store_tests {
         rebuild_hello_twice(&conductor, &tmp);
 
         assert_eq!(
-            eval_count(&conductor, r#"(ned/count (ned/doc-by-path "content/post/hello.md"))"#),
+            eval_count(
+                &conductor,
+                r#"(ned/count (ned/doc-by-path "content/post/hello.md"))"#
+            ),
             1,
             "doc-by-path must resolve to exactly one document after repeated rebuilds"
         );
@@ -5367,11 +6019,16 @@ mod update_document_in_store_tests {
         let conductor = make_conductor(&tmp);
         rebuild_hello_twice(&conductor, &tmp);
 
-        let by_url = conductor.document_by_url("/post/hello").expect("url_to_root entry");
+        let by_url = conductor
+            .document_by_url("/post/hello")
+            .expect("url_to_root entry");
         let by_path = conductor
             .doc_root_for_path(Path::new("content/post/hello.md"))
             .expect("path_to_doc_root entry");
-        assert_eq!(by_url, by_path, "url_to_root and path_to_doc_root must agree");
+        assert_eq!(
+            by_url, by_path,
+            "url_to_root and path_to_doc_root must agree"
+        );
 
         let store = conductor.node_store.read().unwrap();
         assert_eq!(
@@ -5391,13 +6048,23 @@ mod update_document_in_store_tests {
         let tmp = build_two_post_site();
         let conductor = make_conductor(&tmp);
 
-        let other_before = conductor.document_by_url("/post/other").expect("other indexed");
+        let other_before = conductor
+            .document_by_url("/post/other")
+            .expect("other indexed");
         rebuild_hello_twice(&conductor, &tmp);
-        let other_after = conductor.document_by_url("/post/other").expect("other still indexed");
+        let other_after = conductor
+            .document_by_url("/post/other")
+            .expect("other still indexed");
 
-        assert_eq!(other_before, other_after, "other document root must not change");
         assert_eq!(
-            eval_count(&conductor, r#"(ned/count (ned/doc-by-path "content/post/other.md"))"#),
+            other_before, other_after,
+            "other document root must not change"
+        );
+        assert_eq!(
+            eval_count(
+                &conductor,
+                r#"(ned/count (ned/doc-by-path "content/post/other.md"))"#
+            ),
             1
         );
         assert_eq!(
@@ -5406,7 +6073,8 @@ mod update_document_in_store_tests {
         );
         let store = conductor.node_store.read().unwrap();
         assert_eq!(
-            node_store_bridge::content_bridge::find_attr_text(&store, other_after, "file").as_deref(),
+            node_store_bridge::content_bridge::find_attr_text(&store, other_after, "file")
+                .as_deref(),
             Some("content/post/other.md")
         );
     }
@@ -5436,7 +6104,9 @@ mod update_document_in_store_tests {
         let tmp = build_two_post_site();
         let conductor = make_conductor(&tmp);
 
-        let old_root = conductor.document_by_url("/post/hello").expect("hello indexed");
+        let old_root = conductor
+            .document_by_url("/post/hello")
+            .expect("hello indexed");
         rebuild_hello_twice(&conductor, &tmp);
 
         let store = conductor.node_store.read().unwrap();
@@ -5472,8 +6142,7 @@ mod feature_card_rendering_tests {
         "# Feature title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\n";
 
     /// Schema for the root index page with a link slot referencing feature pages.
-    const INDEX_SCHEMA_SRC: &str =
-        "[<name>](/feature/<name>) {#highlight}\ntype\n: link(feature)\noccurs\n: 1..6\n\n----\n\nBody.\n";
+    const INDEX_SCHEMA_SRC: &str = "[<name>](/feature/<name>) {#highlight}\ntype\n: link(feature)\noccurs\n: 1..6\n\n----\n\nBody.\n";
 
     // ── content ──────────────────────────────────────────────────────────────
 
@@ -5484,8 +6153,7 @@ mod feature_card_rendering_tests {
 
     // ── template ─────────────────────────────────────────────────────────────
 
-    const INDEX_TEMPLATE_SRC: &str =
-        r#"<ul><template data-each="(ref input.highlight)"><li><presemble:insert data="(ref item.title)" as="h3" /></li></template></ul>"#;
+    const INDEX_TEMPLATE_SRC: &str = r#"<ul><template data-each="(ref input.highlight)"><li><presemble:insert data="(ref item.title)" as="h3" /></li></template></ul>"#;
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -5583,10 +6251,10 @@ mod feature_card_rendering_tests {
     #[test]
     fn feature_card_rendering_via_node_store() {
         // ── 1. Parse schemas ─────────────────────────────────────────────────
-        let feature_grammar = schema::parse_schema(FEATURE_SCHEMA_SRC)
-            .expect("feature schema should parse");
-        let index_grammar = schema::parse_schema(INDEX_SCHEMA_SRC)
-            .expect("index schema should parse");
+        let feature_grammar =
+            schema::parse_schema(FEATURE_SCHEMA_SRC).expect("feature schema should parse");
+        let index_grammar =
+            schema::parse_schema(INDEX_SCHEMA_SRC).expect("index schema should parse");
 
         // ── 2. Parse content ─────────────────────────────────────────────────
         let feature_doc = content::parse_and_assign(FEATURE_CONTENT_SRC, &feature_grammar)
@@ -5604,7 +6272,9 @@ mod feature_card_rendering_tests {
             page_kind: "item".to_string(),
         };
         let feature_root = node_store_bridge::content_bridge::document_to_store(
-            &feature_doc, &mut store, Some(&feature_meta),
+            &feature_doc,
+            &mut store,
+            Some(&feature_meta),
         );
 
         let index_meta = node_store_bridge::content_bridge::DocumentMeta {
@@ -5614,7 +6284,9 @@ mod feature_card_rendering_tests {
             page_kind: "collection".to_string(),
         };
         let index_root = node_store_bridge::content_bridge::document_to_store(
-            &index_doc, &mut store, Some(&index_meta),
+            &index_doc,
+            &mut store,
+            Some(&index_meta),
         );
 
         // ── 4. Build indexes ─────────────────────────────────────────────────
@@ -5623,8 +6295,14 @@ mod feature_card_rendering_tests {
         url_index.insert("/".to_string(), index_root);
 
         let mut stem_index: HashMap<String, Vec<node_store::NodeId>> = HashMap::new();
-        stem_index.entry("feature".to_string()).or_default().push(feature_root);
-        stem_index.entry("".to_string()).or_default().push(index_root);
+        stem_index
+            .entry("feature".to_string())
+            .or_default()
+            .push(feature_root);
+        stem_index
+            .entry("".to_string())
+            .or_default()
+            .push(index_root);
 
         // ── 5. Create semantic content ───────────────────────────────────────
         let mut sem_index: HashMap<String, node_store::NodeId> = HashMap::new();
@@ -5651,8 +6329,8 @@ mod feature_card_rendering_tests {
         );
 
         // ── 6. Render index page ─────────────────────────────────────────────
-        let raw_nodes = template::parse_template_xml(INDEX_TEMPLATE_SRC)
-            .expect("template should parse");
+        let raw_nodes =
+            template::parse_template_xml(INDEX_TEMPLATE_SRC).expect("template should parse");
         let (nodes, local_defs) = template::extract_definitions(raw_nodes);
 
         let reg = template::NullRegistry;
@@ -5707,7 +6385,8 @@ mod workspace_hash_tests {
         std::fs::create_dir_all(root.join("templates/post")).expect("create templates");
         std::fs::create_dir_all(root.join("content/post")).expect("create content");
         std::fs::write(root.join("schemas/post/item.md"), SCHEMA_SRC).expect("write schema");
-        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC).expect("write template");
+        std::fs::write(root.join("templates/post/item.hiccup"), TEMPLATE_SRC)
+            .expect("write template");
         std::fs::write(root.join("content/post/hello.md"), CONTENT_SRC).expect("write content");
         tmp
     }
@@ -5774,8 +6453,8 @@ mod workspace_hash_tests {
 mod creation_check_tests {
     use super::*;
     use content::{ContentElement, Document, DocumentSlot};
-    use schema::{HeadingLevel, SlotName, Span, Spanned};
     use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+    use schema::{HeadingLevel, SlotName, Span, Spanned};
 
     /// Build a minimal conductor with a document loaded into the NodeStore.
     ///
@@ -5791,8 +6470,11 @@ mod creation_check_tests {
         std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
         std::fs::create_dir_all(root.join("templates/test")).expect("templates");
         std::fs::create_dir_all(root.join("content/test")).expect("content");
-        std::fs::write(root.join("schemas/test/item.md"), "# Title {#title}\noccurs\n: exactly once\n")
-            .expect("schema");
+        std::fs::write(
+            root.join("schemas/test/item.md"),
+            "# Title {#title}\noccurs\n: exactly once\n",
+        )
+        .expect("schema");
         std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").expect("template");
 
         let repo = site_repository::SiteRepository::builder()
@@ -5833,12 +6515,10 @@ mod creation_check_tests {
                     ],
                 },
             ],
-            body: im::vector![
-                Spanned {
-                    node: ContentElement::paragraph_from_markdown("Body text"),
-                    span: Span { start: 0, end: 0 },
-                },
-            ],
+            body: im::vector![Spanned {
+                node: ContentElement::paragraph_from_markdown("Body text"),
+                span: Span { start: 0, end: 0 },
+            },],
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
@@ -5910,8 +6590,16 @@ mod creation_check_tests {
     fn text_in_title_selection_is_accepted() {
         let (conductor, _tmp) = make_conductor_with_doc();
         let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
-        let resp = create(&conductor, DOC, src, editorial_types::NedMutation::SetText("New".into()));
-        assert!(matches!(resp, Response::SuggestionCreated(_)), "got {resp:?}");
+        let resp = create(
+            &conductor,
+            DOC,
+            src,
+            editorial_types::NedMutation::SetText("New".into()),
+        );
+        assert!(
+            matches!(resp, Response::SuggestionCreated(_)),
+            "got {resp:?}"
+        );
     }
 
     /// Regression for the duplication bug: a slot address with SetText used to
@@ -5920,8 +6608,16 @@ mod creation_check_tests {
     fn slot_address_with_set_text_is_rejected_with_text_in_hint() {
         let (conductor, tmp) = make_conductor_with_doc();
         let src = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#;
-        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::SetText("x".into()));
-        assert!(err.contains("ned/text-in"), "error should hint at ned/text-in: {err}");
+        let err = create_error(
+            &conductor,
+            DOC,
+            src,
+            editorial_types::NedMutation::SetText("x".into()),
+        );
+        assert!(
+            err.contains("ned/text-in"),
+            "error should hint at ned/text-in: {err}"
+        );
         no_suggestions_persisted(&conductor, &tmp);
     }
 
@@ -5929,7 +6625,12 @@ mod creation_check_tests {
     fn block_address_with_set_text_is_rejected_with_text_in_hint() {
         let (conductor, _tmp) = make_conductor_with_doc();
         let src = r#"(ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))"#;
-        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::SetText("x".into()));
+        let err = create_error(
+            &conductor,
+            DOC,
+            src,
+            editorial_types::NedMutation::SetText("x".into()),
+        );
         assert!(err.contains("heading"), "{err}");
         assert!(err.contains("ned/text-in"), "{err}");
     }
@@ -5938,7 +6639,12 @@ mod creation_check_tests {
     fn multi_block_slot_is_rejected_as_ambiguous_with_hint() {
         let (conductor, tmp) = make_conductor_with_doc();
         let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "summary")))"#;
-        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::SetText("x".into()));
+        let err = create_error(
+            &conductor,
+            DOC,
+            src,
+            editorial_types::NedMutation::SetText("x".into()),
+        );
         assert!(
             err.contains(&editorial_types::StaleCause::Ambiguous { matches: 2 }.to_string()),
             "{err}"
@@ -5951,8 +6657,16 @@ mod creation_check_tests {
     fn empty_selection_is_rejected_as_unresolved() {
         let (conductor, _tmp) = make_conductor_with_doc();
         let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/nope.md") "title")))"#;
-        let err = create_error(&conductor, DOC, src, editorial_types::NedMutation::SetText("x".into()));
-        assert!(err.contains(&editorial_types::StaleCause::Unresolved.to_string()), "{err}");
+        let err = create_error(
+            &conductor,
+            DOC,
+            src,
+            editorial_types::NedMutation::SetText("x".into()),
+        );
+        assert!(
+            err.contains(&editorial_types::StaleCause::Unresolved.to_string()),
+            "{err}"
+        );
         assert!(err.contains("Hint:"), "{err}");
     }
 
@@ -6002,7 +6716,10 @@ mod creation_check_tests {
             src,
             editorial_types::NedMutation::SetText("x".into()),
         );
-        assert_eq!(err, "selection resolves into content/test/doc.md, not content/test/other.md");
+        assert_eq!(
+            err,
+            "selection resolves into content/test/doc.md, not content/test/other.md"
+        );
         no_suggestions_persisted(&conductor, &tmp);
     }
 
@@ -6026,8 +6743,16 @@ mod creation_check_tests {
     fn newline_in_a_heading_suggestion_is_valid() {
         let (conductor, _tmp) = make_conductor_with_doc();
         let src = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
-        let resp = create(&conductor, DOC, src, editorial_types::NedMutation::SetText("two\nlines".into()));
-        assert!(matches!(resp, Response::SuggestionCreated(_)), "got {resp:?}");
+        let resp = create(
+            &conductor,
+            DOC,
+            src,
+            editorial_types::NedMutation::SetText("two\nlines".into()),
+        );
+        assert!(
+            matches!(resp, Response::SuggestionCreated(_)),
+            "got {resp:?}"
+        );
     }
 }
 
@@ -6035,8 +6760,8 @@ mod creation_check_tests {
 mod ned_suggestion_handler_tests {
     use super::*;
     use content::{ContentElement, Document, DocumentSlot};
-    use schema::{HeadingLevel, SlotName, Span, Spanned};
     use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+    use schema::{HeadingLevel, SlotName, Span, Spanned};
 
     /// Build a minimal conductor with a real document in the NodeStore.
     ///
@@ -6054,7 +6779,8 @@ mod ned_suggestion_handler_tests {
         std::fs::write(
             root.join("schemas/test/item.md"),
             "# Title {#title}\noccurs\n: exactly once\n",
-        ).expect("schema");
+        )
+        .expect("schema");
         std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").expect("template");
 
         let repo = site_repository::SiteRepository::builder()
@@ -6082,12 +6808,10 @@ mod ned_suggestion_handler_tests {
                     }],
                 },
             ],
-            body: im::vector![
-                Spanned {
-                    node: ContentElement::paragraph_from_markdown("Body text"),
-                    span: Span { start: 0, end: 0 },
-                },
-            ],
+            body: im::vector![Spanned {
+                node: ContentElement::paragraph_from_markdown("Body text"),
+                span: Span { start: 0, end: 0 },
+            },],
             has_separator: false,
             separator_span: None,
             unassigned: Default::default(),
@@ -6113,7 +6837,9 @@ mod ned_suggestion_handler_tests {
     #[test]
     fn query_root_evaluates_selections_but_binds_no_mutations() {
         let (conductor, _tmp) = make_conductor_with_doc();
-        let root = conductor.make_ned_query_root().expect("make_ned_query_root");
+        let root = conductor
+            .make_ned_query_root()
+            .expect("make_ned_query_root");
 
         let selection = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
         let value = evaluator::eval_str_with_root(selection, &root).expect("query evaluates");
@@ -6153,7 +6879,10 @@ mod ned_suggestion_handler_tests {
 
         // Should emit NedSuggestionCreated event
         assert!(
-            result.events.iter().any(|ev| matches!(ev, ConductorEvent::NedSuggestionCreated { .. })),
+            result
+                .events
+                .iter()
+                .any(|ev| matches!(ev, ConductorEvent::NedSuggestionCreated { .. })),
             "should emit NedSuggestionCreated event"
         );
 
@@ -6164,17 +6893,25 @@ mod ned_suggestion_handler_tests {
         drop(map);
 
         // Should be persisted to disk
-        let file_path = tmp.path()
+        let file_path = tmp
+            .path()
             .join(".presemble/suggestions/ned")
             .join(format!("{id}.json"));
-        assert!(file_path.exists(), "suggestion file should exist at {}", file_path.display());
+        assert!(
+            file_path.exists(),
+            "suggestion file should exist at {}",
+            file_path.display()
+        );
 
         // File should deserialize cleanly
         let contents = std::fs::read_to_string(&file_path).expect("read file");
         let deserialized: editorial_types::NedSuggestion =
             serde_json::from_str(&contents).expect("deserialize");
         assert_eq!(deserialized.id, id);
-        assert_eq!(deserialized.status, editorial_types::NedSuggestionStatus::Pending);
+        assert_eq!(
+            deserialized.status,
+            editorial_types::NedSuggestionStatus::Pending
+        );
     }
 
     // ── 3. Create rejection (non-text slot) ───────────────────────────────────
@@ -6205,14 +6942,21 @@ mod ned_suggestion_handler_tests {
         // Nothing should be written to disk
         let ned_dir = tmp.path().join(".presemble/suggestions/ned");
         // (The `MODEL` marker written at startup is not a suggestion.)
-        let has_files = ned_dir.exists() && std::fs::read_dir(&ned_dir)
-            .map(|d| d.flatten().any(|e| e.file_name() != "MODEL"))
-            .unwrap_or(false);
-        assert!(!has_files, "no suggestion files should exist after rejection");
+        let has_files = ned_dir.exists()
+            && std::fs::read_dir(&ned_dir)
+                .map(|d| d.flatten().any(|e| e.file_name() != "MODEL"))
+                .unwrap_or(false);
+        assert!(
+            !has_files,
+            "no suggestion files should exist after rejection"
+        );
 
         // Nothing in memory
         let map = conductor.ned_suggestions.read().unwrap();
-        assert!(map.is_empty(), "ned_suggestions map should be empty after rejection");
+        assert!(
+            map.is_empty(),
+            "ned_suggestions map should be empty after rejection"
+        );
     }
 
     // ── 4. Accept happy path ──────────────────────────────────────────────────
@@ -6251,7 +6995,10 @@ mod ned_suggestion_handler_tests {
 
         // AcceptNedSuggestion should emit NedSuggestionAccepted event
         assert!(
-            accept_result.events.iter().any(|ev| matches!(ev, ConductorEvent::NedSuggestionAccepted { .. })),
+            accept_result
+                .events
+                .iter()
+                .any(|ev| matches!(ev, ConductorEvent::NedSuggestionAccepted { .. })),
             "should emit NedSuggestionAccepted event; got: {:?}",
             accept_result.events
         );
@@ -6263,13 +7010,17 @@ mod ned_suggestion_handler_tests {
         drop(map);
 
         // File should be updated on disk
-        let file_path = tmp.path()
+        let file_path = tmp
+            .path()
             .join(".presemble/suggestions/ned")
             .join(format!("{id}.json"));
         let contents = std::fs::read_to_string(&file_path).expect("read file");
         let deserialized: editorial_types::NedSuggestion =
             serde_json::from_str(&contents).expect("deserialize");
-        assert_eq!(deserialized.status, editorial_types::NedSuggestionStatus::Accepted);
+        assert_eq!(
+            deserialized.status,
+            editorial_types::NedSuggestionStatus::Accepted
+        );
     }
 
     // ── 5. Accept on broken selection (stale) ─────────────────────────────────
@@ -6314,7 +7065,10 @@ mod ned_suggestion_handler_tests {
 
         // Should emit NedSuggestionStaled event
         assert!(
-            accept_result.events.iter().any(|ev| matches!(ev, ConductorEvent::NedSuggestionStaled { .. })),
+            accept_result
+                .events
+                .iter()
+                .any(|ev| matches!(ev, ConductorEvent::NedSuggestionStaled { .. })),
             "should emit NedSuggestionStaled event; got: {:?}",
             accept_result.events
         );
@@ -6342,7 +7096,8 @@ mod ned_suggestion_handler_tests {
         let (conductor, tmp) = make_conductor_with_doc();
 
         // Delete addresses a block: the title slot's single heading.
-        let selection = r#"(ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))"#;
+        let selection =
+            r#"(ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))"#;
         let create_cmd = Command::CreateNedSuggestion {
             file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
             selection: selection.to_string(),
@@ -6368,7 +7123,10 @@ mod ned_suggestion_handler_tests {
 
         // RejectNedSuggestion should emit NedSuggestionRejected event
         assert!(
-            reject_result.events.iter().any(|ev| matches!(ev, ConductorEvent::NedSuggestionRejected { .. })),
+            reject_result
+                .events
+                .iter()
+                .any(|ev| matches!(ev, ConductorEvent::NedSuggestionRejected { .. })),
             "should emit NedSuggestionRejected event; got: {:?}",
             reject_result.events
         );
@@ -6380,13 +7138,17 @@ mod ned_suggestion_handler_tests {
         drop(map);
 
         // File on disk should be updated
-        let file_path = tmp.path()
+        let file_path = tmp
+            .path()
             .join(".presemble/suggestions/ned")
             .join(format!("{id}.json"));
         let contents = std::fs::read_to_string(&file_path).expect("read file");
         let deserialized: editorial_types::NedSuggestion =
             serde_json::from_str(&contents).expect("deserialize");
-        assert_eq!(deserialized.status, editorial_types::NedSuggestionStatus::Rejected);
+        assert_eq!(
+            deserialized.status,
+            editorial_types::NedSuggestionStatus::Rejected
+        );
     }
 
     // ── GetNedSuggestions tests ────────────────────────────────────────────────
@@ -6395,7 +7157,8 @@ mod ned_suggestion_handler_tests {
     fn get_ned_suggestions_empty_for_unknown_file() {
         let (conductor, _tmp) = make_conductor_with_doc();
 
-        let file = editorial_types::ContentPath::parse("content/test/nonexistent.md").expect("valid");
+        let file =
+            editorial_types::ContentPath::parse("content/test/nonexistent.md").expect("valid");
         let result = conductor.handle_command(Command::GetNedSuggestions { file });
 
         match result.response {
@@ -6503,22 +7266,34 @@ mod ned_suggestion_handler_tests {
 
         match result.response {
             Response::NedSuggestions(v) => {
-                assert_eq!(v.len(), 4, "expected four suggestions (Pending, Accepted, Rejected, Stale)");
+                assert_eq!(
+                    v.len(),
+                    4,
+                    "expected four suggestions (Pending, Accepted, Rejected, Stale)"
+                );
                 let statuses: Vec<_> = v.iter().map(|s| &s.status).collect();
                 assert!(
-                    statuses.iter().any(|s| **s == editorial_types::NedSuggestionStatus::Pending),
+                    statuses
+                        .iter()
+                        .any(|s| **s == editorial_types::NedSuggestionStatus::Pending),
                     "missing Pending"
                 );
                 assert!(
-                    statuses.iter().any(|s| **s == editorial_types::NedSuggestionStatus::Accepted),
+                    statuses
+                        .iter()
+                        .any(|s| **s == editorial_types::NedSuggestionStatus::Accepted),
                     "missing Accepted"
                 );
                 assert!(
-                    statuses.iter().any(|s| **s == editorial_types::NedSuggestionStatus::Rejected),
+                    statuses
+                        .iter()
+                        .any(|s| **s == editorial_types::NedSuggestionStatus::Rejected),
                     "missing Rejected"
                 );
                 assert!(
-                    statuses.iter().any(|s| matches!(s, editorial_types::NedSuggestionStatus::Stale { .. })),
+                    statuses
+                        .iter()
+                        .any(|s| matches!(s, editorial_types::NedSuggestionStatus::Stale { .. })),
                     "missing Stale"
                 );
             }
@@ -6560,10 +7335,15 @@ mod ned_suggestion_handler_tests {
             created_at: "2026-04-26T00:00:00Z".to_string(),
             preview: None,
         };
-        conductor.ned_suggestions.write().unwrap().insert(id_b, sug_b);
+        conductor
+            .ned_suggestions
+            .write()
+            .unwrap()
+            .insert(id_b, sug_b);
 
         // Query file_a only
-        let file_a_query = editorial_types::ContentPath::parse("content/test/doc.md").expect("valid");
+        let file_a_query =
+            editorial_types::ContentPath::parse("content/test/doc.md").expect("valid");
         let result_a = conductor.handle_command(Command::GetNedSuggestions { file: file_a_query });
 
         match result_a.response {
@@ -6575,13 +7355,17 @@ mod ned_suggestion_handler_tests {
         }
 
         // Query file_b only
-        let file_b_query = editorial_types::ContentPath::parse("content/test/other.md").expect("valid");
+        let file_b_query =
+            editorial_types::ContentPath::parse("content/test/other.md").expect("valid");
         let result_b = conductor.handle_command(Command::GetNedSuggestions { file: file_b_query });
 
         match result_b.response {
             Response::NedSuggestions(v) => {
                 assert_eq!(v.len(), 1, "expected only file_b suggestion");
-                assert_eq!(v[0].file, editorial_types::ContentPath::parse("content/test/other.md").expect("valid"));
+                assert_eq!(
+                    v[0].file,
+                    editorial_types::ContentPath::parse("content/test/other.md").expect("valid")
+                );
             }
             other => panic!("expected NedSuggestions, got: {other:?}"),
         }
@@ -6697,7 +7481,10 @@ mod ned_suggestion_handler_tests {
 
         match result.response {
             Response::NedSuggestionFiles(files) => {
-                assert!(files.is_empty(), "expected no files when only Rejected and Accepted");
+                assert!(
+                    files.is_empty(),
+                    "expected no files when only Rejected and Accepted"
+                );
             }
             other => panic!("expected NedSuggestionFiles, got: {other:?}"),
         }
@@ -6724,7 +7511,11 @@ mod ned_suggestion_handler_tests {
             created_at: "2026-04-28T00:00:00Z".to_string(),
             preview: None,
         };
-        conductor.ned_suggestions.write().unwrap().insert(id_stale, sug_stale);
+        conductor
+            .ned_suggestions
+            .write()
+            .unwrap()
+            .insert(id_stale, sug_stale);
 
         let result = conductor.handle_command(Command::GetNedSuggestionFiles);
 
@@ -6798,19 +7589,15 @@ mod suggestion_accept_tests {
     const FILE: &str = "content/post/first.md";
     const SCHEMA: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
-    const TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
+    const TEMPLATE: &str = r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const CONTENT: &str =
         "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```rust\nfn a() {}\n```\n";
 
-    const TITLE_TEXT: &str =
-        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")))"#;
-    const FIRST_PARAGRAPH: &str =
-        r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "paragraph" 0)"#;
+    const TITLE_TEXT: &str = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")))"#;
+    const FIRST_PARAGRAPH: &str = r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "paragraph" 0)"#;
     const ALPHA_TEXT: &str =
         r#"(ned/text-containing (ned/body (ned/doc-by-path "content/post/first.md")) "Alpha")"#;
-    const CODE_TEXT: &str =
-        r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "code-block" 0))"#;
+    const CODE_TEXT: &str = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "code-block" 0))"#;
 
     fn build_site() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -6825,7 +7612,9 @@ mod suggestion_accept_tests {
     }
 
     fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
-        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
         Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
     }
 
@@ -6848,11 +7637,20 @@ mod suggestion_accept_tests {
     }
 
     fn status(conductor: &Conductor, id: &SuggestionId) -> NedSuggestionStatus {
-        conductor.ned_suggestions.read().unwrap().get(id).expect("suggestion").status.clone()
+        conductor
+            .ned_suggestions
+            .read()
+            .unwrap()
+            .get(id)
+            .expect("suggestion")
+            .status
+            .clone()
     }
 
     fn live_root(conductor: &Conductor) -> node_store::NodeId {
-        conductor.doc_root_for_path(Path::new(FILE)).expect("live root")
+        conductor
+            .doc_root_for_path(Path::new(FILE))
+            .expect("live root")
     }
 
     fn block_text(store: &node_store::NodeStore, block: node_store::NodeId) -> String {
@@ -6867,7 +7665,11 @@ mod suggestion_accept_tests {
         let store = conductor.node_store.read().unwrap();
         let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body")
             .expect("body");
-        store.children(body).into_iter().map(|b| block_text(&store, b)).collect()
+        store
+            .children(body)
+            .into_iter()
+            .map(|b| block_text(&store, b))
+            .collect()
     }
 
     fn title(conductor: &Conductor) -> String {
@@ -6881,7 +7683,11 @@ mod suggestion_accept_tests {
     }
 
     fn is_dirty(conductor: &Conductor) -> bool {
-        conductor.dirty_docs().read().unwrap().contains(Path::new(FILE))
+        conductor
+            .dirty_docs()
+            .read()
+            .unwrap()
+            .contains(Path::new(FILE))
     }
 
     /// Delete the document's first body block behind the suggestion's back,
@@ -6889,10 +7695,15 @@ mod suggestion_accept_tests {
     fn delete_first_body_block(conductor: &Conductor) {
         let root = live_root(conductor);
         let mut store = conductor.node_store.write().unwrap();
-        let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
+        let body =
+            node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
         let first = store.children(body)[0];
-        let target = edit::resolve(&store, &ned::Selection::single(first), edit::TargetKind::Block)
-            .expect("the block resolves");
+        let target = edit::resolve(
+            &store,
+            &ned::Selection::single(first),
+            edit::TargetKind::Block,
+        )
+        .expect("the block resolves");
         let prepared =
             edit::prepare(&store, &target, &edit::NedMutation::Delete).expect("delete prepares");
         edit::commit(&mut store, vec![prepared]);
@@ -6910,7 +7721,11 @@ mod suggestion_accept_tests {
     }
 
     fn original_body() -> Vec<String> {
-        vec!["Alpha para.".to_string(), "Beta para.".to_string(), "fn a() {}".to_string()]
+        vec![
+            "Alpha para.".to_string(),
+            "Beta para.".to_string(),
+            "fn a() {}".to_string(),
+        ]
     }
 
     #[test]
@@ -6926,24 +7741,43 @@ mod suggestion_accept_tests {
     fn accept_set_text_on_title_changes_only_title_and_rebuilds() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let id = create(&conductor, TITLE_TEXT, NedMutation::SetText("Renamed Post".into()));
+        let id = create(
+            &conductor,
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed Post".into()),
+        );
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert_eq!(title(&conductor), "Renamed Post");
-        assert_eq!(body_texts(&conductor), original_body(), "body must be untouched");
+        assert_eq!(
+            body_texts(&conductor),
+            original_body(),
+            "body must be untouched"
+        );
         assert!(is_dirty(&conductor), "file must be marked dirty");
         let pages = accepted_pages(&result);
         assert!(!pages.is_empty(), "accepted event must list rebuilt pages");
-        assert!(pages.contains(&"/post/first".to_string()), "pages: {pages:?}");
+        assert!(
+            pages.contains(&"/post/first".to_string()),
+            "pages: {pages:?}"
+        );
     }
 
     #[test]
     fn accept_of_a_set_text_suggestion_already_in_place_is_accepted() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let id = create(&conductor, TITLE_TEXT, NedMutation::SetText("Renamed Post".into()));
+        let id = create(
+            &conductor,
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed Post".into()),
+        );
 
         // The title becomes "Renamed Post" another way (no preview, so the
         // only way to know is that the edit would change nothing).
@@ -6961,10 +7795,17 @@ mod suggestion_accept_tests {
 
         let result = accept(&conductor, &id);
 
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert!(accepted_pages(&result).is_empty(), "nothing is rebuilt");
-        assert!(!is_dirty(&conductor), "nothing changed, so nothing is dirty");
+        assert!(
+            !is_dirty(&conductor),
+            "nothing changed, so nothing is dirty"
+        );
         assert_eq!(title(&conductor), "Renamed Post");
     }
 
@@ -7027,15 +7868,26 @@ mod suggestion_accept_tests {
                 proposed: editorial_types::PreviewText::new("Same"),
             }),
         };
-        conductor.ned_suggestions.write().unwrap().insert(id.clone(), sug);
+        conductor
+            .ned_suggestions
+            .write()
+            .unwrap()
+            .insert(id.clone(), sug);
 
         let result = accept(&conductor, &id);
 
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert!(
             matches!(
                 status(&conductor, &id),
-                NedSuggestionStatus::Stale { cause: StaleCause::Unresolved, .. }
+                NedSuggestionStatus::Stale {
+                    cause: StaleCause::Unresolved,
+                    ..
+                }
             ),
             "{:?}",
             status(&conductor, &id)
@@ -7057,9 +7909,16 @@ mod suggestion_accept_tests {
             author: editorial_types::Author::Claude,
         });
 
-        assert!(matches!(result.response, Response::AlreadyInPlace), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::AlreadyInPlace),
+            "got {:?}",
+            result.response
+        );
         assert!(result.events.is_empty(), "{:?}", result.events);
-        assert!(conductor.ned_suggestions.read().unwrap().is_empty(), "nothing is stored");
+        assert!(
+            conductor.ned_suggestions.read().unwrap().is_empty(),
+            "nothing is stored"
+        );
     }
 
     /// An external change to one file repopulates the store, but must not
@@ -7082,9 +7941,14 @@ mod suggestion_accept_tests {
 
         // B changes on disk, from outside.
         std::fs::write(tmp.path().join(OTHER), "# Second Post\n\n----\n\nDelta.\n").unwrap();
-        let result =
-            conductor.handle_command(Command::FileChanged { paths: vec![editorial_types::SitePath::parse(OTHER).expect("valid")] });
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        let result = conductor.handle_command(Command::FileChanged {
+            paths: vec![editorial_types::SitePath::parse(OTHER).expect("valid")],
+        });
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
 
         assert_eq!(title(&conductor), "Edited A", "A's unsaved edit survives");
         assert!(is_dirty(&conductor), "A is still dirty");
@@ -7096,7 +7960,9 @@ mod suggestion_accept_tests {
     }
 
     fn title_of(conductor: &Conductor, file: &str) -> String {
-        let root = conductor.doc_root_for_path(Path::new(file)).expect("live root");
+        let root = conductor
+            .doc_root_for_path(Path::new(file))
+            .expect("live root");
         let store = conductor.node_store.read().unwrap();
         let preamble =
             node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
@@ -7116,7 +7982,9 @@ mod suggestion_accept_tests {
     }
 
     fn reload(conductor: &Conductor, file: &str) -> CommandResult {
-        conductor.handle_command(Command::ReloadDocument { path: editorial_types::ContentPath::parse(file).expect("valid") })
+        conductor.handle_command(Command::ReloadDocument {
+            path: editorial_types::ContentPath::parse(file).expect("valid"),
+        })
     }
 
     #[test]
@@ -7172,7 +8040,11 @@ mod suggestion_accept_tests {
             result.response
         );
         assert_eq!(title_of(&conductor, FILE), "First Post");
-        assert_eq!(title_of(&conductor, OTHER), "Edited B", "B's unsaved edit survives");
+        assert_eq!(
+            title_of(&conductor, OTHER),
+            "Edited B",
+            "B's unsaved edit survives"
+        );
         let dirty = match conductor.handle_command(Command::GetDirtyBuffers).response {
             Response::DirtyBuffers(paths) => paths,
             other => panic!("expected DirtyBuffers, got {other:?}"),
@@ -7191,7 +8063,11 @@ mod suggestion_accept_tests {
     /// With `both == false` only A is edited and overwritten.
     fn conflicted(both: bool) -> (Conductor, tempfile::TempDir) {
         let tmp = build_site();
-        std::fs::write(tmp.path().join(OTHER_FILE), "# Second Post\n\n----\n\nGamma.\n").unwrap();
+        std::fs::write(
+            tmp.path().join(OTHER_FILE),
+            "# Second Post\n\n----\n\nGamma.\n",
+        )
+        .unwrap();
         let conductor = make_conductor(&tmp);
         edit_title(&conductor, FILE, "Edited A");
         std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
@@ -7227,10 +8103,15 @@ mod suggestion_accept_tests {
         edit_title(&conductor, FILE, "Edited A");
         std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
 
-        let result =
-            conductor.handle_command(Command::FileChanged { paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")] });
+        let result = conductor.handle_command(Command::FileChanged {
+            paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")],
+        });
 
-        assert_eq!(title(&conductor), "Edited A", "the disk version does not win");
+        assert_eq!(
+            title(&conductor),
+            "Edited A",
+            "the disk version does not win"
+        );
         assert!(is_dirty(&conductor));
         assert_eq!(conflicts(&conductor), vec![FILE.to_string()]);
         let announced = result
@@ -7242,10 +8123,14 @@ mod suggestion_accept_tests {
 
         // A second event for the same conflict is not announced again.
         std::fs::write(tmp.path().join(FILE), "# Shell Again\n\n----\n\nAgain.\n").unwrap();
-        let again =
-            conductor.handle_command(Command::FileChanged { paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")] });
+        let again = conductor.handle_command(Command::FileChanged {
+            paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")],
+        });
         assert!(
-            !again.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { .. })),
+            !again
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::DiskConflict { .. })),
             "{:?}",
             again.events
         );
@@ -7264,7 +8149,10 @@ mod suggestion_accept_tests {
         });
 
         assert!(
-            result.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE)),
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE)),
             "{:?}",
             result.events
         );
@@ -7277,7 +8165,9 @@ mod suggestion_accept_tests {
         let (conductor, tmp) = conflicted(true);
 
         let response = conductor
-            .handle_command(Command::SaveAllBuffers { consent: Default::default() })
+            .handle_command(Command::SaveAllBuffers {
+                consent: Default::default(),
+            })
             .response;
 
         match response {
@@ -7288,7 +8178,10 @@ mod suggestion_accept_tests {
         }
         assert_eq!(disk(&tmp, FILE), SHELL_A, "nothing was written");
         assert_eq!(disk(&tmp, OTHER_FILE), SHELL_B, "nothing was written");
-        assert_eq!(conflicts(&conductor), vec![FILE.to_string(), OTHER_FILE.to_string()]);
+        assert_eq!(
+            conflicts(&conductor),
+            vec![FILE.to_string(), OTHER_FILE.to_string()]
+        );
     }
 
     #[test]
@@ -7296,11 +8189,17 @@ mod suggestion_accept_tests {
         let (conductor, tmp) = conflicted(true);
 
         let response = conductor
-            .handle_command(Command::SaveAllBuffers { consent: consent(&[FILE, OTHER_FILE]) })
+            .handle_command(Command::SaveAllBuffers {
+                consent: consent(&[FILE, OTHER_FILE]),
+            })
             .response;
 
         assert!(matches!(response, Response::Ok), "{response:?}");
-        assert!(disk(&tmp, FILE).contains("Edited A"), "{}", disk(&tmp, FILE));
+        assert!(
+            disk(&tmp, FILE).contains("Edited A"),
+            "{}",
+            disk(&tmp, FILE)
+        );
         assert!(disk(&tmp, OTHER_FILE).contains("Edited B"));
         assert!(conflicts(&conductor).is_empty());
         assert!(!is_dirty(&conductor));
@@ -7312,16 +8211,26 @@ mod suggestion_accept_tests {
         let (conductor, tmp) = conflicted(true);
 
         let response = conductor
-            .handle_command(Command::SaveAllBuffers { consent: consent(&[FILE]) })
+            .handle_command(Command::SaveAllBuffers {
+                consent: consent(&[FILE]),
+            })
             .response;
 
         match response {
             Response::ConflictsNeedConfirmation(files) => {
-                assert_eq!(files, vec![OTHER_FILE.to_string()], "only the uncovered conflict");
+                assert_eq!(
+                    files,
+                    vec![OTHER_FILE.to_string()],
+                    "only the uncovered conflict"
+                );
             }
             other => panic!("expected ConflictsNeedConfirmation, got {other:?}"),
         }
-        assert_eq!(disk(&tmp, FILE), SHELL_A, "nothing is written, not even the covered file");
+        assert_eq!(
+            disk(&tmp, FILE),
+            SHELL_A,
+            "nothing is written, not even the covered file"
+        );
         assert_eq!(disk(&tmp, OTHER_FILE), SHELL_B);
     }
 
@@ -7330,7 +8239,10 @@ mod suggestion_accept_tests {
         let (conductor, tmp) = conflicted(false);
 
         let refused = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: Default::default(),
+            })
             .response;
         assert!(
             matches!(&refused, Response::ConflictsNeedConfirmation(files) if files == &vec![FILE.to_string()]),
@@ -7339,7 +8251,10 @@ mod suggestion_accept_tests {
         assert_eq!(disk(&tmp, FILE), SHELL_A);
 
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: consent(&[FILE]) })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: consent(&[FILE]),
+            })
             .response;
         assert!(matches!(saved, Response::Ok), "{saved:?}");
         assert!(disk(&tmp, FILE).contains("Edited A"));
@@ -7364,9 +8279,18 @@ mod suggestion_accept_tests {
     #[test]
     fn save_all_announces_the_documents_it_wrote() {
         let (conductor, _tmp) = conflicted(true);
-        let result = conductor.handle_command(Command::SaveAllBuffers { consent: consent(&[FILE, OTHER_FILE]) });
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
-        assert_eq!(saved_files(&result.events), vec![FILE.to_string(), OTHER_FILE.to_string()]);
+        let result = conductor.handle_command(Command::SaveAllBuffers {
+            consent: consent(&[FILE, OTHER_FILE]),
+        });
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(
+            saved_files(&result.events),
+            vec![FILE.to_string(), OTHER_FILE.to_string()]
+        );
     }
 
     #[test]
@@ -7376,7 +8300,11 @@ mod suggestion_accept_tests {
             path: editorial_types::SitePath::parse(FILE).expect("valid"),
             consent: consent(&[FILE]),
         });
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
         assert_eq!(saved_files(&result.events), vec![FILE.to_string()]);
     }
 
@@ -7384,9 +8312,19 @@ mod suggestion_accept_tests {
     #[test]
     fn a_refused_save_announces_nothing_saved() {
         let (conductor, _tmp) = conflicted(true);
-        let result = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() });
-        assert!(matches!(result.response, Response::ConflictsNeedConfirmation(_)), "{:?}", result.response);
-        assert!(saved_files(&result.events).is_empty(), "{:?}", result.events);
+        let result = conductor.handle_command(Command::SaveAllBuffers {
+            consent: Default::default(),
+        });
+        assert!(
+            matches!(result.response, Response::ConflictsNeedConfirmation(_)),
+            "{:?}",
+            result.response
+        );
+        assert!(
+            saved_files(&result.events).is_empty(),
+            "{:?}",
+            result.events
+        );
     }
 
     // ── The save checks the file first (ADR-065: save-time mtime check) ─────
@@ -7400,8 +8338,10 @@ mod suggestion_accept_tests {
         edit_title(&conductor, FILE, "Edited A");
         std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
 
-        let refused = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() });
+        let refused = conductor.handle_command(Command::SaveBuffer {
+            path: editorial_types::SitePath::parse(FILE).expect("valid"),
+            consent: Default::default(),
+        });
 
         assert!(
             matches!(&refused.response, Response::ConflictsNeedConfirmation(files) if files == &vec![FILE.to_string()]),
@@ -7409,17 +8349,27 @@ mod suggestion_accept_tests {
             refused.response
         );
         assert!(
-            refused.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE)),
+            refused
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE)),
             "the conflict is announced: {:?}",
             refused.events
         );
         assert_eq!(disk(&tmp, FILE), SHELL_A, "the disk text is intact");
-        assert_eq!(conflicts(&conductor), vec![FILE.to_string()], "the conflict is recorded");
+        assert_eq!(
+            conflicts(&conductor),
+            vec![FILE.to_string()],
+            "the conflict is recorded"
+        );
         assert_eq!(title(&conductor), "Edited A", "the edit is kept");
 
         // With consent that names the file, the save goes through.
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: consent(&[FILE]) })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: consent(&[FILE]),
+            })
             .response;
         assert!(matches!(saved, Response::Ok), "{saved:?}");
         assert!(disk(&tmp, FILE).contains("Edited A"));
@@ -7429,14 +8379,19 @@ mod suggestion_accept_tests {
     #[test]
     fn save_all_over_an_unreported_disk_change_needs_confirmation() {
         let tmp = build_site();
-        std::fs::write(tmp.path().join(OTHER_FILE), "# Second Post\n\n----\n\nGamma.\n").unwrap();
+        std::fs::write(
+            tmp.path().join(OTHER_FILE),
+            "# Second Post\n\n----\n\nGamma.\n",
+        )
+        .unwrap();
         let conductor = make_conductor(&tmp);
         edit_title(&conductor, FILE, "Edited A");
         edit_title(&conductor, OTHER_FILE, "Edited B");
         std::fs::write(tmp.path().join(OTHER_FILE), SHELL_B).unwrap();
 
-        let refused = conductor
-            .handle_command(Command::SaveAllBuffers { consent: Default::default() });
+        let refused = conductor.handle_command(Command::SaveAllBuffers {
+            consent: Default::default(),
+        });
 
         assert!(
             matches!(&refused.response, Response::ConflictsNeedConfirmation(files) if files == &vec![OTHER_FILE.to_string()]),
@@ -7444,12 +8399,23 @@ mod suggestion_accept_tests {
             refused.response
         );
         assert!(
-            refused.events.iter().any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == OTHER_FILE)),
+            refused
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == OTHER_FILE)),
             "{:?}",
             refused.events
         );
-        assert_eq!(disk(&tmp, OTHER_FILE), SHELL_B, "the changed file is intact");
-        assert_eq!(disk(&tmp, FILE), CONTENT, "nothing is written, not even the clean file");
+        assert_eq!(
+            disk(&tmp, OTHER_FILE),
+            SHELL_B,
+            "the changed file is intact"
+        );
+        assert_eq!(
+            disk(&tmp, FILE),
+            CONTENT,
+            "nothing is written, not even the clean file"
+        );
         assert_eq!(conflicts(&conductor), vec![OTHER_FILE.to_string()]);
     }
 
@@ -7459,13 +8425,19 @@ mod suggestion_accept_tests {
         let conductor = make_conductor(&tmp);
         edit_title(&conductor, FILE, "Edited A");
         let first = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: Default::default(),
+            })
             .response;
         assert!(matches!(first, Response::Ok), "{first:?}");
 
         edit_title(&conductor, FILE, "Edited again");
         let second = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: Default::default(),
+            })
             .response;
         assert!(matches!(second, Response::Ok), "{second:?}");
         assert!(disk(&tmp, FILE).contains("Edited again"));
@@ -7480,16 +8452,28 @@ mod suggestion_accept_tests {
         std::fs::remove_file(tmp.path().join(FILE)).unwrap();
 
         let refused = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: Default::default(),
+            })
             .response;
-        assert!(matches!(refused, Response::ConflictsNeedConfirmation(_)), "{refused:?}");
+        assert!(
+            matches!(refused, Response::ConflictsNeedConfirmation(_)),
+            "{refused:?}"
+        );
         assert!(!tmp.path().join(FILE).exists(), "nothing was written");
 
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: consent(&[FILE]) })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: consent(&[FILE]),
+            })
             .response;
         assert!(matches!(saved, Response::Ok), "{saved:?}");
-        assert!(disk(&tmp, FILE).contains("Edited A"), "the file is recreated on consent");
+        assert!(
+            disk(&tmp, FILE).contains("Edited A"),
+            "the file is recreated on consent"
+        );
     }
 
     #[test]
@@ -7499,10 +8483,24 @@ mod suggestion_accept_tests {
 
         let result = reload(&conductor, FILE);
 
-        assert!(matches!(result.response, Response::Reloaded { discarded: true, .. }), "{:?}", result.response);
+        assert!(
+            matches!(
+                result.response,
+                Response::Reloaded {
+                    discarded: true,
+                    ..
+                }
+            ),
+            "{:?}",
+            result.response
+        );
         assert!(conflicts(&conductor).is_empty());
         assert!(!is_dirty(&conductor));
-        assert_eq!(title(&conductor), "Shell Title", "the disk version is loaded");
+        assert_eq!(
+            title(&conductor),
+            "Shell Title",
+            "the disk version is loaded"
+        );
         assert_eq!(disk(&tmp, FILE), SHELL_A, "reload writes nothing");
     }
 
@@ -7513,9 +8511,15 @@ mod suggestion_accept_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
 
-        let result = conductor
-            .handle_command(Command::CreateContent { stem: "post".into(), slug: "new".into() });
-        assert!(!matches!(result.response, Response::Error(_)), "{:?}", result.response);
+        let result = conductor.handle_command(Command::CreateContent {
+            stem: "post".into(),
+            slug: "new".into(),
+        });
+        assert!(
+            !matches!(result.response, Response::Error(_)),
+            "{:?}",
+            result.response
+        );
 
         let abs = tmp.path().join("content/post/new.md");
         let mtime = std::fs::metadata(&abs).unwrap().modified().unwrap();
@@ -7543,10 +8547,19 @@ mod suggestion_accept_tests {
             Response::Applied { dirty_paths: 1, .. }
         ));
 
-        let result = conductor
-            .handle_command(Command::CreateContent { stem: "post".into(), slug: "new".into() });
-        assert!(!matches!(result.response, Response::Error(_)), "{:?}", result.response);
-        assert!(tmp.path().join("content/post/new.md").exists(), "the file is created");
+        let result = conductor.handle_command(Command::CreateContent {
+            stem: "post".into(),
+            slug: "new".into(),
+        });
+        assert!(
+            !matches!(result.response, Response::Error(_)),
+            "{:?}",
+            result.response
+        );
+        assert!(
+            tmp.path().join("content/post/new.md").exists(),
+            "the file is created"
+        );
 
         assert_eq!(title(&conductor), "Edited A", "A's unsaved edit survives");
         assert!(is_dirty(&conductor), "A is still dirty");
@@ -7558,11 +8571,19 @@ mod suggestion_accept_tests {
     fn accept_runs_through_execute_and_marks_dirty() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let id = create(&conductor, TITLE_TEXT, NedMutation::SetText("Renamed Post".into()));
+        let id = create(
+            &conductor,
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed Post".into()),
+        );
 
         let result = accept(&conductor, &id);
 
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert_eq!(title(&conductor), "Renamed Post");
         assert!(is_dirty(&conductor));
@@ -7580,17 +8601,23 @@ mod suggestion_accept_tests {
         let root = conductor.make_ned_root(&recorder).expect("root");
         let program = format!(r#"(ned/set-text {TITLE_TEXT} "Renamed Post")"#);
 
-        let (value, outcome, events) =
-            conductor.run_ned_program_with_events(&root, &recorder, &program).expect("runs");
+        let (value, outcome, events) = conductor
+            .run_ned_program_with_events(&root, &recorder, &program)
+            .expect("runs");
 
         assert!(matches!(value, template::Value::Absent), "{value:?}");
         assert!(
-            events.iter().any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
             "{events:?}"
         );
         assert_eq!(outcome.dirty_paths, vec![PathBuf::from(FILE)]);
         assert_eq!((outcome.applied, outcome.skipped), (1, 0));
-        assert!(outcome.rebuilt_pages.contains(&"/post/first".to_string()), "{outcome:?}");
+        assert!(
+            outcome.rebuilt_pages.contains(&"/post/first".to_string()),
+            "{outcome:?}"
+        );
         assert!(outcome.failed_pages.is_empty(), "{outcome:?}");
         assert!(is_dirty(&conductor));
         assert_eq!(title(&conductor), "Renamed Post");
@@ -7603,7 +8630,11 @@ mod suggestion_accept_tests {
         let id = create(&conductor, FIRST_PARAGRAPH, NedMutation::Delete);
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert_eq!(body_texts(&conductor), vec!["Beta para.", "fn a() {}"]);
         assert!(is_dirty(&conductor));
@@ -7614,10 +8645,18 @@ mod suggestion_accept_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         let para = |t: &str| ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text(t));
-        let id = create(&conductor, FIRST_PARAGRAPH, NedMutation::InsertAfter(vec![para("X."), para("Y.")]));
+        let id = create(
+            &conductor,
+            FIRST_PARAGRAPH,
+            NedMutation::InsertAfter(vec![para("X."), para("Y.")]),
+        );
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert_eq!(
             body_texts(&conductor),
@@ -7633,25 +8672,35 @@ mod suggestion_accept_tests {
         let id = create(
             &conductor,
             ALPHA_TEXT,
-            NedMutation::SearchReplace { search: "Alpha".into(), replace: "Gamma".into() },
+            NedMutation::SearchReplace {
+                search: "Alpha".into(),
+                replace: "Gamma".into(),
+            },
         );
 
         // Edit the text so the search string occurs twice.
         {
             let root = live_root(&conductor);
             let mut store = conductor.node_store.write().unwrap();
-            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
+            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body")
+                .unwrap();
             let first = store.children(body)[0];
             let text = store.children(first)[0];
             store.replace_node(text, node_store::Node::Text("Alpha and Alpha.".into()));
         }
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
-        assert!(result
-            .events
-            .iter()
-            .any(|ev| matches!(ev, ConductorEvent::NedSuggestionStaled { .. })));
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|ev| matches!(ev, ConductorEvent::NedSuggestionStaled { .. }))
+        );
         match status(&conductor, &id) {
             NedSuggestionStatus::Stale { reason, cause } => {
                 assert_eq!(cause, StaleCause::SearchNotUnique { occurrences: 2 });
@@ -7659,7 +8708,11 @@ mod suggestion_accept_tests {
             }
             other => panic!("expected Stale, got {other:?}"),
         }
-        assert_eq!(body_texts(&conductor)[0], "Alpha and Alpha.", "nothing applied");
+        assert_eq!(
+            body_texts(&conductor)[0],
+            "Alpha and Alpha.",
+            "nothing applied"
+        );
         assert!(!is_dirty(&conductor));
     }
 
@@ -7673,7 +8726,10 @@ mod suggestion_accept_tests {
         let id = create(
             &conductor,
             ALPHA_TEXT,
-            NedMutation::SearchReplace { search: "Alpha".into(), replace: String::new() },
+            NedMutation::SearchReplace {
+                search: "Alpha".into(),
+                replace: String::new(),
+            },
         );
 
         // The paragraph is now only "Alpha": the replacement would empty it,
@@ -7681,7 +8737,8 @@ mod suggestion_accept_tests {
         {
             let root = live_root(&conductor);
             let mut store = conductor.node_store.write().unwrap();
-            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").unwrap();
+            let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body")
+                .unwrap();
             let first = store.children(body)[0];
             let text = store.children(first)[0];
             store.replace_node(text, node_store::Node::Text("Alpha".into()));
@@ -7696,7 +8753,11 @@ mod suggestion_accept_tests {
         };
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         let stale = status(&conductor, &id);
         assert!(
             matches!(
@@ -7720,22 +8781,43 @@ mod suggestion_accept_tests {
     fn accept_after_target_deleted_is_stale_unresolved_and_persists_cause() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let id = create(&conductor, ALPHA_TEXT, NedMutation::SetText("Changed.".into()));
+        let id = create(
+            &conductor,
+            ALPHA_TEXT,
+            NedMutation::SetText("Changed.".into()),
+        );
 
         delete_first_body_block(&conductor);
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert!(matches!(
             status(&conductor, &id),
-            NedSuggestionStatus::Stale { cause: StaleCause::Unresolved, .. }
+            NedSuggestionStatus::Stale {
+                cause: StaleCause::Unresolved,
+                ..
+            }
         ));
 
-        let path = tmp.path().join(".presemble/suggestions/ned").join(format!("{id}.json"));
+        let path = tmp
+            .path()
+            .join(".presemble/suggestions/ned")
+            .join(format!("{id}.json"));
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["status"]["Stale"]["cause"], "Unresolved", "persisted: {json}");
-        assert!(json["status"]["Stale"]["reason"].as_str().is_some_and(|r| !r.is_empty()));
+        assert_eq!(
+            json["status"]["Stale"]["cause"], "Unresolved",
+            "persisted: {json}"
+        );
+        assert!(
+            json["status"]["Stale"]["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty())
+        );
     }
 
     #[test]
@@ -7753,30 +8835,45 @@ mod suggestion_accept_tests {
         let selection = format!(
             r#"(ned/text-containing (ned/union (ned/body (ned/doc-by-path "{FILE}")) (ned/body (ned/doc-by-path "{OTHER}"))) "Alpha")"#
         );
-        let id = create(&conductor, &selection, NedMutation::SetText("Changed.".into()));
+        let id = create(
+            &conductor,
+            &selection,
+            NedMutation::SetText("Changed.".into()),
+        );
 
         // Edit the store so the selection now resolves uniquely into B.
         let other_text = {
             let root_a = live_root(&conductor);
-            let root_b = conductor.doc_root_for_path(Path::new(OTHER)).expect("B root");
+            let root_b = conductor
+                .doc_root_for_path(Path::new(OTHER))
+                .expect("B root");
             let mut store = conductor.node_store.write().unwrap();
             let body_a =
-                node_store_bridge::content_bridge::find_child_by_name(&store, root_a, "body").unwrap();
+                node_store_bridge::content_bridge::find_child_by_name(&store, root_a, "body")
+                    .unwrap();
             let text_a = store.children(store.children(body_a)[0])[0];
             store.replace_node(text_a, node_store::Node::Text("Omega para.".into()));
             let body_b =
-                node_store_bridge::content_bridge::find_child_by_name(&store, root_b, "body").unwrap();
+                node_store_bridge::content_bridge::find_child_by_name(&store, root_b, "body")
+                    .unwrap();
             let text_b = store.children(store.children(body_b)[0])[0];
             store.replace_node(text_b, node_store::Node::Text("Alpha in B.".into()));
             text_b
         };
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert!(
             matches!(
                 status(&conductor, &id),
-                NedSuggestionStatus::Stale { cause: StaleCause::Unresolved, .. }
+                NedSuggestionStatus::Stale {
+                    cause: StaleCause::Unresolved,
+                    ..
+                }
             ),
             "got {:?}",
             status(&conductor, &id)
@@ -7789,7 +8886,11 @@ mod suggestion_accept_tests {
         );
         drop(store);
         assert!(
-            !conductor.dirty_docs().read().unwrap().contains(Path::new(OTHER)),
+            !conductor
+                .dirty_docs()
+                .read()
+                .unwrap()
+                .contains(Path::new(OTHER)),
             "B must not be marked dirty"
         );
     }
@@ -7798,10 +8899,17 @@ mod suggestion_accept_tests {
     fn stale_suggestion_can_be_rejected_but_not_accepted() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let id = create(&conductor, ALPHA_TEXT, NedMutation::SetText("Changed.".into()));
+        let id = create(
+            &conductor,
+            ALPHA_TEXT,
+            NedMutation::SetText("Changed.".into()),
+        );
         delete_first_body_block(&conductor);
         accept(&conductor, &id);
-        assert!(matches!(status(&conductor, &id), NedSuggestionStatus::Stale { .. }));
+        assert!(matches!(
+            status(&conductor, &id),
+            NedSuggestionStatus::Stale { .. }
+        ));
 
         let again = accept(&conductor, &id);
         match again.response {
@@ -7810,7 +8918,11 @@ mod suggestion_accept_tests {
         }
 
         let rejected = conductor.handle_command(Command::RejectNedSuggestion { id: id.clone() });
-        assert!(matches!(rejected.response, Response::Ok), "got {:?}", rejected.response);
+        assert!(
+            matches!(rejected.response, Response::Ok),
+            "got {:?}",
+            rejected.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Rejected);
     }
 
@@ -7818,7 +8930,11 @@ mod suggestion_accept_tests {
     fn rebuild_page_then_accept_changes_the_live_root() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let id = create(&conductor, TITLE_TEXT, NedMutation::SetText("Live Title".into()));
+        let id = create(
+            &conductor,
+            TITLE_TEXT,
+            NedMutation::SetText("Live Title".into()),
+        );
 
         let old_root = live_root(&conductor);
         conductor
@@ -7828,7 +8944,11 @@ mod suggestion_accept_tests {
         assert_ne!(old_root, new_root, "re-ingest creates a new live root");
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert_eq!(title(&conductor), "Live Title", "live root must be changed");
 
@@ -7843,8 +8963,7 @@ mod suggestion_accept_tests {
 
     /// `Stray para.` sits above `----` where the schema takes no paragraph:
     /// it lands in `preamble > unassigned` (ADR-060 P1).
-    const CONTENT_WITH_UNASSIGNED: &str =
-        "# First Post\n\nStray para.\n\n----\n\nAlpha para.\n";
+    const CONTENT_WITH_UNASSIGNED: &str = "# First Post\n\nStray para.\n\n----\n\nAlpha para.\n";
     const STRAY_BLOCK: &str =
         r#"(ned/parents (ned/text-containing (ned/doc-by-path "content/post/first.md") "Stray"))"#;
 
@@ -7859,18 +8978,29 @@ mod suggestion_accept_tests {
                 node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
                     .expect("preamble");
             assert!(
-                node_store_bridge::content_bridge::find_child_by_name(&store, preamble, "unassigned")
-                    .is_some(),
+                node_store_bridge::content_bridge::find_child_by_name(
+                    &store,
+                    preamble,
+                    "unassigned"
+                )
+                .is_some(),
                 "fixture must have an unassigned block"
             );
         }
         let id = create(&conductor, STRAY_BLOCK, mutation);
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert!(is_dirty(&conductor));
         let saved = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: Default::default(),
+            })
             .response;
         assert!(!matches!(saved, Response::Error(_)), "save: {saved:?}");
         std::fs::read_to_string(tmp.path().join(FILE)).expect("file written")
@@ -7902,7 +9032,11 @@ mod suggestion_accept_tests {
         let id = create(&conductor, CODE_TEXT, NedMutation::SetText(code.into()));
 
         let result = accept(&conductor, &id);
-        assert!(matches!(result.response, Response::Ok), "got {:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "got {:?}",
+            result.response
+        );
         assert_eq!(status(&conductor, &id), NedSuggestionStatus::Accepted);
         assert_eq!(body_texts(&conductor)[2], code);
 
@@ -7918,7 +9052,11 @@ mod suggestion_accept_tests {
             .expect("rebuild_page from serialized markdown");
         let second = serialize(&conductor);
         assert_eq!(first, second, "file content must be a fixed point");
-        assert_eq!(body_texts(&conductor)[2], code, "code survives the round trip");
+        assert_eq!(
+            body_texts(&conductor)[2],
+            code,
+            "code survives the round trip"
+        );
     }
 
     #[test]
@@ -7956,15 +9094,12 @@ mod block_edit_tests {
     const FILE: &str = "content/post/first.md";
     const SCHEMA: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
-    const TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
+    const TEMPLATE: &str = r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const CONTENT: &str =
         "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```rust\nfn a() {}\n```\n";
 
-    const FIRST_PARAGRAPH: &str =
-        r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "paragraph" 0)"#;
-    const TITLE_HEADING: &str =
-        r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")) "heading" 0)"#;
+    const FIRST_PARAGRAPH: &str = r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "paragraph" 0)"#;
+    const TITLE_HEADING: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")) "heading" 0)"#;
 
     fn build_site() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -7979,7 +9114,9 @@ mod block_edit_tests {
     }
 
     fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
-        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
         Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
     }
 
@@ -8034,11 +9171,19 @@ mod block_edit_tests {
     }
 
     fn suggestion(conductor: &Conductor, id: &SuggestionId) -> editorial_types::NedSuggestion {
-        conductor.ned_suggestions.read().unwrap().get(id).expect("suggestion").clone()
+        conductor
+            .ned_suggestions
+            .read()
+            .unwrap()
+            .get(id)
+            .expect("suggestion")
+            .clone()
     }
 
     fn live_root(conductor: &Conductor) -> node_store::NodeId {
-        conductor.doc_root_for_path(Path::new(FILE)).expect("live root")
+        conductor
+            .doc_root_for_path(Path::new(FILE))
+            .expect("live root")
     }
 
     fn block_text(store: &node_store::NodeStore, block: node_store::NodeId) -> String {
@@ -8098,7 +9243,13 @@ mod block_edit_tests {
             let tmp = build_site();
             let lowering_conductor = make_conductor(&tmp);
             let lowered = match lowering_conductor
-                .lower_block_edit(&request(FILE, selection, base, proposed, BlockEditIntent::Apply))
+                .lower_block_edit(&request(
+                    FILE,
+                    selection,
+                    base,
+                    proposed,
+                    BlockEditIntent::Apply,
+                ))
                 .expect("lowers")
                 .0
             {
@@ -8109,23 +9260,40 @@ mod block_edit_tests {
             // Suggest stores exactly that mutation.
             let tmp_s = build_site();
             let suggester = make_conductor(&tmp_s);
-            let id = created_id(&edit(&suggester, selection, base, proposed, BlockEditIntent::Suggest));
+            let id = created_id(&edit(
+                &suggester,
+                selection,
+                base,
+                proposed,
+                BlockEditIntent::Suggest,
+            ));
             let stored = suggestion(&suggester, &id);
             assert_eq!(stored.selection, lowered.selection, "{proposed:?}");
             assert_eq!(stored.mutation, lowered.mutation, "{proposed:?}");
-            assert_eq!(stored.preview, Some(lowered.preview.clone()), "{proposed:?}");
+            assert_eq!(
+                stored.preview,
+                Some(lowered.preview.clone()),
+                "{proposed:?}"
+            );
 
             // Apply has the same effect as accepting that suggestion.
             let tmp_a = build_site();
             let applier = make_conductor(&tmp_a);
             let applied = edit(&applier, selection, base, proposed, BlockEditIntent::Apply);
             assert!(
-                matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+                matches!(
+                    response(&applied),
+                    BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+                ),
                 "{:?}",
                 response(&applied)
             );
             let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
-            assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+            assert!(
+                matches!(accepted.response, Response::Ok),
+                "{:?}",
+                accepted.response
+            );
             assert_eq!(title(&applier), title(&suggester), "{proposed:?}");
             assert_eq!(body_texts(&applier), body_texts(&suggester), "{proposed:?}");
         }
@@ -8143,9 +9311,15 @@ mod block_edit_tests {
     }
 
     fn saved_file(tmp: &tempfile::TempDir, conductor: &Conductor) -> String {
-        let result = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() });
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        let result = conductor.handle_command(Command::SaveBuffer {
+            path: editorial_types::SitePath::parse(FILE).expect("valid"),
+            consent: Default::default(),
+        });
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
         std::fs::read_to_string(tmp.path().join(FILE)).expect("content file")
     }
 
@@ -8154,25 +9328,53 @@ mod block_edit_tests {
     #[test]
     fn heading_block_edit_apply_equals_suggest_then_accept_on_disk() {
         let cases = [
-            ("Hello *Presemble*", "# Hello *Presemble*\n\n----\n\nAlpha para.\n\nBeta para.\n"),
-            ("Hello **World**", "# Hello **World**\n\n----\n\nAlpha para.\n\nBeta para.\n"),
-            ("Howdy **World**", "# Howdy **World**\n\n----\n\nAlpha para.\n\nBeta para.\n"),
+            (
+                "Hello *Presemble*",
+                "# Hello *Presemble*\n\n----\n\nAlpha para.\n\nBeta para.\n",
+            ),
+            (
+                "Hello **World**",
+                "# Hello **World**\n\n----\n\nAlpha para.\n\nBeta para.\n",
+            ),
+            (
+                "Howdy **World**",
+                "# Howdy **World**\n\n----\n\nAlpha para.\n\nBeta para.\n",
+            ),
         ];
         for (proposed, expected) in cases {
             let tmp_a = formatted_title_site();
             let applier = make_conductor(&tmp_a);
-            let applied = edit(&applier, TITLE_HEADING, "Hello *World*", proposed, BlockEditIntent::Apply);
+            let applied = edit(
+                &applier,
+                TITLE_HEADING,
+                "Hello *World*",
+                proposed,
+                BlockEditIntent::Apply,
+            );
             assert!(
-                matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+                matches!(
+                    response(&applied),
+                    BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+                ),
                 "{proposed:?}: {:?}",
                 response(&applied)
             );
 
             let tmp_s = formatted_title_site();
             let suggester = make_conductor(&tmp_s);
-            let id = created_id(&edit(&suggester, TITLE_HEADING, "Hello *World*", proposed, BlockEditIntent::Suggest));
+            let id = created_id(&edit(
+                &suggester,
+                TITLE_HEADING,
+                "Hello *World*",
+                proposed,
+                BlockEditIntent::Suggest,
+            ));
             let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
-            assert!(matches!(accepted.response, Response::Ok), "{proposed:?}: {:?}", accepted.response);
+            assert!(
+                matches!(accepted.response, Response::Ok),
+                "{proposed:?}: {:?}",
+                accepted.response
+            );
 
             let (a, s) = (saved_file(&tmp_a, &applier), saved_file(&tmp_s, &suggester));
             assert_eq!(a, expected, "apply {proposed:?}");
@@ -8199,25 +9401,53 @@ mod block_edit_tests {
     fn paragraph_block_edit_apply_equals_suggest_then_accept_on_disk() {
         const BASE: &str = "See ![c](c.png) *here*.";
         let cases = [
-            ("See ![c](c.png) *there*.", "# First Post\n\n----\n\nSee ![c](c.png) *there*.\n\nBeta para.\n"),
-            ("See ![c](c.png) **here**.", "# First Post\n\n----\n\nSee ![c](c.png) **here**.\n\nBeta para.\n"),
-            ("Look ![c](c.png) **there**!", "# First Post\n\n----\n\nLook ![c](c.png) **there**!\n\nBeta para.\n"),
+            (
+                "See ![c](c.png) *there*.",
+                "# First Post\n\n----\n\nSee ![c](c.png) *there*.\n\nBeta para.\n",
+            ),
+            (
+                "See ![c](c.png) **here**.",
+                "# First Post\n\n----\n\nSee ![c](c.png) **here**.\n\nBeta para.\n",
+            ),
+            (
+                "Look ![c](c.png) **there**!",
+                "# First Post\n\n----\n\nLook ![c](c.png) **there**!\n\nBeta para.\n",
+            ),
         ];
         for (proposed, expected) in cases {
             let tmp_a = formatted_paragraph_site();
             let applier = make_conductor(&tmp_a);
-            let applied = edit(&applier, FIRST_PARAGRAPH, BASE, proposed, BlockEditIntent::Apply);
+            let applied = edit(
+                &applier,
+                FIRST_PARAGRAPH,
+                BASE,
+                proposed,
+                BlockEditIntent::Apply,
+            );
             assert!(
-                matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+                matches!(
+                    response(&applied),
+                    BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+                ),
                 "{proposed:?}: {:?}",
                 response(&applied)
             );
 
             let tmp_s = formatted_paragraph_site();
             let suggester = make_conductor(&tmp_s);
-            let id = created_id(&edit(&suggester, FIRST_PARAGRAPH, BASE, proposed, BlockEditIntent::Suggest));
+            let id = created_id(&edit(
+                &suggester,
+                FIRST_PARAGRAPH,
+                BASE,
+                proposed,
+                BlockEditIntent::Suggest,
+            ));
             let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
-            assert!(matches!(accepted.response, Response::Ok), "{proposed:?}: {:?}", accepted.response);
+            assert!(
+                matches!(accepted.response, Response::Ok),
+                "{proposed:?}: {:?}",
+                accepted.response
+            );
 
             let (a, s) = (saved_file(&tmp_a, &applier), saved_file(&tmp_s, &suggester));
             assert_eq!(a, expected, "apply {proposed:?}");
@@ -8239,12 +9469,17 @@ mod block_edit_tests {
 
         let result = conductor.handle_command(Command::BlockEdit(req));
         assert!(
-            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&result)
         );
 
-        let sem = conductor.semantic_content_by_url("/post/first").expect("the page has semantic content");
+        let sem = conductor
+            .semantic_content_by_url("/post/first")
+            .expect("the page has semantic content");
         {
             let store = conductor.node_store.read().unwrap();
             let part = |name: &str| {
@@ -8305,7 +9540,10 @@ mod block_edit_tests {
         req.proposed = BlockText::Edn("[:heading {:level \"2\"} \"Second Post\"]".to_string());
         let result = conductor.handle_command(Command::BlockEdit(req));
         assert!(
-            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&result)
         );
@@ -8344,7 +9582,10 @@ mod block_edit_tests {
 
         let result = conductor.handle_command(Command::BlockEdit(req));
         assert!(
-            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&result)
         );
@@ -8359,7 +9600,11 @@ mod block_edit_tests {
         req.proposed = BlockText::Edn("[:heading {:level \"2\"} \"First Post\"]".to_string());
         let id = created_id(&suggester.handle_command(Command::BlockEdit(req)));
         let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
-        assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+        assert!(
+            matches!(accepted.response, Response::Ok),
+            "{:?}",
+            accepted.response
+        );
         assert_eq!(saved_file(&tmp_s, &suggester), file);
     }
 
@@ -8370,7 +9615,11 @@ mod block_edit_tests {
     fn failed_reference_refresh_is_a_build_error() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        conductor.url_to_semantic.write().unwrap().remove("/post/first");
+        conductor
+            .url_to_semantic
+            .write()
+            .unwrap()
+            .remove("/post/first");
 
         let mut req = request(FILE, TITLE_HEADING, "", "", BlockEditIntent::Apply);
         req.base = BlockText::Edn("[:heading {:level \"1\"} \"First Post\"]".to_string());
@@ -8386,9 +9635,13 @@ mod block_edit_tests {
             result.events
         );
         let errors = conductor.build_errors.read().unwrap();
-        let messages = errors.get("/post/first").expect("a build error for the page");
+        let messages = errors
+            .get("/post/first")
+            .expect("a build error for the page");
         assert!(
-            messages.iter().any(|m| m.contains("references could not be rebuilt")),
+            messages
+                .iter()
+                .any(|m| m.contains("references could not be rebuilt")),
             "{messages:?}"
         );
     }
@@ -8400,7 +9653,9 @@ mod block_edit_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         let blocks_before = body_blocks(&conductor);
-        let sem_before = conductor.semantic_content_by_url("/post/first").expect("semantic node");
+        let sem_before = conductor
+            .semantic_content_by_url("/post/first")
+            .expect("semantic node");
         let untouched = blocks_before[1];
 
         let applied = edit(
@@ -8411,7 +9666,10 @@ mod block_edit_tests {
             BlockEditIntent::Apply,
         );
         assert!(
-            matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&applied),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&applied)
         );
@@ -8420,7 +9678,10 @@ mod block_edit_tests {
             body_blocks(&conductor).contains(&untouched),
             "the sibling block kept its node id"
         );
-        assert_eq!(conductor.semantic_content_by_url("/post/first"), Some(sem_before));
+        assert_eq!(
+            conductor.semantic_content_by_url("/post/first"),
+            Some(sem_before)
+        );
     }
 
     /// A guard, green on arrival: it pins that an EDN edit and an EDN
@@ -8435,17 +9696,27 @@ mod block_edit_tests {
             req
         };
         let saved = |tmp: &tempfile::TempDir, conductor: &Conductor| {
-            let result = conductor
-                .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() });
-            assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+            let result = conductor.handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: Default::default(),
+            });
+            assert!(
+                matches!(result.response, Response::Ok),
+                "{:?}",
+                result.response
+            );
             std::fs::read_to_string(tmp.path().join(FILE)).expect("content file")
         };
 
         let tmp_a = build_site();
         let applier = make_conductor(&tmp_a);
-        let applied = applier.handle_command(Command::BlockEdit(edn_request(BlockEditIntent::Apply)));
+        let applied =
+            applier.handle_command(Command::BlockEdit(edn_request(BlockEditIntent::Apply)));
         assert!(
-            matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&applied),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&applied)
         );
@@ -8463,11 +9734,18 @@ mod block_edit_tests {
             })
         );
         let accepted = suggester.handle_command(Command::AcceptNedSuggestion { id });
-        assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+        assert!(
+            matches!(accepted.response, Response::Ok),
+            "{:?}",
+            accepted.response
+        );
 
         let on_disk_applied = saved(&tmp_a, &applier);
         let on_disk_accepted = saved(&tmp_s, &suggester);
-        assert!(on_disk_applied.contains("Alpha paragraph."), "{on_disk_applied}");
+        assert!(
+            on_disk_applied.contains("Alpha paragraph."),
+            "{on_disk_applied}"
+        );
         assert_eq!(on_disk_applied, on_disk_accepted);
     }
 
@@ -8488,11 +9766,23 @@ mod block_edit_tests {
             BlockEditResponse::Done(BlockEditOutcome::Applied { pages }) => pages,
             other => panic!("expected Applied, got {other:?}"),
         };
-        assert!(pages.contains(&"/post/first".to_string()), "pages: {pages:?}");
-        assert_eq!(body_texts(&conductor)[0], "Alpha paragraph.");
-        assert!(conductor.dirty_docs().read().unwrap().contains(Path::new(FILE)));
         assert!(
-            result.events.iter().any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
+            pages.contains(&"/post/first".to_string()),
+            "pages: {pages:?}"
+        );
+        assert_eq!(body_texts(&conductor)[0], "Alpha paragraph.");
+        assert!(
+            conductor
+                .dirty_docs()
+                .read()
+                .unwrap()
+                .contains(Path::new(FILE))
+        );
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
             "events: {:?}",
             result.events
         );
@@ -8514,7 +9804,10 @@ mod block_edit_tests {
             BlockEditIntent::Apply,
         );
         assert!(
-            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&result)
         );
@@ -8527,7 +9820,9 @@ mod block_edit_tests {
             })
             .collect();
         assert_eq!(anchors.len(), 1, "events: {:?}", result.events);
-        let anchor = anchors[0].as_ref().expect("a body block edit carries an anchor");
+        let anchor = anchors[0]
+            .as_ref()
+            .expect("a body block edit carries an anchor");
         assert_eq!(anchor.slot, "body");
         assert_eq!(anchor.node_kind, "paragraph");
         assert_eq!(anchor.offset, 1, "the second paragraph");
@@ -8546,7 +9841,10 @@ mod block_edit_tests {
             BlockEditIntent::Apply,
         );
         assert!(
-            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&result)
         );
@@ -8578,11 +9876,16 @@ mod block_edit_tests {
             BlockEditIntent::Apply,
         );
         assert!(
-            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&result)
         );
-        let doc_root = conductor.doc_root_for_path(Path::new(FILE)).expect("document in store");
+        let doc_root = conductor
+            .doc_root_for_path(Path::new(FILE))
+            .expect("document in store");
         let store_arc = conductor.node_store();
         let store = store_arc.read().unwrap();
         let saved = node_store_bridge::serialize_from_store(&store, doc_root).expect("saves");
@@ -8606,7 +9909,10 @@ mod block_edit_tests {
             BlockEditIntent::Apply,
         );
         assert!(
-            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&result)
         );
@@ -8631,7 +9937,10 @@ mod block_edit_tests {
         );
         let id = created_id(&result);
         assert!(
-            result.events.iter().any(|e| matches!(e, ConductorEvent::NedSuggestionCreated { .. })),
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::NedSuggestionCreated { .. })),
             "events: {:?}",
             result.events
         );
@@ -8640,7 +9949,10 @@ mod block_edit_tests {
         assert_eq!(sug.selection, FIRST_PARAGRAPH);
         assert_eq!(sug.status, NedSuggestionStatus::Pending);
         assert_eq!(sug.reason, "because");
-        assert_eq!(sug.author, editorial_types::Author::Human("browser".to_string()));
+        assert_eq!(
+            sug.author,
+            editorial_types::Author::Human("browser".to_string())
+        );
         assert_eq!(
             sug.preview,
             Some(editorial_types::SuggestionPreview {
@@ -8648,7 +9960,11 @@ mod block_edit_tests {
                 proposed: editorial_types::PreviewText::new("Alpha one.\n\nAlpha two."),
             })
         );
-        assert_eq!(body_texts(&conductor)[0], "Alpha para.", "suggest must not change the block");
+        assert_eq!(
+            body_texts(&conductor)[0],
+            "Alpha para.",
+            "suggest must not change the block"
+        );
     }
 
     // ── 15 ──────────────────────────────────────────────────────────────────
@@ -8671,7 +9987,11 @@ mod block_edit_tests {
         for sel in &bad_selections {
             for intent in [BlockEditIntent::Apply, BlockEditIntent::Suggest] {
                 let result = edit(&conductor, sel, "Alpha para.", "Changed.", intent);
-                assert_eq!(refused_cause(&result), BlockEditCause::Unaddressable, "{sel}");
+                assert_eq!(
+                    refused_cause(&result),
+                    BlockEditCause::Unaddressable,
+                    "{sel}"
+                );
             }
         }
         // A block in another file than the request names.
@@ -8691,11 +10011,32 @@ mod block_edit_tests {
     fn block_edit_refusals_drift_no_change_and_not_editable() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let drifted = edit(&conductor, FIRST_PARAGRAPH, "Old text.", "New.", BlockEditIntent::Apply);
+        let drifted = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Old text.",
+            "New.",
+            BlockEditIntent::Apply,
+        );
         assert_eq!(refused_cause(&drifted), BlockEditCause::Drifted);
-        let same = edit(&conductor, FIRST_PARAGRAPH, "Alpha para.", "Alpha para.", BlockEditIntent::Apply);
-        assert_eq!(response(&same), BlockEditResponse::Done(BlockEditOutcome::NoChange));
-        let empty = edit(&conductor, FIRST_PARAGRAPH, "Alpha para.", "  ", BlockEditIntent::Suggest);
+        let same = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "Alpha para.",
+            BlockEditIntent::Apply,
+        );
+        assert_eq!(
+            response(&same),
+            BlockEditResponse::Done(BlockEditOutcome::NoChange)
+        );
+        let empty = edit(
+            &conductor,
+            FIRST_PARAGRAPH,
+            "Alpha para.",
+            "  ",
+            BlockEditIntent::Suggest,
+        );
         assert_eq!(refused_cause(&empty), BlockEditCause::Invalid);
     }
 
@@ -8728,18 +10069,35 @@ mod block_edit_tests {
             BlockEditIntent::Apply,
         );
         assert!(
-            matches!(response(&applied), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&applied),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&applied)
         );
-        let saved = conductor.handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() });
-        assert!(matches!(saved.response, Response::Ok), "{:?}", saved.response);
+        let saved = conductor.handle_command(Command::SaveBuffer {
+            path: editorial_types::SitePath::parse(FILE).expect("valid"),
+            consent: Default::default(),
+        });
+        assert!(
+            matches!(saved.response, Response::Ok),
+            "{:?}",
+            saved.response
+        );
         assert!(dirty_buffers(&conductor).is_empty());
 
         let result = conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() });
 
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
-        assert_eq!(suggestion(&conductor, &id).status, NedSuggestionStatus::Accepted);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(
+            suggestion(&conductor, &id).status,
+            NedSuggestionStatus::Accepted
+        );
         assert!(
             result.events.iter().any(|e| matches!(
                 e,
@@ -8749,7 +10107,10 @@ mod block_edit_tests {
             result.events
         );
         assert!(
-            !result.events.iter().any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
+            !result
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
             "nothing is rebuilt: {:?}",
             result.events
         );
@@ -8764,7 +10125,13 @@ mod block_edit_tests {
         for intent in [BlockEditIntent::Apply, BlockEditIntent::Suggest] {
             // The block already reads as the proposal; the client's base is
             // stale. Nothing to do, so nothing to refuse.
-            let result = edit(&conductor, FIRST_PARAGRAPH, "Old text.", "Alpha para.", intent);
+            let result = edit(
+                &conductor,
+                FIRST_PARAGRAPH,
+                "Old text.",
+                "Alpha para.",
+                intent,
+            );
             assert_eq!(
                 response(&result),
                 BlockEditResponse::Done(BlockEditOutcome::NoChange),
@@ -8794,19 +10161,29 @@ mod block_edit_tests {
 
         let result = conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() });
         assert!(
-            result.events.iter().any(|e| matches!(e, ConductorEvent::NedSuggestionStaled { .. })),
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::NedSuggestionStaled { .. })),
             "events: {:?}",
             result.events
         );
         assert!(
             matches!(
                 suggestion(&conductor, &id).status,
-                NedSuggestionStatus::Stale { cause: StaleCause::Drifted, .. }
+                NedSuggestionStatus::Stale {
+                    cause: StaleCause::Drifted,
+                    ..
+                }
             ),
             "{:?}",
             suggestion(&conductor, &id).status
         );
-        assert_eq!(body_texts(&conductor)[0], "Alpha rewritten.", "stale accept changes nothing");
+        assert_eq!(
+            body_texts(&conductor)[0],
+            "Alpha rewritten.",
+            "stale accept changes nothing"
+        );
     }
 
     // ── 17 ──────────────────────────────────────────────────────────────────
@@ -8824,15 +10201,26 @@ mod block_edit_tests {
             BlockEditIntent::Suggest,
         ));
         let sug = suggestion(&conductor, &id);
-        assert!(matches!(sug.mutation, NedMutation::SearchReplace { .. }), "{:?}", sug.mutation);
+        assert!(
+            matches!(sug.mutation, NedMutation::SearchReplace { .. }),
+            "{:?}",
+            sug.mutation
+        );
         assert!(sug.preview.is_some());
 
         // The block changes elsewhere: the base has drifted, but the search
         // text is still unique, so SearchReplace has no base check.
         manual_edit_first_paragraph(&conductor, "Alpha beta delta");
         let result = conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() });
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
-        assert_eq!(suggestion(&conductor, &id).status, NedSuggestionStatus::Accepted);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(
+            suggestion(&conductor, &id).status,
+            NedSuggestionStatus::Accepted
+        );
         assert_eq!(body_texts(&conductor)[0], "Alpha BETA delta");
     }
 
@@ -8848,10 +10236,17 @@ mod block_edit_tests {
         ] {
             for intent in [BlockEditIntent::Apply, BlockEditIntent::Suggest] {
                 let result = edit(&conductor, FIRST_PARAGRAPH, "Alpha para.", proposed, intent);
-                assert_eq!(refused_cause(&result), BlockEditCause::Invalid, "{proposed:?}");
+                assert_eq!(
+                    refused_cause(&result),
+                    BlockEditCause::Invalid,
+                    "{proposed:?}"
+                );
             }
         }
-        assert_eq!(body_texts(&conductor), vec!["Alpha para.", "Beta para.", "fn a() {}"]);
+        assert_eq!(
+            body_texts(&conductor),
+            vec!["Alpha para.", "Beta para.", "fn a() {}"]
+        );
         assert_eq!(pending_count(&conductor), 0);
     }
 
@@ -8862,7 +10257,13 @@ mod block_edit_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         for proposed in ["Alpha paragraph.", "Alpha one.\n\nAlpha two."] {
-            let req = request(FILE, FIRST_PARAGRAPH, "Alpha para.", proposed, BlockEditIntent::Apply);
+            let req = request(
+                FILE,
+                FIRST_PARAGRAPH,
+                "Alpha para.",
+                proposed,
+                BlockEditIntent::Apply,
+            );
             let lowered = match conductor.lower_block_edit(&req).expect("lowers").0 {
                 Lowering::Lowered(l) => l,
                 Lowering::NoChange => panic!("should change"),
@@ -8878,7 +10279,11 @@ mod block_edit_tests {
                 None,
                 None,
             );
-            assert_eq!(refused_cause(&result), BlockEditCause::Drifted, "{proposed:?}");
+            assert_eq!(
+                refused_cause(&result),
+                BlockEditCause::Drifted,
+                "{proposed:?}"
+            );
             assert_eq!(body_texts(&conductor)[0], "Totally different");
             manual_edit_first_paragraph(&conductor, "Alpha para.");
         }
@@ -8892,14 +10297,23 @@ mod block_edit_tests {
         let cause = Conductor::apply_refusal_cause;
         assert_eq!(cause(&S::Drifted), BlockEditCause::Drifted);
         assert_eq!(cause(&S::SearchNotFound), BlockEditCause::Drifted);
-        assert_eq!(cause(&S::SearchNotUnique { occurrences: 2 }), BlockEditCause::Drifted);
+        assert_eq!(
+            cause(&S::SearchNotUnique { occurrences: 2 }),
+            BlockEditCause::Drifted
+        );
         assert_eq!(cause(&S::Unresolved), BlockEditCause::Unaddressable);
-        assert_eq!(cause(&S::Ambiguous { matches: 2 }), BlockEditCause::Unaddressable);
+        assert_eq!(
+            cause(&S::Ambiguous { matches: 2 }),
+            BlockEditCause::Unaddressable
+        );
         assert_eq!(
             cause(&S::EvalError { detail: "x".into() }),
             BlockEditCause::Unaddressable
         );
-        assert_eq!(cause(&S::InvalidValue { detail: "x".into() }), BlockEditCause::Invalid);
+        assert_eq!(
+            cause(&S::InvalidValue { detail: "x".into() }),
+            BlockEditCause::Invalid
+        );
         assert_eq!(cause(&S::NoChange), BlockEditCause::Invalid);
     }
 
@@ -8910,9 +10324,18 @@ mod block_edit_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         // The base is the heading's source, with no `#` markers.
-        let result = edit(&conductor, TITLE_HEADING, "First Post", "Second Post", BlockEditIntent::Apply);
+        let result = edit(
+            &conductor,
+            TITLE_HEADING,
+            "First Post",
+            "Second Post",
+            BlockEditIntent::Apply,
+        );
         assert!(
-            matches!(response(&result), BlockEditResponse::Done(BlockEditOutcome::Applied { .. })),
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
             "{:?}",
             response(&result)
         );
@@ -8924,8 +10347,8 @@ mod block_edit_tests {
 mod apply_ned_program_diagnostic_tests {
     use super::*;
     use content::{ContentElement, Document, DocumentSlot};
-    use schema::{HeadingLevel, SlotName, Span, Spanned};
     use node_store_bridge::content_bridge::{DocumentMeta, document_to_store};
+    use schema::{HeadingLevel, SlotName, Span, Spanned};
 
     /// Build a minimal conductor with a document loaded into the NodeStore.
     ///
@@ -8992,9 +10415,19 @@ mod apply_ned_program_diagnostic_tests {
         let result = conductor.apply_ned_program("42");
 
         match result.response {
-            Response::Applied { dirty_paths, rebuilt_pages, failed_pages } => {
-                assert_eq!(dirty_paths, 0, "non-Selection program should report 0 dirty paths");
-                assert!(rebuilt_pages.is_empty(), "no pages should be rebuilt for a no-op");
+            Response::Applied {
+                dirty_paths,
+                rebuilt_pages,
+                failed_pages,
+            } => {
+                assert_eq!(
+                    dirty_paths, 0,
+                    "non-Selection program should report 0 dirty paths"
+                );
+                assert!(
+                    rebuilt_pages.is_empty(),
+                    "no pages should be rebuilt for a no-op"
+                );
                 assert!(failed_pages.is_empty(), "no pages should fail for a no-op");
             }
             other => panic!("expected Response::Applied, got: {other:?}"),
@@ -9008,8 +10441,7 @@ mod apply_ned_program_diagnostic_tests {
         let (conductor, _tmp) = make_conductor_with_doc();
 
         // Program: set the title slot text — this returns a Selection over the mutated nodes.
-        let program =
-            r#"(ned/set-text (-> (ned/slot (ned/doc-by-path "content/test/doc.md") "title") ned/descendants ned/texts) "Changed")"#;
+        let program = r#"(ned/set-text (-> (ned/slot (ned/doc-by-path "content/test/doc.md") "title") ned/descendants ned/texts) "Changed")"#;
 
         let result = conductor.apply_ned_program(program);
 
@@ -9040,15 +10472,16 @@ mod ned_program_plan_tests {
 
     const FILE: &str = "content/test/doc.md";
     const OTHER: &str = "content/test/other.md";
-    const TITLE_TEXT: &str =
-        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
-    const OTHER_TITLE_TEXT: &str =
-        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/other.md") "title")))"#;
+    const TITLE_TEXT: &str = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+    const OTHER_TITLE_TEXT: &str = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/other.md") "title")))"#;
     const BODY: &str = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "body")"#;
     const SUMMARY: &str = r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "summary")"#;
 
     fn spanned(node: ContentElement) -> Spanned<ContentElement> {
-        Spanned { node, span: Span { start: 0, end: 0 } }
+        Spanned {
+            node,
+            span: Span { start: 0, end: 0 },
+        }
     }
 
     fn p(text: &str) -> Spanned<ContentElement> {
@@ -9090,7 +10523,9 @@ mod ned_program_plan_tests {
         )
         .expect("schema");
         std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").expect("template");
-        let repo = site_repository::SiteRepository::builder().from_dir(root).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
         let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
 
         add_doc(
@@ -9139,10 +10574,12 @@ mod ned_program_plan_tests {
         let store = conductor.node_store.read().unwrap();
         sel.iter()
             .flat_map(|container| store.children(container))
-            .map(|block| match store.children(block).first().and_then(|t| store.get(*t)) {
-                Some(node_store::Node::Text(s)) => s.clone(),
-                other => panic!("expected a text child, got {other:?}"),
-            })
+            .map(
+                |block| match store.children(block).first().and_then(|t| store.get(*t)) {
+                    Some(node_store::Node::Text(s)) => s.clone(),
+                    other => panic!("expected a text child, got {other:?}"),
+                },
+            )
             .collect()
     }
 
@@ -9163,9 +10600,15 @@ mod ned_program_plan_tests {
     }
 
     fn unchanged(conductor: &Conductor) {
-        assert_eq!(block_texts(conductor, BODY), vec!["Alpha and Alpha", "Beta"]);
+        assert_eq!(
+            block_texts(conductor, BODY),
+            vec!["Alpha and Alpha", "Beta"]
+        );
         assert_eq!(block_texts(conductor, SUMMARY), vec!["One", "Two"]);
-        let title = block_texts(conductor, r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#);
+        let title = block_texts(
+            conductor,
+            r#"(ned/slot (ned/doc-by-path "content/test/doc.md") "title")"#,
+        );
         assert_eq!(title, vec!["Test Title"]);
     }
 
@@ -9218,7 +10661,8 @@ mod ned_program_plan_tests {
         let program = format!(r#"(ned/set-text (ned/text-in (ned/cell {TABLE} 0 1)) "x")"#);
         assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
 
-        let flat = content::parse_document("| a | b |\n|---|---|\n| 1 | x |\n| 3 | **4** |\n").unwrap();
+        let flat =
+            content::parse_document("| a | b |\n|---|---|\n| 1 | x |\n| 3 | **4** |\n").unwrap();
         assert_eq!(stored_table(&conductor), flat.elements[0].node.clone());
         assert_ne!(before, stored_table(&conductor));
 
@@ -9227,7 +10671,8 @@ mod ned_program_plan_tests {
         assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
         let program = format!(r#"(ned/set-text (ned/text-in (ned/cell {TABLE} 1 1)) "5")"#);
         assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
-        let flat = content::parse_document("| H | b |\n|---|---|\n| 1 | x |\n| 3 | **5** |\n").unwrap();
+        let flat =
+            content::parse_document("| H | b |\n|---|---|\n| 1 | x |\n| 3 | **5** |\n").unwrap();
         assert_eq!(stored_table(&conductor), flat.elements[0].node.clone());
     }
 
@@ -9236,7 +10681,11 @@ mod ned_program_plan_tests {
     /// `content/test/quote.md`: a body holding the quote `> a` / `> b` (two
     /// paragraphs).
     fn add_quote_doc(conductor: &Conductor) {
-        let quote = content::parse_document("> a\n>\n> b\n").expect("parses").elements[0].node.clone();
+        let quote = content::parse_document("> a\n>\n> b\n")
+            .expect("parses")
+            .elements[0]
+            .node
+            .clone();
         add_doc(
             conductor,
             "content/test/quote.md",
@@ -9275,7 +10724,9 @@ mod ned_program_plan_tests {
 
         let program = format!(r#"(ned/set-text (ned/text-in (ned/nth-child {QUOTE} 1)) "x")"#);
         assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
-        let expected = content::parse_document("> a\n>\n> x\n").unwrap().elements[0].node.clone();
+        let expected = content::parse_document("> a\n>\n> x\n").unwrap().elements[0]
+            .node
+            .clone();
         assert_eq!(stored_quote(&conductor), expected);
 
         // A block of the quote is a block target as well.
@@ -9283,7 +10734,9 @@ mod ned_program_plan_tests {
             r#"(ned/replace (ned/nth-child {QUOTE} 0) [(ned/with-child (ned/mk-element "paragraph") (ned/mk-text "y"))])"#
         );
         let result = conductor.apply_ned_program(&program);
-        let expected = content::parse_document("> y\n>\n> x\n").unwrap().elements[0].node.clone();
+        let expected = content::parse_document("> y\n>\n> x\n").unwrap().elements[0]
+            .node
+            .clone();
         assert_eq!(applied(result), 1);
         assert_eq!(stored_quote(&conductor), expected);
     }
@@ -9292,7 +10745,11 @@ mod ned_program_plan_tests {
 
     /// `content/test/list.md`: a body holding the list `- a` / `- b`.
     fn add_list_doc(conductor: &Conductor) {
-        let list = content::parse_document("- a\n- b\n").expect("parses").elements[0].node.clone();
+        let list = content::parse_document("- a\n- b\n")
+            .expect("parses")
+            .elements[0]
+            .node
+            .clone();
         add_doc(
             conductor,
             "content/test/list.md",
@@ -9329,10 +10786,13 @@ mod ned_program_plan_tests {
         let (conductor, _tmp) = make_conductor();
         add_list_doc(&conductor);
 
-        let program =
-            format!(r#"(ned/set-text (ned/text-in (ned/nth-child (ned/nth-child {LIST} 1) 0)) "x")"#);
+        let program = format!(
+            r#"(ned/set-text (ned/text-in (ned/nth-child (ned/nth-child {LIST} 1) 0)) "x")"#
+        );
         assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
-        let expected = content::parse_document("- a\n- x\n").unwrap().elements[0].node.clone();
+        let expected = content::parse_document("- a\n- x\n").unwrap().elements[0]
+            .node
+            .clone();
         assert_eq!(stored_list(&conductor), expected);
 
         // A block of the item is a block target as well.
@@ -9340,16 +10800,16 @@ mod ned_program_plan_tests {
             r#"(ned/replace (ned/nth-child (ned/nth-child {LIST} 0) 0) [(ned/with-child (ned/mk-element "paragraph") (ned/mk-text "y"))])"#
         );
         assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
-        let expected = content::parse_document("- y\n- x\n").unwrap().elements[0].node.clone();
+        let expected = content::parse_document("- y\n- x\n").unwrap().elements[0]
+            .node
+            .clone();
         assert_eq!(stored_list(&conductor), expected);
     }
 
     #[test]
     fn apply_program_with_ambiguous_selection_applies_nothing() {
         let (conductor, _tmp) = make_conductor();
-        let program = format!(
-            r#"(ned/set-text (-> {SUMMARY} ned/descendants ned/texts) "X")"#
-        );
+        let program = format!(r#"(ned/set-text (-> {SUMMARY} ned/descendants ned/texts) "X")"#);
         let e = refused(conductor.apply_ned_program(&program));
         assert!(e.starts_with("step 1 (ned/set-text):"), "{e}");
         assert!(e.contains("2 nodes"), "{e}");
@@ -9379,9 +10839,8 @@ mod ned_program_plan_tests {
     #[test]
     fn apply_search_replace_with_two_occurrences_is_refused() {
         let (conductor, _tmp) = make_conductor();
-        let program = format!(
-            r#"(ned/search-replace (ned/text-containing {BODY} "Alpha") "Alpha" "Gamma")"#
-        );
+        let program =
+            format!(r#"(ned/search-replace (ned/text-containing {BODY} "Alpha") "Alpha" "Gamma")"#);
         let e = refused(conductor.apply_ned_program(&program));
         assert!(e.starts_with("step 1 (ned/search-replace):"), "{e}");
         assert!(e.contains("2 times"), "{e}");
@@ -9404,7 +10863,10 @@ mod ned_program_plan_tests {
         let failure = plan_refused(conductor.apply_ned_program(&program));
         assert_eq!(failure.step, 2);
         assert_eq!(failure.origin, "ned/set-text");
-        assert_eq!(failure.cause, editorial_types::StaleCause::Ambiguous { matches: 2 });
+        assert_eq!(
+            failure.cause,
+            editorial_types::StaleCause::Ambiguous { matches: 2 }
+        );
         assert_eq!(
             failure.message,
             "step 2 (ned/set-text): the address matches 2 nodes; it must match exactly one"
@@ -9419,7 +10881,10 @@ mod ned_program_plan_tests {
             format!(r#"(do (ned/set-text {TITLE_TEXT} "a") (ned/set-text {TITLE_TEXT} "b"))"#);
         let failure = plan_refused(conductor.apply_ned_program(&program));
         assert_eq!((failure.step, failure.origin.as_str()), (2, "ned/set-text"));
-        assert_eq!(failure.cause, editorial_types::StaleCause::Overlap { with_step: 1 });
+        assert_eq!(
+            failure.cause,
+            editorial_types::StaleCause::Overlap { with_step: 1 }
+        );
         assert_eq!(
             failure.message,
             "step 2 (ned/set-text) changes what step 1 (ned/set-text) changes"
@@ -9456,9 +10921,8 @@ mod ned_program_plan_tests {
     #[test]
     fn apply_delete_marks_its_document_dirty() {
         let (conductor, _tmp) = make_conductor();
-        let program = format!(
-            r#"(ned/delete (ned/nth-of-kind (ned/children {BODY}) "paragraph" 1))"#
-        );
+        let program =
+            format!(r#"(ned/delete (ned/nth-of-kind (ned/children {BODY}) "paragraph" 1))"#);
         assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
         assert_eq!(block_texts(&conductor, BODY), vec!["Alpha and Alpha"]);
     }
@@ -9483,8 +10947,7 @@ mod ned_program_plan_tests {
     #[test]
     fn selection_cannot_see_nodes_inserted_earlier_in_the_program() {
         let (conductor, _tmp) = make_conductor();
-        let new_paragraph =
-            r#"(ned/with-child (ned/mk-element "paragraph") (ned/mk-text "New"))"#;
+        let new_paragraph = r#"(ned/with-child (ned/mk-element "paragraph") (ned/mk-text "New"))"#;
         // Step 2 addresses "the paragraph at index 1". Select-then-apply reads
         // the store as it was before the program: that is "Beta", not the
         // paragraph step 1 inserts.
@@ -9494,7 +10957,10 @@ mod ned_program_plan_tests {
                  (ned/set-text (ned/text-in (ned/nth-of-kind (ned/children {BODY}) "paragraph" 1)) "Z"))"#
         );
         assert_eq!(applied(conductor.apply_ned_program(&program)), 1);
-        assert_eq!(block_texts(&conductor, BODY), vec!["Alpha and Alpha", "New", "Z"]);
+        assert_eq!(
+            block_texts(&conductor, BODY),
+            vec!["Alpha and Alpha", "New", "Z"]
+        );
     }
 }
 
@@ -9514,11 +10980,17 @@ mod body_structural_bsave_tests {
     const FILE: &str = "content/test/doc.md";
 
     fn spanned(node: ContentElement) -> Spanned<ContentElement> {
-        Spanned { node, span: Span { start: 0, end: 0 } }
+        Spanned {
+            node,
+            span: Span { start: 0, end: 0 },
+        }
     }
 
     fn h2(text: &str) -> Spanned<ContentElement> {
-        spanned(ContentElement::heading_from_markdown(HeadingLevel::new(2).unwrap(), text))
+        spanned(ContentElement::heading_from_markdown(
+            HeadingLevel::new(2).unwrap(),
+            text,
+        ))
     }
 
     fn p(text: &str) -> Spanned<ContentElement> {
@@ -9603,12 +11075,11 @@ mod body_structural_bsave_tests {
         doc.body
             .iter()
             .map(|el| match &el.node {
-                ContentElement::Heading { content, .. } => {
-                    ("heading".to_string(), content::AsPlainText::plain_text(content))
-                }
-                ContentElement::Paragraph { .. } => {
-                    ("paragraph".to_string(), other_text(&el.node))
-                }
+                ContentElement::Heading { content, .. } => (
+                    "heading".to_string(),
+                    content::AsPlainText::plain_text(content),
+                ),
+                ContentElement::Paragraph { .. } => ("paragraph".to_string(), other_text(&el.node)),
                 other => ("other".to_string(), format!("{other:?}")),
             })
             .collect()
@@ -9624,7 +11095,10 @@ mod body_structural_bsave_tests {
     #[test]
     fn bsave_with_nth_after_heading_selector_replaces_body_paragraph_and_marks_dirty() {
         let (conductor, _tmp, doc_root) = make_conductor_with_doc();
-        assert!(dirty_buffers(&conductor).is_empty(), "nothing dirty before the edit");
+        assert!(
+            dirty_buffers(&conductor).is_empty(),
+            "nothing dirty before the edit"
+        );
 
         let sel = format!(
             "(ned/nth-after (ned/heading-with-text (ned/children (ned/slot (ned/doc-by-path {}) \"body\")) \"Intro\") \"paragraph\" 1)",
@@ -9632,9 +11106,15 @@ mod body_structural_bsave_tests {
         );
         let program = bsave_program(&sel, "Rewritten paragraph");
 
-        match conductor.handle_command(Command::ApplyNedProgram { program }).response {
+        match conductor
+            .handle_command(Command::ApplyNedProgram { program })
+            .response
+        {
             Response::Applied { dirty_paths, .. } => {
-                assert_eq!(dirty_paths, 1, "body edit should dirty exactly one document");
+                assert_eq!(
+                    dirty_paths, 1,
+                    "body edit should dirty exactly one document"
+                );
             }
             Response::Error(e) => panic!("unexpected error: {e}"),
             other => panic!("expected Response::Applied, got: {other:?}"),
@@ -9666,7 +11146,10 @@ mod body_structural_bsave_tests {
         );
         let program = bsave_program(&sel, "## Why \"Presemble\" rocks");
 
-        match conductor.handle_command(Command::ApplyNedProgram { program }).response {
+        match conductor
+            .handle_command(Command::ApplyNedProgram { program })
+            .response
+        {
             Response::Applied { dirty_paths, .. } => assert_eq!(dirty_paths, 1),
             Response::Error(e) => panic!("unexpected error: {e}"),
             other => panic!("expected Response::Applied, got: {other:?}"),
@@ -9674,7 +11157,10 @@ mod body_structural_bsave_tests {
 
         let body = body_texts(&conductor, doc_root);
         assert_eq!(body.len(), 5, "body: {body:?}");
-        assert_eq!(body[3], ("heading".to_string(), "Why \"Presemble\" rocks".to_string()));
+        assert_eq!(
+            body[3],
+            ("heading".to_string(), "Why \"Presemble\" rocks".to_string())
+        );
         assert_eq!(body[4], ("paragraph".to_string(), "Why para".to_string()));
         assert_eq!(dirty_buffers(&conductor), vec![FILE.to_string()]);
     }
@@ -9686,7 +11172,11 @@ mod body_structural_bsave_tests {
             .write()
             .unwrap()
             .insert(PathBuf::from(path), doc_root);
-        conductor.dirty_docs.write().unwrap().mark(PathBuf::from(path));
+        conductor
+            .dirty_docs
+            .write()
+            .unwrap()
+            .mark(PathBuf::from(path));
     }
 
     /// Register the doc for save routing, mark it dirty, and delete its body.
@@ -9694,9 +11184,8 @@ mod body_structural_bsave_tests {
     fn dirty_doc_without_body(conductor: &Conductor, doc_root: node_store::NodeId) {
         register_dirty(conductor, FILE, doc_root);
         let mut store = conductor.node_store.write().unwrap();
-        let body =
-            node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body")
-                .unwrap();
+        let body = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body")
+            .unwrap();
         store.remove_child_edge(doc_root, body);
     }
 
@@ -9705,9 +11194,8 @@ mod body_structural_bsave_tests {
     fn dirty_doc_with_malformed_block(conductor: &Conductor, doc_root: node_store::NodeId) {
         register_dirty(conductor, FILE, doc_root);
         let mut store = conductor.node_store.write().unwrap();
-        let body =
-            node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body")
-                .unwrap();
+        let body = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "body")
+            .unwrap();
         let name = store.intern("wibble");
         let wibble = store.add_node(node_store::Node::Element(name));
         store.add_edge(body, node_store::Edge::Child(wibble));
@@ -9748,7 +11236,10 @@ mod body_structural_bsave_tests {
         dirty_doc_without_body(&conductor, doc_root);
 
         let response = conductor
-            .handle_command(Command::SaveBuffer { path: editorial_types::SitePath::parse(FILE).expect("valid"), consent: Default::default() })
+            .handle_command(Command::SaveBuffer {
+                path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                consent: Default::default(),
+            })
             .response;
         assert!(
             !matches!(response, Response::Error(_)),
@@ -9757,7 +11248,10 @@ mod body_structural_bsave_tests {
         let written = std::fs::read_to_string(tmp.path().join(FILE)).expect("doc written");
         assert!(written.contains("Test Title"), "written: {written}");
         assert!(!written.contains("Intro para one"), "written: {written}");
-        assert!(dirty_buffers(&conductor).is_empty(), "doc is clean after save");
+        assert!(
+            dirty_buffers(&conductor).is_empty(),
+            "doc is clean after save"
+        );
     }
 
     #[test]
@@ -9765,7 +11259,11 @@ mod body_structural_bsave_tests {
         let (conductor, tmp, doc_root) = make_conductor_with_doc();
         dirty_doc_without_body(&conductor, doc_root);
 
-        let response = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() }).response;
+        let response = conductor
+            .handle_command(Command::SaveAllBuffers {
+                consent: Default::default(),
+            })
+            .response;
         assert!(
             !matches!(response, Response::Error(_)),
             "schema-invalid doc must save: {response:?}"
@@ -9773,7 +11271,10 @@ mod body_structural_bsave_tests {
         let written = std::fs::read_to_string(tmp.path().join(FILE)).expect("doc written");
         assert!(written.contains("Test Title"), "written: {written}");
         assert!(!written.contains("Intro para one"), "written: {written}");
-        assert!(dirty_buffers(&conductor).is_empty(), "doc is clean after save");
+        assert!(
+            dirty_buffers(&conductor).is_empty(),
+            "doc is clean after save"
+        );
     }
 
     #[test]
@@ -9785,11 +11286,18 @@ mod body_structural_bsave_tests {
         dirty_doc_with_malformed_block(&conductor, broken_root);
         add_good_dirty_doc(&conductor, GOOD, "/test/other");
 
-        let response = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() }).response;
+        let response = conductor
+            .handle_command(Command::SaveAllBuffers {
+                consent: Default::default(),
+            })
+            .response;
         match response {
             Response::Error(e) => {
                 assert!(e.contains(FILE), "error must name the broken doc: {e}");
-                assert!(e.contains("wibble"), "error must name the malformed block: {e}");
+                assert!(
+                    e.contains("wibble"),
+                    "error must name the malformed block: {e}"
+                );
                 assert!(!e.contains(GOOD), "error must not name the good doc: {e}");
             }
             other => panic!("expected Response::Error, got: {other:?}"),
@@ -9797,7 +11305,10 @@ mod body_structural_bsave_tests {
 
         let written = std::fs::read_to_string(tmp.path().join(GOOD)).expect("good doc written");
         assert!(written.contains("Other para"), "written: {written}");
-        assert!(!tmp.path().join(FILE).exists(), "broken doc must not be written");
+        assert!(
+            !tmp.path().join(FILE).exists(),
+            "broken doc must not be written"
+        );
         assert_eq!(
             dirty_buffers(&conductor),
             vec![FILE.to_string()],
@@ -9816,7 +11327,11 @@ mod body_structural_bsave_tests {
         // A directory at the target path makes the write fail.
         std::fs::create_dir_all(tmp.path().join(FILE)).expect("blocking dir");
 
-        let response = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() }).response;
+        let response = conductor
+            .handle_command(Command::SaveAllBuffers {
+                consent: Default::default(),
+            })
+            .response;
         match response {
             Response::Error(e) => {
                 assert!(e.contains(FILE), "error must name the failed doc: {e}");
@@ -9839,15 +11354,27 @@ mod body_structural_bsave_tests {
     fn save_all_buffers_reports_dirty_doc_missing_from_store() {
         let (conductor, tmp, _doc_root) = make_conductor_with_doc();
         // Dirty, but never registered in path_to_doc_root.
-        conductor.dirty_docs.write().unwrap().mark(PathBuf::from(FILE));
+        conductor
+            .dirty_docs
+            .write()
+            .unwrap()
+            .mark(PathBuf::from(FILE));
 
-        let response = conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() }).response;
+        let response = conductor
+            .handle_command(Command::SaveAllBuffers {
+                consent: Default::default(),
+            })
+            .response;
         match response {
             Response::Error(e) => assert!(e.contains(FILE), "error must name the doc: {e}"),
             other => panic!("expected Response::Error, got: {other:?}"),
         }
         assert!(!tmp.path().join(FILE).exists(), "nothing must be written");
-        assert_eq!(dirty_buffers(&conductor), vec![FILE.to_string()], "doc stays dirty");
+        assert_eq!(
+            dirty_buffers(&conductor),
+            vec![FILE.to_string()],
+            "doc stays dirty"
+        );
     }
 }
 
@@ -9880,7 +11407,8 @@ mod schema_url_routing_tests {
         std::fs::create_dir_all(root.join("templates/post")).expect("templates/post");
         let tmpl = "[:div [:h1 title]]";
         std::fs::write(root.join("templates/post/item.hiccup"), tmpl).expect("item template");
-        std::fs::write(root.join("templates/post/index.hiccup"), tmpl).expect("collection template");
+        std::fs::write(root.join("templates/post/index.hiccup"), tmpl)
+            .expect("collection template");
         std::fs::write(root.join("templates/index.hiccup"), tmpl).expect("root template");
 
         // content
@@ -10055,7 +11583,10 @@ mod schema_url_routing_tests {
 
         // No collection page exists for "post", so falls back to first item (/post/bar sorts first)
         let result = conductor.page_url_for_schema("/_schema/post/item");
-        assert!(result.is_some(), "expected Some(url) for known item schema without collection page");
+        assert!(
+            result.is_some(),
+            "expected Some(url) for known item schema without collection page"
+        );
         let url = result.unwrap();
         assert!(
             url.starts_with("/post/"),
@@ -10074,7 +11605,10 @@ mod schema_url_routing_tests {
     fn page_url_for_schema_unknown_stem_returns_none() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        assert_eq!(conductor.page_url_for_schema("/_schema/no-such-stem/item"), None);
+        assert_eq!(
+            conductor.page_url_for_schema("/_schema/no-such-stem/item"),
+            None
+        );
     }
 
     #[test]
@@ -10106,12 +11640,15 @@ mod body_idx_to_structural_tests {
         // Body: p0, p1, p2 — no heading before any of them
         let src = "# Title\n\n----\n\nFirst.\n\nSecond.\n\nThird.\n";
         let doc = parse_doc(src);
-        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 1)
-            .expect("should produce anchor");
+        let anchor =
+            body_idx_to_structural(&doc, "content/post/x.md", 1).expect("should produce anchor");
         assert_eq!(anchor.slot, "body");
         assert_eq!(anchor.node_kind, "paragraph");
         assert_eq!(anchor.heading_text, None);
-        assert_eq!(anchor.offset, 1, "second paragraph with no heading has offset 1");
+        assert_eq!(
+            anchor.offset, 1,
+            "second paragraph with no heading has offset 1"
+        );
         assert_eq!(anchor.file, "content/post/x.md");
     }
 
@@ -10122,11 +11659,14 @@ mod body_idx_to_structural_tests {
         let src = "# Title\n\n----\n\n## Intro\n\nFirst para.\n\nSecond para.\n";
         let doc = parse_doc(src);
         // body[2] = "Second para." — heading_text = "Intro", offset = 1
-        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 2)
-            .expect("should produce anchor");
+        let anchor =
+            body_idx_to_structural(&doc, "content/post/x.md", 2).expect("should produce anchor");
         assert_eq!(anchor.node_kind, "paragraph");
         assert_eq!(anchor.heading_text, Some("Intro".to_string()));
-        assert_eq!(anchor.offset, 1, "second paragraph after heading has offset 1");
+        assert_eq!(
+            anchor.offset, 1,
+            "second paragraph after heading has offset 1"
+        );
     }
 
     #[test]
@@ -10136,18 +11676,24 @@ mod body_idx_to_structural_tests {
         let src = "# Title\n\n----\n\n## Heading\n\nFirst para.\n\nSecond para.\n\n## Another\n\nThird para.\n";
         let doc = parse_doc(src);
         // body[2] = "Second para." → after heading "Heading", offset among paragraphs = 1
-        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 2)
-            .expect("should produce anchor");
+        let anchor =
+            body_idx_to_structural(&doc, "content/post/x.md", 2).expect("should produce anchor");
         assert_eq!(anchor.node_kind, "paragraph");
         assert_eq!(anchor.heading_text, Some("Heading".to_string()));
-        assert_eq!(anchor.offset, 1, "second paragraph after heading has offset 1 (heading not counted)");
+        assert_eq!(
+            anchor.offset, 1,
+            "second paragraph after heading has offset 1 (heading not counted)"
+        );
 
         // body[3] = ## Another → this is a heading, heading_text from body[0], offset 0
         let anchor_h = body_idx_to_structural(&doc, "content/post/x.md", 3)
             .expect("should produce anchor for heading");
         assert_eq!(anchor_h.node_kind, "heading");
         assert_eq!(anchor_h.heading_text, Some("Heading".to_string()));
-        assert_eq!(anchor_h.offset, 0, "first heading after heading has offset 0");
+        assert_eq!(
+            anchor_h.offset, 0,
+            "first heading after heading has offset 0"
+        );
     }
 
     #[test]
@@ -10156,8 +11702,8 @@ mod body_idx_to_structural_tests {
         let src = "# Title\n\n----\n\n## Why  Presemble\n\nA paragraph.\n";
         let doc = parse_doc(src);
         // body[1] = paragraph, heading_text should be normalised
-        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 1)
-            .expect("should produce anchor");
+        let anchor =
+            body_idx_to_structural(&doc, "content/post/x.md", 1).expect("should produce anchor");
         assert_eq!(
             anchor.heading_text,
             Some("Why Presemble".to_string()),
@@ -10169,10 +11715,11 @@ mod body_idx_to_structural_tests {
     /// (ADR-063): markup, escapes, images and comments are not part of it.
     #[test]
     fn body_idx_to_structural_uses_plain_heading_text() {
-        let src = "# Title\n\n----\n\n## ![i](x.png) The `<div>` *element* <!-- c -->\n\nA paragraph.\n";
+        let src =
+            "# Title\n\n----\n\n## ![i](x.png) The `<div>` *element* <!-- c -->\n\nA paragraph.\n";
         let doc = parse_doc(src);
-        let anchor = body_idx_to_structural(&doc, "content/post/x.md", 1)
-            .expect("should produce anchor");
+        let anchor =
+            body_idx_to_structural(&doc, "content/post/x.md", 1).expect("should produce anchor");
         assert_eq!(anchor.heading_text, Some("The <div> element".to_string()));
     }
 
@@ -10232,9 +11779,21 @@ mod link_expression_pipeline_tests {
         std::fs::write(root.join("schemas/post/item.md"), POST_SCHEMA).unwrap();
         std::fs::write(root.join("schemas/author/item.md"), AUTHOR_SCHEMA).unwrap();
         std::fs::write(root.join("schemas/page/item.md"), PAGE_SCHEMA).unwrap();
-        std::fs::write(root.join("content/post/p1.md"), post("Post one", "a", "2026-01-10", "notes")).unwrap();
-        std::fs::write(root.join("content/post/p2.md"), post("Post two", "b", "2026-02-10", "news")).unwrap();
-        std::fs::write(root.join("content/post/p3.md"), post("Post three", "a", "2026-03-10", "news")).unwrap();
+        std::fs::write(
+            root.join("content/post/p1.md"),
+            post("Post one", "a", "2026-01-10", "notes"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("content/post/p2.md"),
+            post("Post two", "b", "2026-02-10", "news"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("content/post/p3.md"),
+            post("Post three", "a", "2026-03-10", "news"),
+        )
+        .unwrap();
         std::fs::write(root.join("content/author/a.md"), AUTHOR_A).unwrap();
         std::fs::write(root.join("content/author/b.md"), AUTHOR_B).unwrap();
         std::fs::write(root.join("content/page/home.md"), HOME).unwrap();
@@ -10242,19 +11801,27 @@ mod link_expression_pipeline_tests {
     }
 
     pub(super) fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
-        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
         Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
     }
 
     /// The URLs held by semantic slot `slot` of `page`, in order.
     pub(super) fn slot_urls(conductor: &Conductor, page: &str, slot: &str) -> Vec<String> {
-        let sem = conductor.semantic_content_by_url(page).unwrap_or_else(|| panic!("no sem for {page}"));
+        let sem = conductor
+            .semantic_content_by_url(page)
+            .unwrap_or_else(|| panic!("no sem for {page}"));
         let store = conductor.node_store.read().unwrap();
         let url_of = |id| {
             node_store_bridge::content_bridge::find_attr_text(&store, id, "url").unwrap_or_default()
         };
         let mut out = Vec::new();
-        for (name, target) in store.consists_of(sem).into_iter().chain(store.references(sem)) {
+        for (name, target) in store
+            .consists_of(sem)
+            .into_iter()
+            .chain(store.references(sem))
+        {
             if store.resolve_name(name) != slot {
                 continue;
             }
@@ -10275,10 +11842,22 @@ mod link_expression_pipeline_tests {
     fn full_build_applies_link_expression_operations() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p2"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p2"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p3", "/post/p2"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "news"),
+            urls(&["/post/p2", "/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/b", "posts"),
+            urls(&["/post/p2"])
+        );
     }
 
     /// Guard: a thread sorts by a title's plain text, not by its markdown
@@ -10346,14 +11925,15 @@ mod link_expression_pipeline_tests {
         base: editorial_types::BlockText,
         proposed: editorial_types::BlockText,
     ) {
-        let result = conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
-            file: editorial_types::ContentPath::parse(file).expect("valid"),
-            selection: selection.to_string(),
-            base,
-            proposed,
-            intent: editorial_types::BlockEditIntent::Apply,
-            reason: None,
-        }));
+        let result =
+            conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
+                file: editorial_types::ContentPath::parse(file).expect("valid"),
+                selection: selection.to_string(),
+                base,
+                proposed,
+                intent: editorial_types::BlockEditIntent::Apply,
+                reason: None,
+            }));
         assert!(
             matches!(
                 result.response,
@@ -10380,7 +11960,10 @@ mod link_expression_pipeline_tests {
         )
         .unwrap();
         let conductor = make_conductor(&tmp);
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p3"])
+        );
 
         // A Replace of a body block on the page that holds the listing.
         apply_edn_block_edit(
@@ -10390,8 +11973,14 @@ mod link_expression_pipeline_tests {
             editorial_types::BlockText::Markdown("Welcome.".to_string()),
             editorial_types::BlockText::Markdown("Welcome.\n\nAgain.".to_string()),
         );
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "news"),
+            urls(&["/post/p2", "/post/p3"])
+        );
 
         // A Replace of the title of a post that the listing shows.
         apply_edn_block_edit(
@@ -10401,9 +11990,18 @@ mod link_expression_pipeline_tests {
             editorial_types::BlockText::Edn("[:heading {:level \"1\"} \"Post three\"]".to_string()),
             editorial_types::BlockText::Edn("[:heading {:level \"2\"} \"Third post\"]".to_string()),
         );
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "news"),
+            urls(&["/post/p2", "/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3"])
+        );
     }
 
     /// Pin: how the two PathRef spellings read back, and whether they match
@@ -10413,7 +12011,13 @@ mod link_expression_pipeline_tests {
     fn path_ref_spellings_against_url_to_semantic() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let normalise = |u: &str| if u.starts_with('/') { u.to_string() } else { format!("/{u}") };
+        let normalise = |u: &str| {
+            if u.starts_with('/') {
+                u.to_string()
+            } else {
+                format!("/{u}")
+            }
+        };
         let keys: Vec<String> = conductor
             .url_to_semantic
             .read()
@@ -10421,7 +12025,10 @@ mod link_expression_pipeline_tests {
             .keys()
             .cloned()
             .collect();
-        for (src, expected_value) in [("[](:author/a)", "author/a"), ("[](:/author/a)", "/author/a")] {
+        for (src, expected_value) in [
+            ("[](:author/a)", "author/a"),
+            ("[](:/author/a)", "/author/a"),
+        ] {
             let flat = content::parse_document(src).expect("parse");
             let value = match &flat.elements[0].node {
                 content::ContentElement::LinkExpression {
@@ -10433,8 +12040,13 @@ mod link_expression_pipeline_tests {
             assert_eq!(value, expected_value, "{src}");
             let raw_match = keys.contains(&value);
             let normalised_match = keys.iter().any(|k| normalise(k) == normalise(&value));
-            eprintln!("PIN {src}: value={value:?} raw_match={raw_match} normalised_match={normalised_match}");
-            assert!(normalised_match, "{src} must match /author/a after normalisation");
+            eprintln!(
+                "PIN {src}: value={value:?} raw_match={raw_match} normalised_match={normalised_match}"
+            );
+            assert!(
+                normalised_match,
+                "{src} must match /author/a after normalisation"
+            );
         }
     }
 
@@ -10452,7 +12064,11 @@ mod link_expression_pipeline_tests {
             .collect();
         assert_eq!(
             counts,
-            vec![("title".to_string(), 1), ("latest".to_string(), 1), ("news".to_string(), 1)],
+            vec![
+                ("title".to_string(), 1),
+                ("latest".to_string(), 1),
+                ("news".to_string(), 1)
+            ],
             "each link expression must land in its own slot"
         );
     }
@@ -10467,7 +12083,9 @@ mod link_expression_pipeline_tests {
 
     /// A post whose author slot is replaced by `author_lines` (verbatim).
     fn post_with(title: &str, published: &str, category: &str, author_lines: &str) -> String {
-        format!("# {title}\n\n{published}\n\n{category}\n\n{author_lines}\n\n----\n\nBody of {title}.\n")
+        format!(
+            "# {title}\n\n{published}\n\n{category}\n\n{author_lines}\n\n----\n\nBody of {title}.\n"
+        )
     }
 
     fn set(list: &[&str]) -> BTreeSet<String> {
@@ -10488,10 +12106,20 @@ mod link_expression_pipeline_tests {
     /// The pages re-rendered when the document `rel` is read again from `text`
     /// (the fallback of an editor change, and a change on disk): the page
     /// rebuild these tests pin.
-    fn document_changed(conductor: &Conductor, _tmp: &tempfile::TempDir, rel: &str, text: &str) -> BTreeSet<String> {
+    fn document_changed(
+        conductor: &Conductor,
+        _tmp: &tempfile::TempDir,
+        rel: &str,
+        text: &str,
+    ) -> BTreeSet<String> {
         let site_path = editorial_types::SitePath::parse(rel).expect("valid");
-        let abs = crate::site_resolve::resolve_in_site(&conductor.site_dir, &site_path).expect("inside the site");
-        conductor.rebuild_page(&abs, text).unwrap_or_else(|e| panic!("build failed: {e}")).into_iter().collect()
+        let abs = crate::site_resolve::resolve_in_site(&conductor.site_dir, &site_path)
+            .expect("inside the site");
+        conductor
+            .rebuild_page(&abs, text)
+            .unwrap_or_else(|e| panic!("build failed: {e}"))
+            .into_iter()
+            .collect()
     }
 
     fn count(list: &[String], url: &str) -> usize {
@@ -10500,7 +12128,9 @@ mod link_expression_pipeline_tests {
 
     /// The unassigned elements of the page at `url`.
     fn unassigned(conductor: &Conductor, url: &str) -> Vec<content::ContentElement> {
-        let root = conductor.document_by_url(url).unwrap_or_else(|| panic!("no doc {url}"));
+        let root = conductor
+            .document_by_url(url)
+            .unwrap_or_else(|| panic!("no doc {url}"));
         let store = conductor.node_store.read().unwrap();
         node_store_bridge::content_bridge::store_to_document(&store, root)
             .unwrap()
@@ -10517,11 +12147,22 @@ mod link_expression_pipeline_tests {
     #[test]
     fn u1_unpublishable_post_counts_for_refs_to() {
         let tmp = build_site();
-        write(&tmp, "content/post/p5.md", &post_with("Post five", "2025-06-01", "notes", "[a](/author/a)\n\nStray paragraph."));
+        write(
+            &tmp,
+            "content/post/p5.md",
+            &post_with(
+                "Post five",
+                "2025-06-01",
+                "notes",
+                "[a](/author/a)\n\nStray paragraph.",
+            ),
+        );
         let conductor = make_conductor(&tmp);
         assert_eq!(
             unassigned(&conductor, "/post/p5"),
-            vec![content::ContentElement::paragraph_from_markdown("Stray paragraph.")]
+            vec![content::ContentElement::paragraph_from_markdown(
+                "Stray paragraph."
+            )]
         );
         assert_eq!(
             slot_urls(&conductor, "/author/a", "posts"),
@@ -10534,7 +12175,11 @@ mod link_expression_pipeline_tests {
     #[test]
     fn u2_unassigned_bad_marker_path_ref_counts() {
         let tmp = build_site();
-        write(&tmp, "content/post/p6.md", &post_with("Post six", "2025-06-02", "notes", "[A](:author/a) {#nope}"));
+        write(
+            &tmp,
+            "content/post/p6.md",
+            &post_with("Post six", "2025-06-02", "notes", "[A](:author/a) {#nope}"),
+        );
         let conductor = make_conductor(&tmp);
         assert!(
             matches!(
@@ -10557,11 +12202,22 @@ mod link_expression_pipeline_tests {
     #[test]
     fn u3_unassigned_marker_shaped_paragraph_counts() {
         let tmp = build_site();
-        write(&tmp, "content/post/p7.md", &post_with("Post seven", "2025-12-01", "notes", "[A](/author/a) {#nope}"));
+        write(
+            &tmp,
+            "content/post/p7.md",
+            &post_with(
+                "Post seven",
+                "2025-12-01",
+                "notes",
+                "[A](/author/a) {#nope}",
+            ),
+        );
         let conductor = make_conductor(&tmp);
         assert_eq!(
             unassigned(&conductor, "/post/p7"),
-            vec![content::ContentElement::paragraph_from_markdown("[A](/author/a) {#nope}")]
+            vec![content::ContentElement::paragraph_from_markdown(
+                "[A](/author/a) {#nope}"
+            )]
         );
         assert_eq!(
             slot_urls(&conductor, "/author/a", "posts"),
@@ -10575,15 +12231,31 @@ mod link_expression_pipeline_tests {
     fn u4_fixed_posts_appear_exactly_once() {
         let tmp = build_site();
         // p6: the marked PathRef now names the author slot.
-        write(&tmp, "content/post/p6.md", &post_with("Post six", "2025-06-02", "notes", "[A](:author/a) {#author}"));
+        write(
+            &tmp,
+            "content/post/p6.md",
+            &post_with(
+                "Post six",
+                "2025-06-02",
+                "notes",
+                "[A](:author/a) {#author}",
+            ),
+        );
         // p7: a plain link fills the author slot by position (plain links
         // take no marker).
-        write(&tmp, "content/post/p7.md", &post_with("Post seven", "2025-12-01", "notes", "[A](/author/a)"));
+        write(
+            &tmp,
+            "content/post/p7.md",
+            &post_with("Post seven", "2025-12-01", "notes", "[A](/author/a)"),
+        );
         let conductor = make_conductor(&tmp);
         assert!(unassigned(&conductor, "/post/p6").is_empty());
         assert!(unassigned(&conductor, "/post/p7").is_empty());
         let posts = slot_urls(&conductor, "/author/a", "posts");
-        assert_eq!(posts, urls(&["/post/p1", "/post/p3", "/post/p6", "/post/p7"]));
+        assert_eq!(
+            posts,
+            urls(&["/post/p1", "/post/p3", "/post/p6", "/post/p7"])
+        );
         assert_eq!(count(&posts, "/post/p6"), 1);
         assert_eq!(count(&posts, "/post/p7"), 1);
     }
@@ -10593,11 +12265,22 @@ mod link_expression_pipeline_tests {
     #[test]
     fn u5_link_in_ordinary_unassigned_paragraph_counts() {
         let tmp = build_site();
-        write(&tmp, "content/post/p8.md", &post_with("Post eight", "2025-06-03", "notes", "See [A](/author/a) for more."));
+        write(
+            &tmp,
+            "content/post/p8.md",
+            &post_with(
+                "Post eight",
+                "2025-06-03",
+                "notes",
+                "See [A](/author/a) for more.",
+            ),
+        );
         let conductor = make_conductor(&tmp);
         assert_eq!(
             unassigned(&conductor, "/post/p8"),
-            vec![content::ContentElement::paragraph_from_markdown("See [A](/author/a) for more.")]
+            vec![content::ContentElement::paragraph_from_markdown(
+                "See [A](/author/a) for more."
+            )]
         );
         assert_eq!(
             slot_urls(&conductor, "/author/a", "posts"),
@@ -10615,8 +12298,14 @@ mod link_expression_pipeline_tests {
             "# Post nine\n\n2025-06-04\n\nnotes\n\n[b](/author/b)\n\n----\n\nSee [A](/author/a).\n",
         );
         let conductor = make_conductor(&tmp);
-        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p2", "/post/p9"]));
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/b", "posts"),
+            urls(&["/post/p2", "/post/p9"])
+        );
     }
 
     // ── Parity: DataGraph and store adapters read the same field text ───────
@@ -10667,7 +12356,10 @@ mod link_expression_pipeline_tests {
             url: url.to_string(),
         };
         assert_eq!(item.field_text("title").as_deref(), Some("Post <seven>"));
-        assert_eq!(item.field_text("title"), expressions::graph_field_text(&data, "title"));
+        assert_eq!(
+            item.field_text("title"),
+            expressions::graph_field_text(&data, "title")
+        );
     }
 
     // ── Derived state ────────────────────────────────────────────────────────
@@ -10678,17 +12370,31 @@ mod link_expression_pipeline_tests {
         let conductor = make_conductor(&tmp);
         let snapshot = conductor.snapshot_query_results();
         let key = |p: &str, s: &str| (p.to_string(), s.to_string());
-        assert_eq!(snapshot.get(&key("/page/home", "latest")), Some(&urls(&["/post/p3", "/post/p2"])));
-        assert_eq!(snapshot.get(&key("/page/home", "news")), Some(&urls(&["/post/p2", "/post/p3"])));
-        assert_eq!(snapshot.get(&key("/author/a", "posts")), Some(&urls(&["/post/p1", "/post/p3"])));
-        assert_eq!(snapshot.get(&key("/author/b", "posts")), Some(&urls(&["/post/p2"])));
+        assert_eq!(
+            snapshot.get(&key("/page/home", "latest")),
+            Some(&urls(&["/post/p3", "/post/p2"]))
+        );
+        assert_eq!(
+            snapshot.get(&key("/page/home", "news")),
+            Some(&urls(&["/post/p2", "/post/p3"]))
+        );
+        assert_eq!(
+            snapshot.get(&key("/author/a", "posts")),
+            Some(&urls(&["/post/p1", "/post/p3"]))
+        );
+        assert_eq!(
+            snapshot.get(&key("/author/b", "posts")),
+            Some(&urls(&["/post/p2"]))
+        );
         assert_eq!(snapshot.len(), 4);
         let store = conductor.node_store.read().unwrap();
         for url in ["/post/p1", "/author/a", "/page/home"] {
             let root = conductor.document_by_url(url).unwrap();
             assert_eq!(
                 node_store_bridge::store_pipeline::fingerprint_of(&store, root),
-                Some(node_store_bridge::store_pipeline::preamble_fingerprint(&store, root)),
+                Some(node_store_bridge::store_pipeline::preamble_fingerprint(
+                    &store, root
+                )),
                 "{url}"
             );
         }
@@ -10713,8 +12419,14 @@ mod link_expression_pipeline_tests {
         let queries = node_store_bridge::store_pipeline::queries_over(&store, stem_node);
         assert_eq!(queries.len(), 4, "{queries:?}");
         drop(store);
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p2"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p2", "/post/p3"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p3", "/post/p2"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "news"),
+            urls(&["/post/p2", "/post/p3"])
+        );
     }
 
     // ── Incremental propagation (step 9) ─────────────────────────────────────
@@ -10724,9 +12436,16 @@ mod link_expression_pipeline_tests {
     fn incremental_body_only_edit_renders_only_the_document() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let text = post("Post one", "a", "2026-01-10", "notes").replace("Body of Post one.", "A new body.");
-        assert_eq!(document_changed(&conductor, &tmp, "content/post/p1.md", &text), set(&["/post/p1"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p2"]));
+        let text = post("Post one", "a", "2026-01-10", "notes")
+            .replace("Body of Post one.", "A new body.");
+        assert_eq!(
+            document_changed(&conductor, &tmp, "content/post/p1.md", &text),
+            set(&["/post/p1"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p3", "/post/p2"])
+        );
     }
 
     /// 2: a sort key change re-renders the page whose result changes and the
@@ -10740,8 +12459,14 @@ mod link_expression_pipeline_tests {
             document_changed(&conductor, &tmp, "content/post/p1.md", &text),
             set(&["/post/p1", "/page/home", "/author/a"])
         );
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p1", "/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p1", "/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3"])
+        );
     }
 
     /// 3: the same edit through a block edit.
@@ -10768,8 +12493,14 @@ mod link_expression_pipeline_tests {
             "{:?}",
             result.response
         );
-        assert_eq!(pages_of(&result), set(&["/post/p1", "/page/home", "/author/a"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p1", "/post/p3"]));
+        assert_eq!(
+            pages_of(&result),
+            set(&["/post/p1", "/page/home", "/author/a"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p1", "/post/p3"])
+        );
     }
 
     /// 4: a title change re-renders every page whose result contains it.
@@ -10794,8 +12525,14 @@ mod link_expression_pipeline_tests {
             document_changed(&conductor, &tmp, "content/post/p1.md", &text),
             set(&["/post/p1", "/author/a", "/author/b"])
         );
-        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p1", "/post/p2"]));
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/b", "posts"),
+            urls(&["/post/p1", "/post/p2"])
+        );
     }
 
     /// 6a/6b: create a post (scaffold), then fill it in.
@@ -10810,9 +12547,16 @@ mod link_expression_pipeline_tests {
             stem: "post".to_string(),
             slug: "p4".to_string(),
         });
-        assert!(matches!(result.response, Response::ContentCreated(_)), "{:?}", result.response);
+        assert!(
+            matches!(result.response, Response::ContentCreated(_)),
+            "{:?}",
+            result.response
+        );
         assert_eq!(pages_of(&result), set(&["/post/p4", "/page/home"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p4", "/post/p3"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p4", "/post/p3"])
+        );
 
         // 6b
         let text = post("Post four", "b", "2026-05-01", "notes");
@@ -10820,9 +12564,18 @@ mod link_expression_pipeline_tests {
             document_changed(&conductor, &tmp, "content/post/p4.md", &text),
             set(&["/post/p4", "/page/home", "/author/b"])
         );
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p4", "/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p2", "/post/p4"]));
-        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p4", "/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/b", "posts"),
+            urls(&["/post/p2", "/post/p4"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3"])
+        );
     }
 
     /// 7: removing a post is a full rebuild (D9); the results reflect it.
@@ -10835,8 +12588,14 @@ mod link_expression_pipeline_tests {
         conductor.handle_command(Command::FileChanged {
             paths: vec![editorial_types::SitePath::parse("content/post/p2.md").expect("valid")],
         });
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p1"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/post/p3"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p3", "/post/p1"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "news"),
+            urls(&["/post/p3"])
+        );
         assert!(slot_urls(&conductor, "/author/b", "posts").is_empty());
     }
 
@@ -10845,11 +12604,20 @@ mod link_expression_pipeline_tests {
     #[test]
     fn external_links_are_not_page_references() {
         let tmp = build_site();
-        write(&tmp, "content/author/c.md", "# Author C\n\n[Site](https://example.com)\n\n----\n\nAbout C.\n");
+        write(
+            &tmp,
+            "content/author/c.md",
+            "# Author C\n\n[Site](https://example.com)\n\n----\n\nAbout C.\n",
+        );
         write(
             &tmp,
             "content/post/p10.md",
-            &post_with("Post ten", "2025-06-05", "notes", "See [x](https://x.org) and [a](:author/a)."),
+            &post_with(
+                "Post ten",
+                "2025-06-05",
+                "notes",
+                "See [x](https://x.org) and [a](:author/a).",
+            ),
         );
         let conductor = make_conductor(&tmp);
         assert!(conductor.query_edges_from("/author/c").is_empty());
@@ -10868,11 +12636,20 @@ mod link_expression_pipeline_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         let text = AUTHOR_A.replace("About A.", "All about A.");
-        assert_eq!(document_changed(&conductor, &tmp, "content/author/a.md", &text), set(&["/author/a"]));
-        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p1", "/post/p3"]));
+        assert_eq!(
+            document_changed(&conductor, &tmp, "content/author/a.md", &text),
+            set(&["/author/a"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p1", "/post/p3"])
+        );
         let store = conductor.node_store.read().unwrap();
         let post_stem = conductor.stem_nodes.read().unwrap()["post"];
-        assert_eq!(node_store_bridge::store_pipeline::queries_over(&store, post_stem).len(), 4);
+        assert_eq!(
+            node_store_bridge::store_pipeline::queries_over(&store, post_stem).len(),
+            4
+        );
     }
 
     fn queries_over_stem(conductor: &Conductor, stem: &str) -> usize {
@@ -10886,8 +12663,14 @@ mod link_expression_pipeline_tests {
     fn removing_a_thread_removes_its_query() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
-        let text = HOME.replace("[In the news](->> :post (filter :category \"news\")) {#news}\n\n", "");
-        assert_eq!(document_changed(&conductor, &tmp, "content/page/home.md", &text), set(&["/page/home"]));
+        let text = HOME.replace(
+            "[In the news](->> :post (filter :category \"news\")) {#news}\n\n",
+            "",
+        );
+        assert_eq!(
+            document_changed(&conductor, &tmp, "content/page/home.md", &text),
+            set(&["/page/home"])
+        );
         let snapshot = conductor.snapshot_query_results();
         assert_eq!(snapshot.len(), 3, "{snapshot:?}");
         assert!(!snapshot.contains_key(&("/page/home".to_string(), "news".to_string())));
@@ -10906,21 +12689,32 @@ mod link_expression_pipeline_tests {
         document_changed(&conductor, &tmp, "content/page/home.md", &text);
         assert_eq!(queries_over_stem(&conductor, "post"), 3);
         assert_eq!(queries_over_stem(&conductor, "author"), 1);
-        assert_eq!(slot_urls(&conductor, "/page/home", "news"), urls(&["/author/a", "/author/b"]));
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "news"),
+            urls(&["/author/a", "/author/b"])
+        );
     }
 
     /// Replace the text of the first Text node under `slot`'s first element of
     /// `url` (or its `attr` attribute), in place.
-    fn edit_in_place(conductor: &Conductor, url: &str, slot: &str, attr: Option<&str>, value: &str) {
+    fn edit_in_place(
+        conductor: &Conductor,
+        url: &str,
+        slot: &str,
+        attr: Option<&str>,
+        value: &str,
+    ) {
         let root = conductor.document_by_url(url).unwrap();
         let mut store = conductor.node_store.write().unwrap();
         let preamble =
-            node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble").unwrap();
+            node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                .unwrap();
         let slot_node = store
             .children(preamble)
             .into_iter()
             .find(|&s| {
-                node_store_bridge::content_bridge::find_attr_text(&store, s, "name").as_deref() == Some(slot)
+                node_store_bridge::content_bridge::find_attr_text(&store, s, "name").as_deref()
+                    == Some(slot)
             })
             .unwrap();
         let block = store.children(slot_node)[0];
@@ -10958,10 +12752,28 @@ mod link_expression_pipeline_tests {
         ]);
         assert!(failed.is_empty(), "{failed:?}");
         let rebuilt: BTreeSet<String> = rebuilt.into_iter().collect();
-        assert_eq!(rebuilt, set(&["/post/p1", "/post/p3", "/page/home", "/author/a", "/author/b"]));
-        assert_eq!(slot_urls(&conductor, "/author/a", "posts"), urls(&["/post/p3"]));
-        assert_eq!(slot_urls(&conductor, "/author/b", "posts"), urls(&["/post/p1", "/post/p2"]));
-        assert_eq!(slot_urls(&conductor, "/page/home", "latest"), urls(&["/post/p3", "/post/p2"]));
+        assert_eq!(
+            rebuilt,
+            set(&[
+                "/post/p1",
+                "/post/p3",
+                "/page/home",
+                "/author/a",
+                "/author/b"
+            ])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/a", "posts"),
+            urls(&["/post/p3"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/author/b", "posts"),
+            urls(&["/post/p1", "/post/p2"])
+        );
+        assert_eq!(
+            slot_urls(&conductor, "/page/home", "latest"),
+            urls(&["/post/p3", "/post/p2"])
+        );
     }
 
     /// 8: fixing U3's p7 (moving its link into the author slot) keeps it in
@@ -10970,9 +12782,21 @@ mod link_expression_pipeline_tests {
     #[test]
     fn incremental_fixing_an_unassigned_reference() {
         let tmp = build_site();
-        write(&tmp, "content/post/p7.md", &post_with("Post seven", "2025-12-01", "notes", "[A](/author/a) {#nope}"));
+        write(
+            &tmp,
+            "content/post/p7.md",
+            &post_with(
+                "Post seven",
+                "2025-12-01",
+                "notes",
+                "[A](/author/a) {#nope}",
+            ),
+        );
         let conductor = make_conductor(&tmp);
-        assert_eq!(count(&slot_urls(&conductor, "/author/a", "posts"), "/post/p7"), 1);
+        assert_eq!(
+            count(&slot_urls(&conductor, "/author/a", "posts"), "/post/p7"),
+            1
+        );
         let fixed = post_with("Post seven", "2025-12-01", "notes", "[A](/author/a)");
         assert_eq!(
             document_changed(&conductor, &tmp, "content/post/p7.md", &fixed),
@@ -10997,12 +12821,10 @@ mod model_migration_tests {
     const FILE: &str = "content/post/first.md";
     const SCHEMA: &str =
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
-    const TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
+    const TEMPLATE: &str = r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const CONTENT: &str =
         "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n```\nlet x = 1;\n```\n";
-    const TITLE_TEXT: &str =
-        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")))"#;
+    const TITLE_TEXT: &str = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")))"#;
     const PARAGRAPH_TEXT: &str = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "paragraph" 0))"#;
     const BODY_PARAGRAPH: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "paragraph" 0)"#;
     const CODE_BLOCK: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "code-block" 0)"#;
@@ -11053,7 +12875,9 @@ mod model_migration_tests {
     }
 
     fn start(tmp: &tempfile::TempDir) -> Conductor {
-        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
         Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
     }
 
@@ -11090,9 +12914,16 @@ mod model_migration_tests {
 
         let conductor = start(&tmp);
 
-        assert!(!listed(&conductor).contains(&"sug-heading".to_string()), "not listed");
+        assert!(
+            !listed(&conductor).contains(&"sug-heading".to_string()),
+            "not listed"
+        );
         assert!(!file_exists(&tmp, "sug-heading"), "its file is gone");
-        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"), "the last step is recorded");
+        assert_eq!(
+            marker(&tmp).as_deref(),
+            Some("list-containers"),
+            "the last step is recorded"
+        );
     }
 
     #[test]
@@ -11130,7 +12961,11 @@ mod model_migration_tests {
 
         assert_eq!(listed(&conductor), vec!["sug-code".to_string()]);
         assert!(file_exists(&tmp, "sug-code"));
-        assert_eq!(marker(&tmp).as_deref(), Some("list-containers"), "marked all the same");
+        assert_eq!(
+            marker(&tmp).as_deref(),
+            Some("list-containers"),
+            "marked all the same"
+        );
     }
 
     /// The user's decision: every pending suggestion that touches a paragraph
@@ -11149,7 +12984,10 @@ mod model_migration_tests {
             &tmp,
             "sug-search",
             PARAGRAPH_TEXT,
-            NedMutation::SearchReplace { search: "Alpha".to_string(), replace: "*Alpha*".to_string() },
+            NedMutation::SearchReplace {
+                search: "Alpha".to_string(),
+                replace: "*Alpha*".to_string(),
+            },
             NedSuggestionStatus::Pending,
         );
         write_suggestion(
@@ -11177,7 +13015,11 @@ mod model_migration_tests {
 
         let conductor = start(&tmp);
 
-        assert_eq!(listed(&conductor), vec!["sug-code".to_string()], "only the code suggestion is left");
+        assert_eq!(
+            listed(&conductor),
+            vec!["sug-code".to_string()],
+            "only the code suggestion is left"
+        );
         for id in ["sug-text", "sug-search", "sug-block", "sug-payload"] {
             assert!(!file_exists(&tmp, id), "{id}: its file is gone");
         }
@@ -11232,7 +13074,10 @@ mod model_migration_tests {
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "paragraph-inlines").unwrap();
         both(&tmp);
-        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(
+            listed(&start(&tmp)),
+            vec!["sug-heading".to_string(), "sug-para".to_string()]
+        );
         assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // link-image-paragraphs: only the table step runs; neither
@@ -11241,7 +13086,10 @@ mod model_migration_tests {
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "link-image-paragraphs").unwrap();
         both(&tmp);
-        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(
+            listed(&start(&tmp)),
+            vec!["sug-heading".to_string(), "sug-para".to_string()]
+        );
         assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // table-cells: the blockquote and list steps run; neither suggestion
@@ -11250,7 +13098,10 @@ mod model_migration_tests {
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "table-cells").unwrap();
         both(&tmp);
-        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(
+            listed(&start(&tmp)),
+            vec!["sug-heading".to_string(), "sug-para".to_string()]
+        );
         assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // blockquote-containers: only the list step runs; neither
@@ -11259,7 +13110,10 @@ mod model_migration_tests {
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "blockquote-containers").unwrap();
         both(&tmp);
-        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(
+            listed(&start(&tmp)),
+            vec!["sug-heading".to_string(), "sug-para".to_string()]
+        );
         assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // list-containers: nothing runs.
@@ -11267,7 +13121,10 @@ mod model_migration_tests {
         std::fs::create_dir_all(dir(&tmp)).unwrap();
         std::fs::write(dir(&tmp).join("MODEL"), "list-containers").unwrap();
         both(&tmp);
-        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(
+            listed(&start(&tmp)),
+            vec!["sug-heading".to_string(), "sug-para".to_string()]
+        );
         assert_eq!(marker(&tmp).as_deref(), Some("list-containers"));
 
         // Once: a suggestion made after the migration survives the next start.
@@ -11275,14 +13132,20 @@ mod model_migration_tests {
         both(&tmp);
         drop(start(&tmp));
         both(&tmp);
-        assert_eq!(listed(&start(&tmp)), vec!["sug-heading".to_string(), "sug-para".to_string()]);
+        assert_eq!(
+            listed(&start(&tmp)),
+            vec!["sug-heading".to_string(), "sug-para".to_string()]
+        );
     }
 
     /// The order of the steps, and what is left to run after each.
     #[test]
     fn model_steps_follow_the_recorded_one() {
         let names = |recorded: Option<&str>| -> Vec<&'static str> {
-            model_steps_after(recorded).iter().map(|step| step.name).collect()
+            model_steps_after(recorded)
+                .iter()
+                .map(|step| step.name)
+                .collect()
         };
         assert_eq!(
             names(None),
@@ -11307,14 +13170,25 @@ mod model_migration_tests {
         );
         assert_eq!(
             names(Some("paragraph-inlines")),
-            vec!["link-image-paragraphs", "table-cells", "blockquote-containers", "list-containers"]
+            vec![
+                "link-image-paragraphs",
+                "table-cells",
+                "blockquote-containers",
+                "list-containers"
+            ]
         );
         assert_eq!(
             names(Some("link-image-paragraphs")),
             vec!["table-cells", "blockquote-containers", "list-containers"]
         );
-        assert_eq!(names(Some("table-cells")), vec!["blockquote-containers", "list-containers"]);
-        assert_eq!(names(Some("blockquote-containers")), vec!["list-containers"]);
+        assert_eq!(
+            names(Some("table-cells")),
+            vec!["blockquote-containers", "list-containers"]
+        );
+        assert_eq!(
+            names(Some("blockquote-containers")),
+            vec!["list-containers"]
+        );
         assert!(names(Some("list-containers")).is_empty());
         // A name this conductor does not know was written by a newer one:
         // nothing runs.
@@ -11340,9 +13214,27 @@ mod model_migration_tests {
                 .with_child(ned::NodeTree::text("t")),
         );
         let pending = NedSuggestionStatus::Pending;
-        write_suggestion(&tmp, "sug-link", CODE_BLOCK, NedMutation::InsertAfter(vec![link.clone()]), pending.clone());
-        write_suggestion(&tmp, "sug-image", CODE_BLOCK, NedMutation::Replace(vec![image]), pending.clone());
-        write_suggestion(&tmp, "sug-nested", CODE_BLOCK, NedMutation::InsertAfter(vec![nested]), pending.clone());
+        write_suggestion(
+            &tmp,
+            "sug-link",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![link.clone()]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-image",
+            CODE_BLOCK,
+            NedMutation::Replace(vec![image]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-nested",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![nested]),
+            pending.clone(),
+        );
         write_suggestion(
             &tmp,
             "sug-inline-link",
@@ -11350,7 +13242,13 @@ mod model_migration_tests {
             NedMutation::InsertAfter(vec![inline_link_paragraph]),
             pending.clone(),
         );
-        write_suggestion(&tmp, "sug-title", TITLE_TEXT, NedMutation::SetText("Renamed".to_string()), pending);
+        write_suggestion(
+            &tmp,
+            "sug-title",
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed".to_string()),
+            pending,
+        );
         write_suggestion(
             &tmp,
             "sug-accepted-link",
@@ -11363,7 +13261,11 @@ mod model_migration_tests {
 
         assert_eq!(
             listed(&conductor),
-            vec!["sug-accepted-link".to_string(), "sug-inline-link".to_string(), "sug-title".to_string()]
+            vec![
+                "sug-accepted-link".to_string(),
+                "sug-inline-link".to_string(),
+                "sug-title".to_string()
+            ]
         );
         for id in ["sug-link", "sug-image", "sug-nested"] {
             assert!(!file_exists(&tmp, id), "{id}: its file is gone");
@@ -11387,17 +13289,42 @@ mod model_migration_tests {
                 ned::NodeTree::element("rows")
                     .with_child(ned::NodeTree::element("row").with_child(ned::NodeTree::text("a"))),
             );
-        let new_table = ned::NodeTree::element("table")
-            .with_child(ned::NodeTree::element("head").with_child(
-                ned::NodeTree::element("cell").with_child(ned::NodeTree::text("h")),
-            ))
-            .with_child(ned::NodeTree::element("rows"));
+        let new_table =
+            ned::NodeTree::element("table")
+                .with_child(ned::NodeTree::element("head").with_child(
+                    ned::NodeTree::element("cell").with_child(ned::NodeTree::text("h")),
+                ))
+                .with_child(ned::NodeTree::element("rows"));
         let nested = ned::NodeTree::element("blockquote").with_child(old_table.clone());
         let pending = NedSuggestionStatus::Pending;
-        write_suggestion(&tmp, "sug-old", CODE_BLOCK, NedMutation::InsertAfter(vec![old_table.clone()]), pending.clone());
-        write_suggestion(&tmp, "sug-new", CODE_BLOCK, NedMutation::Replace(vec![new_table]), pending.clone());
-        write_suggestion(&tmp, "sug-nested", CODE_BLOCK, NedMutation::InsertAfter(vec![nested]), pending.clone());
-        write_suggestion(&tmp, "sug-title", TITLE_TEXT, NedMutation::SetText("Renamed".to_string()), pending);
+        write_suggestion(
+            &tmp,
+            "sug-old",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![old_table.clone()]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-new",
+            CODE_BLOCK,
+            NedMutation::Replace(vec![new_table]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-nested",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![nested]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-title",
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed".to_string()),
+            pending,
+        );
         write_suggestion(
             &tmp,
             "sug-accepted-table",
@@ -11434,11 +13361,41 @@ mod model_migration_tests {
         let nested = ned::NodeTree::element("blockquote").with_child(new_quote.clone());
         let paragraph = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text("p"));
         let pending = NedSuggestionStatus::Pending;
-        write_suggestion(&tmp, "sug-old", CODE_BLOCK, NedMutation::InsertAfter(vec![old_quote.clone()]), pending.clone());
-        write_suggestion(&tmp, "sug-new", CODE_BLOCK, NedMutation::Replace(vec![new_quote]), pending.clone());
-        write_suggestion(&tmp, "sug-nested", CODE_BLOCK, NedMutation::InsertChild(vec![nested]), pending.clone());
-        write_suggestion(&tmp, "sug-paragraph", CODE_BLOCK, NedMutation::InsertAfter(vec![paragraph]), pending.clone());
-        write_suggestion(&tmp, "sug-title", TITLE_TEXT, NedMutation::SetText("Renamed".to_string()), pending);
+        write_suggestion(
+            &tmp,
+            "sug-old",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![old_quote.clone()]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-new",
+            CODE_BLOCK,
+            NedMutation::Replace(vec![new_quote]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-nested",
+            CODE_BLOCK,
+            NedMutation::InsertChild(vec![nested]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-paragraph",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![paragraph]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-title",
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed".to_string()),
+            pending,
+        );
         write_suggestion(
             &tmp,
             "sug-accepted-quote",
@@ -11451,7 +13408,11 @@ mod model_migration_tests {
 
         assert_eq!(
             listed(&conductor),
-            vec!["sug-accepted-quote".to_string(), "sug-paragraph".to_string(), "sug-title".to_string()]
+            vec![
+                "sug-accepted-quote".to_string(),
+                "sug-paragraph".to_string(),
+                "sug-title".to_string()
+            ]
         );
         for id in ["sug-old", "sug-new", "sug-nested"] {
             assert!(!file_exists(&tmp, id), "{id}: its file is gone");
@@ -11482,7 +13443,11 @@ mod model_migration_tests {
         );
 
         let conductor = start(&tmp);
-        assert_eq!(listed(&conductor), vec!["sug-quote-text".to_string()], "the migration is done");
+        assert_eq!(
+            listed(&conductor),
+            vec!["sug-quote-text".to_string()],
+            "the migration is done"
+        );
         let result = conductor.handle_command(Command::AcceptNedSuggestion {
             id: SuggestionId::from("sug-quote-text".to_string()),
         });
@@ -11495,11 +13460,20 @@ mod model_migration_tests {
         let map = conductor.ned_suggestions.read().unwrap();
         let status = &map[&SuggestionId::from("sug-quote-text".to_string())].status;
         assert!(
-            matches!(status, NedSuggestionStatus::Stale { .. } | NedSuggestionStatus::Pending),
+            matches!(
+                status,
+                NedSuggestionStatus::Stale { .. } | NedSuggestionStatus::Pending
+            ),
             "{status:?}"
         );
-        assert_eq!(std::fs::read_to_string(tmp.path().join(FILE)).unwrap(), content);
-        assert!(conductor.dirty_docs.read().unwrap().is_empty(), "nothing was changed");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(FILE)).unwrap(),
+            content
+        );
+        assert!(
+            conductor.dirty_docs.read().unwrap().is_empty(),
+            "nothing was changed"
+        );
     }
 
     /// Lists became containers of items of blocks (ADR-059 stage 9): a pending
@@ -11523,11 +13497,41 @@ mod model_migration_tests {
         let nested = ned::NodeTree::element("blockquote").with_child(new_list.clone());
         let paragraph = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text("p"));
         let pending = NedSuggestionStatus::Pending;
-        write_suggestion(&tmp, "sug-old", CODE_BLOCK, NedMutation::InsertAfter(vec![old_list.clone()]), pending.clone());
-        write_suggestion(&tmp, "sug-new", CODE_BLOCK, NedMutation::Replace(vec![new_list]), pending.clone());
-        write_suggestion(&tmp, "sug-nested", CODE_BLOCK, NedMutation::InsertChild(vec![nested]), pending.clone());
-        write_suggestion(&tmp, "sug-paragraph", CODE_BLOCK, NedMutation::InsertAfter(vec![paragraph]), pending.clone());
-        write_suggestion(&tmp, "sug-title", TITLE_TEXT, NedMutation::SetText("Renamed".to_string()), pending);
+        write_suggestion(
+            &tmp,
+            "sug-old",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![old_list.clone()]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-new",
+            CODE_BLOCK,
+            NedMutation::Replace(vec![new_list]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-nested",
+            CODE_BLOCK,
+            NedMutation::InsertChild(vec![nested]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-paragraph",
+            CODE_BLOCK,
+            NedMutation::InsertAfter(vec![paragraph]),
+            pending.clone(),
+        );
+        write_suggestion(
+            &tmp,
+            "sug-title",
+            TITLE_TEXT,
+            NedMutation::SetText("Renamed".to_string()),
+            pending,
+        );
         write_suggestion(
             &tmp,
             "sug-accepted-list",
@@ -11540,7 +13544,11 @@ mod model_migration_tests {
 
         assert_eq!(
             listed(&conductor),
-            vec!["sug-accepted-list".to_string(), "sug-paragraph".to_string(), "sug-title".to_string()]
+            vec![
+                "sug-accepted-list".to_string(),
+                "sug-paragraph".to_string(),
+                "sug-title".to_string()
+            ]
         );
         for id in ["sug-old", "sug-new", "sug-nested"] {
             assert!(!file_exists(&tmp, id), "{id}: its file is gone");
@@ -11571,7 +13579,11 @@ mod model_migration_tests {
         );
 
         let conductor = start(&tmp);
-        assert_eq!(listed(&conductor), vec!["sug-list-text".to_string()], "the migration is done");
+        assert_eq!(
+            listed(&conductor),
+            vec!["sug-list-text".to_string()],
+            "the migration is done"
+        );
         let result = conductor.handle_command(Command::AcceptNedSuggestion {
             id: SuggestionId::from("sug-list-text".to_string()),
         });
@@ -11584,11 +13596,20 @@ mod model_migration_tests {
         let map = conductor.ned_suggestions.read().unwrap();
         let status = &map[&SuggestionId::from("sug-list-text".to_string())].status;
         assert!(
-            matches!(status, NedSuggestionStatus::Stale { .. } | NedSuggestionStatus::Pending),
+            matches!(
+                status,
+                NedSuggestionStatus::Stale { .. } | NedSuggestionStatus::Pending
+            ),
             "{status:?}"
         );
-        assert_eq!(std::fs::read_to_string(tmp.path().join(FILE)).unwrap(), content);
-        assert!(conductor.dirty_docs.read().unwrap().is_empty(), "nothing was changed");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(FILE)).unwrap(),
+            content
+        );
+        assert!(
+            conductor.dirty_docs.read().unwrap().is_empty(),
+            "nothing was changed"
+        );
     }
 
     #[test]
@@ -11620,7 +13641,11 @@ mod model_migration_tests {
 
         assert_eq!(
             listed(&conductor),
-            vec!["sug-accepted".to_string(), "sug-accepted-para".to_string(), "sug-rejected".to_string()]
+            vec![
+                "sug-accepted".to_string(),
+                "sug-accepted-para".to_string(),
+                "sug-rejected".to_string()
+            ]
         );
         assert!(file_exists(&tmp, "sug-accepted") && file_exists(&tmp, "sug-rejected"));
         assert!(file_exists(&tmp, "sug-accepted-para"));
@@ -11629,7 +13654,9 @@ mod model_migration_tests {
     /// Every file under `.presemble` with its bytes, by path.
     fn presemble_snapshot(tmp: &tempfile::TempDir) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
         fn walk(dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -11670,7 +13697,11 @@ mod model_migration_tests {
 
         let _conductor = Conductor::load(tmp.path().to_path_buf()).expect("loads");
 
-        assert_eq!(presemble_snapshot(&tmp), before, "the directory and every file are unchanged");
+        assert_eq!(
+            presemble_snapshot(&tmp),
+            before,
+            "the directory and every file are unchanged"
+        );
     }
 
     #[test]
@@ -11715,8 +13746,7 @@ mod empty_slot_tests {
 <presemble:insert data="(ref input.author)"></presemble:insert>
 <div><presemble:insert data="(ref input.body)"></presemble:insert></div>
 </body></html>"#;
-    const AUTHOR_TEMPLATE: &str =
-        r#"<html><body><presemble:insert data="(ref input.name)" as="h1"></presemble:insert></body></html>"#;
+    const AUTHOR_TEMPLATE: &str = r#"<html><body><presemble:insert data="(ref input.name)" as="h1"></presemble:insert></body></html>"#;
 
     /// A site whose posts are: `empty` (an empty file, as a new file is),
     /// `partial` (a title and a body, no summary or author), `bare` (a separator
@@ -11740,7 +13770,11 @@ mod empty_slot_tests {
         std::fs::write(root.join("templates/author/item.html"), AUTHOR_TEMPLATE).unwrap();
         std::fs::write(root.join("content/author/jo.md"), "# Jo\n").unwrap();
         std::fs::write(root.join("content/post/empty.md"), "").unwrap();
-        std::fs::write(root.join("content/post/partial.md"), "# Partial\n\n----\n\nBody para.\n").unwrap();
+        std::fs::write(
+            root.join("content/post/partial.md"),
+            "# Partial\n\n----\n\nBody para.\n",
+        )
+        .unwrap();
         std::fs::write(root.join("content/post/bare.md"), "\n----\n").unwrap();
         std::fs::write(
             root.join("content/post/full.md"),
@@ -11751,7 +13785,9 @@ mod empty_slot_tests {
     }
 
     fn start(tmp: &tempfile::TempDir) -> Conductor {
-        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
         Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor")
     }
 
@@ -11761,10 +13797,13 @@ mod empty_slot_tests {
 
     /// The names of the slot containers of the document at `file`, in order.
     fn slot_names(conductor: &Conductor, file: &str) -> Vec<String> {
-        let root = conductor.doc_root_for_path(Path::new(file)).expect("document in the store");
+        let root = conductor
+            .doc_root_for_path(Path::new(file))
+            .expect("document in the store");
         let store = conductor.node_store.read().unwrap();
-        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
-            .expect("preamble");
+        let preamble =
+            node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                .expect("preamble");
         store
             .children(preamble)
             .into_iter()
@@ -11777,21 +13816,27 @@ mod empty_slot_tests {
 
     /// The blocks of the slot `slot` of the document at `file`, decoded.
     fn slot_blocks(conductor: &Conductor, file: &str, slot: &str) -> Vec<content::ContentElement> {
-        let root = conductor.doc_root_for_path(Path::new(file)).expect("document in the store");
+        let root = conductor
+            .doc_root_for_path(Path::new(file))
+            .expect("document in the store");
         let store = conductor.node_store.read().unwrap();
-        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
-            .expect("preamble");
+        let preamble =
+            node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                .expect("preamble");
         let slot_node = store
             .children(preamble)
             .into_iter()
             .find(|c| {
-                node_store_bridge::content_bridge::find_attr_text(&store, *c, "name").as_deref() == Some(slot)
+                node_store_bridge::content_bridge::find_attr_text(&store, *c, "name").as_deref()
+                    == Some(slot)
             })
             .unwrap_or_else(|| panic!("no slot container {slot} in {file}"));
         store
             .children(slot_node)
             .into_iter()
-            .map(|b| node_store_bridge::content_bridge::block_from_node(&store, b).expect("a block"))
+            .map(|b| {
+                node_store_bridge::content_bridge::block_from_node(&store, b).expect("a block")
+            })
             .collect()
     }
 
@@ -11826,7 +13871,11 @@ mod empty_slot_tests {
             "content/post/partial.md",
             "content/post/full.md",
         ] {
-            assert_eq!(slot_names(&conductor, file), ["title", "summary", "author"], "{file}");
+            assert_eq!(
+                slot_names(&conductor, file),
+                ["title", "summary", "author"],
+                "{file}"
+            );
         }
     }
 
@@ -11836,7 +13885,9 @@ mod empty_slot_tests {
     fn empty_slot_placeholder_carries_its_address() {
         let tmp = site();
         let conductor = start(&tmp);
-        let html = conductor.render_page("/post/partial", &RenderMode::View).expect("renders");
+        let html = conductor
+            .render_page("/post/partial", &RenderMode::View)
+            .expect("renders");
         let placeholders: Vec<&str> = html
             .split('<')
             .filter(|chunk| chunk.contains("presemble-suggestion"))
@@ -11847,7 +13898,10 @@ mod empty_slot_tests {
                 .find(|t| t.contains(&format!(r#"data-presemble-slot="{slot}""#)))
                 .unwrap_or_else(|| panic!("no placeholder for {slot}: {html}"));
             let address = slot_address("content/post/partial.md", slot).replace('"', "&quot;");
-            assert!(tag.contains(&format!(r#"data-presemble-address="{address}""#)), "{slot}: {tag}");
+            assert!(
+                tag.contains(&format!(r#"data-presemble-address="{address}""#)),
+                "{slot}: {tag}"
+            );
             assert!(tag.contains(r#"data-presemble-md="""#), "{slot}: {tag}");
         }
     }
@@ -11860,7 +13914,12 @@ mod empty_slot_tests {
         let conductor = start(&tmp);
         let file = "content/post/empty.md";
 
-        let result = conductor.handle_command(fill(file, "title", "My *first* post", BlockEditIntent::Apply));
+        let result = conductor.handle_command(fill(
+            file,
+            "title",
+            "My *first* post",
+            BlockEditIntent::Apply,
+        ));
         assert!(applied(&result), "title: {:?}", result.response);
         let title = slot_blocks(&conductor, file, "title");
         assert!(
@@ -11868,21 +13927,35 @@ mod empty_slot_tests {
             "{title:?}"
         );
 
-        let result = conductor.handle_command(fill(file, "summary", "A summary.", BlockEditIntent::Apply));
+        let result =
+            conductor.handle_command(fill(file, "summary", "A summary.", BlockEditIntent::Apply));
         assert!(applied(&result), "summary: {:?}", result.response);
         assert_eq!(
             slot_blocks(&conductor, file, "summary"),
-            [content::ContentElement::paragraph_from_markdown("A summary.")]
+            [content::ContentElement::paragraph_from_markdown(
+                "A summary."
+            )]
         );
 
-        let result = conductor.handle_command(fill(file, "author", "[Jo](/author/jo)", BlockEditIntent::Apply));
+        let result = conductor.handle_command(fill(
+            file,
+            "author",
+            "[Jo](/author/jo)",
+            BlockEditIntent::Apply,
+        ));
         assert!(applied(&result), "author: {:?}", result.response);
         let author = slot_blocks(&conductor, file, "author");
         assert!(
             matches!(author.as_slice(), [el] if el.sole_link().is_some_and(|l| l.destination == "/author/jo")),
             "{author:?}"
         );
-        assert!(conductor.dirty_docs().read().unwrap().contains(Path::new(file)));
+        assert!(
+            conductor
+                .dirty_docs()
+                .read()
+                .unwrap()
+                .contains(Path::new(file))
+        );
     }
 
     /// Suggest shares the lowering: the suggestion fills the slot when accepted.
@@ -11891,18 +13964,33 @@ mod empty_slot_tests {
         let tmp = site();
         let conductor = start(&tmp);
         let file = "content/post/empty.md";
-        let result = conductor.handle_command(fill(file, "summary", "Suggested.", BlockEditIntent::Suggest));
-        let Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated { id })) =
-            result.response
+        let result = conductor.handle_command(fill(
+            file,
+            "summary",
+            "Suggested.",
+            BlockEditIntent::Suggest,
+        ));
+        let Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated {
+            id,
+        })) = result.response
         else {
             panic!("expected a suggestion, got {:?}", result.response)
         };
-        assert!(slot_blocks(&conductor, file, "summary").is_empty(), "suggesting changes nothing");
+        assert!(
+            slot_blocks(&conductor, file, "summary").is_empty(),
+            "suggesting changes nothing"
+        );
         let accepted = conductor.handle_command(Command::AcceptNedSuggestion { id });
-        assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
+        assert!(
+            matches!(accepted.response, Response::Ok),
+            "{:?}",
+            accepted.response
+        );
         assert_eq!(
             slot_blocks(&conductor, file, "summary"),
-            [content::ContentElement::paragraph_from_markdown("Suggested.")]
+            [content::ContentElement::paragraph_from_markdown(
+                "Suggested."
+            )]
         );
     }
 
@@ -11913,28 +14001,55 @@ mod empty_slot_tests {
         let tmp = site();
         let conductor = start(&tmp);
         let file = "content/post/empty.md";
-        let suggested = conductor.handle_command(fill(file, "summary", "Suggested.", BlockEditIntent::Suggest));
-        let Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated { id })) =
-            suggested.response
+        let suggested = conductor.handle_command(fill(
+            file,
+            "summary",
+            "Suggested.",
+            BlockEditIntent::Suggest,
+        ));
+        let Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::SuggestionCreated {
+            id,
+        })) = suggested.response
         else {
             panic!("expected a suggestion, got {:?}", suggested.response)
         };
-        let other = conductor.handle_command(fill(file, "summary", "Filled another way.", BlockEditIntent::Apply));
+        let other = conductor.handle_command(fill(
+            file,
+            "summary",
+            "Filled another way.",
+            BlockEditIntent::Apply,
+        ));
         assert!(applied(&other), "{:?}", other.response);
 
         let accepted = conductor.handle_command(Command::AcceptNedSuggestion { id: id.clone() });
-        assert!(matches!(accepted.response, Response::Ok), "{:?}", accepted.response);
-        let status = conductor.ned_suggestions.read().unwrap().get(&id).expect("suggestion").status.clone();
+        assert!(
+            matches!(accepted.response, Response::Ok),
+            "{:?}",
+            accepted.response
+        );
+        let status = conductor
+            .ned_suggestions
+            .read()
+            .unwrap()
+            .get(&id)
+            .expect("suggestion")
+            .status
+            .clone();
         assert!(
             matches!(
                 status,
-                editorial_types::NedSuggestionStatus::Stale { cause: editorial_types::StaleCause::Drifted, .. }
+                editorial_types::NedSuggestionStatus::Stale {
+                    cause: editorial_types::StaleCause::Drifted,
+                    ..
+                }
             ),
             "{status:?}"
         );
         assert_eq!(
             slot_blocks(&conductor, file, "summary"),
-            [content::ContentElement::paragraph_from_markdown("Filled another way.")],
+            [content::ContentElement::paragraph_from_markdown(
+                "Filled another way."
+            )],
             "the slot was not appended to"
         );
     }
@@ -11945,15 +14060,21 @@ mod empty_slot_tests {
     fn block_edit_on_a_slot_that_has_blocks_is_refused_as_drifted() {
         let tmp = site();
         let conductor = start(&tmp);
-        let result =
-            conductor.handle_command(fill("content/post/full.md", "summary", "Other.", BlockEditIntent::Apply));
+        let result = conductor.handle_command(fill(
+            "content/post/full.md",
+            "summary",
+            "Other.",
+            BlockEditIntent::Apply,
+        ));
         let Response::BlockEdited(BlockEditResponse::Refused(e)) = result.response else {
             panic!("expected a refusal, got {:?}", result.response)
         };
         assert_eq!(e.cause, BlockEditCause::Drifted, "{e:?}");
         assert_eq!(
             slot_blocks(&conductor, "content/post/full.md", "summary"),
-            [content::ContentElement::paragraph_from_markdown("A summary.")]
+            [content::ContentElement::paragraph_from_markdown(
+                "A summary."
+            )]
         );
     }
 }
@@ -12003,7 +14124,10 @@ mod emitted_address_tests {
 
     /// The store kind a rendered element stands for.
     fn kind_of(tag: &str) -> &'static str {
-        let name = tag.split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or("");
+        let name = tag
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or("");
         match name {
             "p" => "paragraph",
             "pre" => "code-block",
@@ -12031,12 +14155,18 @@ mod emitted_address_tests {
     #[test]
     fn data_each_items_carry_their_documents_addresses() {
         let tmp = example_site();
-        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
         let conductor = Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor");
-        let html = conductor.render_page("/", &RenderMode::View).expect("home page");
+        let html = conductor
+            .render_page("/", &RenderMode::View)
+            .expect("home page");
         let mut seen = std::collections::BTreeSet::new();
         for chunk in html.split('<').skip(1) {
-            let Some(tag) = chunk.split('>').next() else { continue };
+            let Some(tag) = chunk.split('>').next() else {
+                continue;
+            };
             let file = attr(tag, "data-presemble-file").unwrap_or_default();
             let slot = attr(tag, "data-presemble-slot").unwrap_or_default();
             if !(file.starts_with("content/feature/") || file.starts_with("content/post/")) {
@@ -12044,7 +14174,10 @@ mod emitted_address_tests {
             }
             let address = attr(tag, "data-presemble-address")
                 .unwrap_or_else(|| panic!("<{tag}> of {file} carries no address"));
-            assert!(address.contains(&format!("(ned/doc-by-path \"{file}\")")), "{address}");
+            assert!(
+                address.contains(&format!("(ned/doc-by-path \"{file}\")")),
+                "{address}"
+            );
             // Titles and their page links address the title heading; text slots their own.
             if slot == "title" || slot == "link" {
                 assert!(address.contains("\"title\")) \"heading\" 0)"), "{address}");
@@ -12054,7 +14187,10 @@ mod emitted_address_tests {
             seen.insert((file, slot));
         }
         let slots: std::collections::BTreeSet<_> = seen.iter().map(|(_, s)| s.as_str()).collect();
-        assert!(slots.contains("title") && slots.contains("link"), "{slots:?}");
+        assert!(
+            slots.contains("title") && slots.contains("link"),
+            "{slots:?}"
+        );
         assert!(seen.len() >= 4, "only {seen:?}");
     }
 
@@ -12082,27 +14218,50 @@ mod emitted_address_tests {
             "# The guide\n\n----\n\n## Template composition\n\nText.\n\n## Functions\n\n| Function | Meaning |\n| --- | --- |\n| `juxt` | Several templates side by side, used as `((juxt a b) input)`, see [Template composition](#template-composition) |\n| `pipe` | Plain text |\n\nAfter.\n",
         )
         .unwrap();
-        let repo = site_repository::SiteRepository::builder().from_dir(root).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
         let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
-        let html = conductor.render_page("/guide/g", &RenderMode::View).expect("page");
+        let html = conductor
+            .render_page("/guide/g", &RenderMode::View)
+            .expect("page");
 
         let mut checked = 0;
         let mut saw_table = false;
         for chunk in html.split('<').skip(1) {
-            let Some(tag) = chunk.split('>').next() else { continue };
+            let Some(tag) = chunk.split('>').next() else {
+                continue;
+            };
             saw_table |= tag.starts_with("table");
-            let Some(address) = attr(tag, "data-presemble-address") else { continue };
+            let Some(address) = attr(tag, "data-presemble-address") else {
+                continue;
+            };
             checked += 1;
             let selection = conductor
                 .eval_selection(&address)
                 .unwrap_or_else(|e| panic!("<{tag}>: {address} does not evaluate: {e:?}"));
-            assert_eq!(selection.len(), 1, "<{tag}>: {address} resolves to {} nodes", selection.len());
+            assert_eq!(
+                selection.len(),
+                1,
+                "<{tag}>: {address} resolves to {} nodes",
+                selection.len()
+            );
             let store = conductor.node_store.read().unwrap();
-            let element = node_store_bridge::content_bridge::block_from_node(&store, selection.iter().next().unwrap())
-                .unwrap_or_else(|e| panic!("<{tag}>: {address} is not a block: {e}"));
+            let element = node_store_bridge::content_bridge::block_from_node(
+                &store,
+                selection.iter().next().unwrap(),
+            )
+            .unwrap_or_else(|e| panic!("<{tag}>: {address} is not a block: {e}"));
             let kind = content::address::kind_name(&element);
-            let rendered = if attr(tag, "data-presemble-slot").as_deref() == Some("body") { kind_of(tag) } else { "" };
-            assert!(rendered.is_empty() || rendered == kind, "<{tag}> resolves to a {kind}: {address}");
+            let rendered = if attr(tag, "data-presemble-slot").as_deref() == Some("body") {
+                kind_of(tag)
+            } else {
+                ""
+            };
+            assert!(
+                rendered.is_empty() || rendered == kind,
+                "<{tag}> resolves to a {kind}: {address}"
+            );
             let projection = if address.contains("\"body\"))") {
                 content::Projection::Block
             } else {
@@ -12126,7 +14285,9 @@ mod emitted_address_tests {
         let mut text = std::fs::read_to_string(&guide).expect("the guide");
         text.push_str("\n<div>raw</div>\n");
         std::fs::write(&guide, text).unwrap();
-        let repo = site_repository::SiteRepository::builder().from_dir(tmp.path()).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
         let conductor = Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor");
 
         let mut urls: Vec<String> = conductor.url_to_root_index().into_keys().collect();
@@ -12142,7 +14303,9 @@ mod emitted_address_tests {
                 continue;
             };
             for chunk in html.split('<').skip(1) {
-                let Some(tag) = chunk.split('>').next() else { continue };
+                let Some(tag) = chunk.split('>').next() else {
+                    continue;
+                };
                 // Coverage: an element of a document's slot (it names the file
                 // and the slot) must carry that block's address. A suggestion
                 // placeholder renders no block.
@@ -12164,25 +14327,29 @@ mod emitted_address_tests {
                         ));
                         let store = conductor.node_store.read().unwrap();
                         let is_link_slot = slot_blocks.is_ok_and(|s| {
-                            s.len() > 1
-                                && s.iter().all(|n| {
-                                    matches!(
-                                        node_store_bridge::content_bridge::block_from_node(&store, n),
-                                        Ok(ref el) if el.is_sole_link()
-                                    ) || matches!(
-                                        node_store_bridge::content_bridge::block_from_node(&store, n),
-                                        Ok(content::ContentElement::LinkExpression { .. })
-                                    )
-                                })
+                            s.len() > 1 && s.iter().all(|n| {
+                                matches!(
+                                    node_store_bridge::content_bridge::block_from_node(&store, n),
+                                    Ok(ref el) if el.is_sole_link()
+                                ) || matches!(
+                                    node_store_bridge::content_bridge::block_from_node(&store, n),
+                                    Ok(content::ContentElement::LinkExpression { .. })
+                                )
+                            })
                         });
                         if is_link_slot {
                             reference_links += 1;
                         } else {
-                            missing.push(format!("{url}: <{}", tag.chars().take(160).collect::<String>()));
+                            missing.push(format!(
+                                "{url}: <{}",
+                                tag.chars().take(160).collect::<String>()
+                            ));
                         }
                     }
                 }
-                let Some(address) = attr(tag, "data-presemble-address") else { continue };
+                let Some(address) = attr(tag, "data-presemble-address") else {
+                    continue;
+                };
                 // A raw HTML block's placeholder is addressed but is no slot:
                 // it names no file of its own, and is not counted as editable.
                 let placeholder = tag.contains("presemble-html-removed");
@@ -12201,7 +14368,12 @@ mod emitted_address_tests {
                 let selection = conductor
                     .eval_selection(&address)
                     .unwrap_or_else(|e| panic!("{url}: {address} does not evaluate: {e:?}"));
-                assert_eq!(selection.len(), 1, "{url}: {address} resolves to {} nodes", selection.len());
+                assert_eq!(
+                    selection.len(),
+                    1,
+                    "{url}: {address} resolves to {} nodes",
+                    selection.len()
+                );
                 let node = selection.iter().next().unwrap();
 
                 // The node is the block that rendered it.
@@ -12211,13 +14383,12 @@ mod emitted_address_tests {
                 let kind = content::address::kind_name(&element);
                 // Only a body block's tag says what it is; a template may render
                 // a slot with any tag (`as="p"` for a heading slot).
-                let rendered_kind = if placeholder
-                    || attr(tag, "data-presemble-slot").as_deref() == Some("body")
-                {
-                    kind_of(tag)
-                } else {
-                    ""
-                };
+                let rendered_kind =
+                    if placeholder || attr(tag, "data-presemble-slot").as_deref() == Some("body") {
+                        kind_of(tag)
+                    } else {
+                        ""
+                    };
                 assert!(
                     rendered_kind.is_empty() || rendered_kind == kind,
                     "{url}: <{tag}> resolves to a {kind}: {address}"
@@ -12246,17 +14417,28 @@ mod emitted_address_tests {
             }
         }
         assert!(checked > 20, "only {checked} addresses were emitted");
-        assert!(placeholders >= 1, "the raw HTML block's placeholder carries an address");
+        assert!(
+            placeholders >= 1,
+            "the raw HTML block's placeholder carries an address"
+        );
         assert!(with_md > 20, "only {with_md} elements carried md");
         assert!(
             missing.is_empty(),
             "{} of {editable_count} editable elements have no address ({checked} have one):\n{}",
             missing.len(),
-            missing.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+            missing
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         // Every editable element is covered, but the multi-value link slots.
         assert_eq!(checked, editable_count - reference_links);
-        assert_eq!(reference_links, 0, "site/ has no multi-value reference link slot rendered");
+        assert_eq!(
+            reference_links, 0,
+            "site/ has no multi-value reference link slot rendered"
+        );
     }
 }
 
@@ -12273,7 +14455,8 @@ mod path_boundary_tests {
     use super::*;
     use editorial_types::{ContentPath, SitePath};
 
-    const SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
+    const SCHEMA: &str =
+        "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
     const TEMPLATE: &str = "[:div [:h1 title]]";
     const OUTSIDE: &str = "# Outside\n\n----\n\nThe original text.\n";
     const BUFFER: &str = "# Overwritten\n\n----\n\nThis must never reach the file.\n";
@@ -12306,10 +14489,16 @@ mod path_boundary_tests {
         }
         std::fs::write(site.join("schemas/post/item.md"), SCHEMA).unwrap();
         std::fs::write(site.join("templates/post/item.hiccup"), TEMPLATE).unwrap();
-        std::fs::write(site.join("content/post/hello.md"), "# Hello\n\n----\n\nBody.\n").unwrap();
+        std::fs::write(
+            site.join("content/post/hello.md"),
+            "# Hello\n\n----\n\nBody.\n",
+        )
+        .unwrap();
         std::fs::write(tmp.path().join("outside.md"), OUTSIDE).unwrap();
         std::fs::create_dir_all(tmp.path().join("outside-dir")).unwrap();
-        let repo = site_repository::SiteRepository::builder().from_dir(&site).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(&site)
+            .build();
         let conductor = Conductor::with_repo(site, repo).expect("conductor");
         World { tmp, conductor }
     }
@@ -12334,10 +14523,21 @@ mod path_boundary_tests {
         let w = world();
         let before = w.outside_bytes();
         for spelling in spellings_of_outside(&w) {
-            let Ok(path) = ContentPath::parse(&spelling) else { continue };
-            w.conductor.handle_command(Command::EditorChanged { path, text: BUFFER.to_string() });
-            w.conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() });
-            assert_eq!(w.outside_bytes(), before, "{spelling} overwrote a file outside the site");
+            let Ok(path) = ContentPath::parse(&spelling) else {
+                continue;
+            };
+            w.conductor.handle_command(Command::EditorChanged {
+                path,
+                text: BUFFER.to_string(),
+            });
+            w.conductor.handle_command(Command::SaveAllBuffers {
+                consent: Default::default(),
+            });
+            assert_eq!(
+                w.outside_bytes(),
+                before,
+                "{spelling} overwrote a file outside the site"
+            );
         }
         assert_eq!(w.outside_bytes(), before);
     }
@@ -12354,23 +14554,32 @@ mod path_boundary_tests {
                     text: BUFFER.to_string(),
                 });
             }
-            let saved = w
-                .conductor
-                .handle_command(Command::SaveBuffer { path, consent: Default::default() });
+            let saved = w.conductor.handle_command(Command::SaveBuffer {
+                path,
+                consent: Default::default(),
+            });
             assert!(
                 response_is_error(&saved.response),
                 "saving outside the site must be refused: {:?}",
                 saved.response
             );
         }
-        assert_eq!(w.outside_bytes(), before, "an absolute path wrote outside the site");
+        assert_eq!(
+            w.outside_bytes(),
+            before,
+            "an absolute path wrote outside the site"
+        );
     }
 
     #[test]
     fn save_buffer_with_parent_segments_writes_nothing_outside() {
         let w = world();
         let before = w.outside_bytes();
-        for spelling in ["../outside.md", "content/../../outside.md", "content/post/../../../outside.md"] {
+        for spelling in [
+            "../outside.md",
+            "content/../../outside.md",
+            "content/post/../../../outside.md",
+        ] {
             if let Ok(path) = SitePath::parse(spelling) {
                 if let Ok(content_path) = ContentPath::parse(spelling) {
                     w.conductor.handle_command(Command::EditorChanged {
@@ -12378,16 +14587,21 @@ mod path_boundary_tests {
                         text: BUFFER.to_string(),
                     });
                 }
-                let saved = w
-                    .conductor
-                    .handle_command(Command::SaveBuffer { path, consent: Default::default() });
+                let saved = w.conductor.handle_command(Command::SaveBuffer {
+                    path,
+                    consent: Default::default(),
+                });
                 assert!(
                     response_is_error(&saved.response),
                     "{spelling}: saving outside the site must be refused: {:?}",
                     saved.response
                 );
             }
-            assert_eq!(w.outside_bytes(), before, "{spelling} wrote outside the site");
+            assert_eq!(
+                w.outside_bytes(),
+                before,
+                "{spelling} wrote outside the site"
+            );
         }
     }
 
@@ -12396,8 +14610,13 @@ mod path_boundary_tests {
     fn get_document_text_cannot_read_outside_the_site() {
         let w = world();
         for spelling in spellings_of_outside(&w) {
-            let Ok(path) = SitePath::parse(&spelling) else { continue };
-            let answer = w.conductor.handle_command(Command::GetDocumentText { path }).response;
+            let Ok(path) = SitePath::parse(&spelling) else {
+                continue;
+            };
+            let answer = w
+                .conductor
+                .handle_command(Command::GetDocumentText { path })
+                .response;
             assert!(
                 matches!(answer, Response::DocumentText(None)),
                 "{spelling} read a file outside the site: {answer:?}"
@@ -12411,8 +14630,12 @@ mod path_boundary_tests {
         // `content/post/` names the `post` schema, so a read would parse and
         // answer with an anchor.
         for spelling in ["content/post/../../../outside.md"] {
-            let Ok(path) = SitePath::parse(spelling) else { continue };
-            let result = w.conductor.handle_command(Command::CursorMoved { path, line: 4 });
+            let Ok(path) = SitePath::parse(spelling) else {
+                continue;
+            };
+            let result = w
+                .conductor
+                .handle_command(Command::CursorMoved { path, line: 4 });
             assert!(
                 result.events.is_empty(),
                 "{spelling} read a file outside the site: {:?}",
@@ -12424,8 +14647,13 @@ mod path_boundary_tests {
     #[test]
     fn reload_refuses_a_path_outside_the_site() {
         let w = world();
-        for spelling in ["content/../../outside.md", "content/post/../../../outside.md"] {
-            let Ok(path) = ContentPath::parse(spelling) else { continue };
+        for spelling in [
+            "content/../../outside.md",
+            "content/post/../../../outside.md",
+        ] {
+            let Ok(path) = ContentPath::parse(spelling) else {
+                continue;
+            };
             let result = w.conductor.handle_command(Command::ReloadDocument { path });
             assert!(
                 response_is_error(&result.response),
@@ -12453,8 +14681,13 @@ mod path_boundary_tests {
             path: ContentPath::parse("content/escape/note.md").expect("a content path"),
             text: BUFFER.to_string(),
         });
-        w.conductor.handle_command(Command::SaveBuffer { path, consent: Default::default() });
-        w.conductor.handle_command(Command::SaveAllBuffers { consent: Default::default() });
+        w.conductor.handle_command(Command::SaveBuffer {
+            path,
+            consent: Default::default(),
+        });
+        w.conductor.handle_command(Command::SaveAllBuffers {
+            consent: Default::default(),
+        });
         assert!(
             !w.outside_dir().join("note.md").exists(),
             "the buffer was written through a symlink out of the site"
@@ -12468,27 +14701,45 @@ mod path_boundary_tests {
     #[test]
     fn editor_commands_refuse_a_content_symlink_out_of_the_site() {
         let w = world();
-        std::fs::write(w.outside_dir().join("secret.md"), "# Secret\n\n----\n\nBody.\n").unwrap();
+        std::fs::write(
+            w.outside_dir().join("secret.md"),
+            "# Secret\n\n----\n\nBody.\n",
+        )
+        .unwrap();
         // Under `content/post/`, which names the `post` schema, so a read would
         // parse and answer with an anchor.
-        std::os::unix::fs::symlink(w.outside_dir(), w.site().join("content/post/escape")).expect("symlink");
+        std::os::unix::fs::symlink(w.outside_dir(), w.site().join("content/post/escape"))
+            .expect("symlink");
         let spelling = "content/post/escape/secret.md";
         let content_path = ContentPath::parse(spelling).expect("a valid content path");
 
         for command in [
-            Command::EditorOpened { path: content_path.clone(), text: BUFFER.to_string() },
-            Command::EditorChanged { path: content_path.clone(), text: BUFFER.to_string() },
+            Command::EditorOpened {
+                path: content_path.clone(),
+                text: BUFFER.to_string(),
+            },
+            Command::EditorChanged {
+                path: content_path.clone(),
+                text: BUFFER.to_string(),
+            },
         ] {
             let answer = w.conductor.handle_command(command).response;
             assert!(response_is_error(&answer), "must be refused: {answer:?}");
         }
-        assert!(w.conductor.editors.read().unwrap().is_empty(), "no editor was attached");
+        assert!(
+            w.conductor.editors.read().unwrap().is_empty(),
+            "no editor was attached"
+        );
 
         let moved = w.conductor.handle_command(Command::CursorMoved {
             path: SitePath::parse(spelling).expect("a plain site path"),
             line: 4,
         });
-        assert!(moved.events.is_empty(), "read through a symlink out of the site: {:?}", moved.events);
+        assert!(
+            moved.events.is_empty(),
+            "read through a symlink out of the site: {:?}",
+            moved.events
+        );
         assert_eq!(
             std::fs::read_to_string(w.outside_dir().join("secret.md")).unwrap(),
             "# Secret\n\n----\n\nBody.\n",
@@ -12503,7 +14754,10 @@ mod path_boundary_tests {
         std::fs::write(w.outside_dir().join("secret.md"), OUTSIDE).unwrap();
         link_out(&w);
         let path = SitePath::parse("content/escape/secret.md").expect("a plain site path");
-        let answer = w.conductor.handle_command(Command::GetDocumentText { path }).response;
+        let answer = w
+            .conductor
+            .handle_command(Command::GetDocumentText { path })
+            .response;
         assert!(
             matches!(answer, Response::DocumentText(None)),
             "read through a symlink out of the site: {answer:?}"
@@ -12520,14 +14774,26 @@ mod path_boundary_tests {
         let inside = w.conductor.handle_command(Command::FileChanged {
             paths: vec![SitePath::parse("content/post/hello.md").expect("valid")],
         });
-        assert!(!inside.events.is_empty(), "the reference change must rebuild: {:?}", inside.events);
+        assert!(
+            !inside.events.is_empty(),
+            "the reference change must rebuild: {:?}",
+            inside.events
+        );
 
         // A change that resolves outside the site is not the conductor's.
         let outside = w.conductor.handle_command(Command::FileChanged {
             paths: vec![SitePath::parse("content/escape/note.md").expect("a plain site path")],
         });
-        assert!(matches!(outside.response, Response::Ok), "{:?}", outside.response);
-        assert!(outside.events.is_empty(), "an outside change was acted on: {:?}", outside.events);
+        assert!(
+            matches!(outside.response, Response::Ok),
+            "{:?}",
+            outside.response
+        );
+        assert!(
+            outside.events.is_empty(),
+            "an outside change was acted on: {:?}",
+            outside.events
+        );
     }
 
     /// GUARD: a block edit for a file outside the site was already refused (the
@@ -12535,7 +14801,9 @@ mod path_boundary_tests {
     #[test]
     fn block_edit_with_a_traversal_file_is_refused() {
         let w = world();
-        let Ok(file) = ContentPath::parse("content/../../outside.md") else { return };
+        let Ok(file) = ContentPath::parse("content/../../outside.md") else {
+            return;
+        };
         let result = w.conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
             file,
             selection: r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/hello.md") "body")) "paragraph" 0)"#.to_string(),
@@ -12545,7 +14813,10 @@ mod path_boundary_tests {
             reason: None,
         }));
         assert!(
-            matches!(result.response, Response::BlockEdited(editorial_types::BlockEditResponse::Refused(_))),
+            matches!(
+                result.response,
+                Response::BlockEdited(editorial_types::BlockEditResponse::Refused(_))
+            ),
             "{:?}",
             result.response
         );
@@ -12556,7 +14827,9 @@ mod path_boundary_tests {
     #[test]
     fn create_ned_suggestion_with_a_traversal_file_is_refused() {
         let w = world();
-        let Ok(file) = ContentPath::parse("content/../../outside.md") else { return };
+        let Ok(file) = ContentPath::parse("content/../../outside.md") else {
+            return;
+        };
         let result = w.conductor.handle_command(Command::CreateNedSuggestion {
             file,
             selection: r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/hello.md") "title")))"#.to_string(),
@@ -12581,7 +14854,10 @@ mod path_boundary_tests {
 
     fn render_view(w: &World, url: &str) -> Response {
         w.conductor
-            .handle_command(Command::RenderPage { path: url.to_string(), mode: RenderMode::View })
+            .handle_command(Command::RenderPage {
+                path: url.to_string(),
+                mode: RenderMode::View,
+            })
             .response
     }
 
@@ -12598,7 +14874,12 @@ mod path_boundary_tests {
             matches!(render_view(&w, "/post/hello"), Response::PageRendered { ref html } if html == "<p>hello</p>"),
             "the plain URL must still render"
         );
-        for url in ["/../../outside", "/../outside/", "/../x/../outside", "/post/../../outside"] {
+        for url in [
+            "/../../outside",
+            "/../outside/",
+            "/../x/../outside",
+            "/post/../../outside",
+        ] {
             match render_view(&w, url) {
                 Response::Error(_) => {}
                 other => panic!("{url} must be refused, got {other:?}"),
@@ -12612,8 +14893,11 @@ mod path_boundary_tests {
         let w = world();
         write_output(&w, "site/post/hello/index.html", "<p>hello</p>");
         std::fs::write(w.outside_dir().join("index.html"), "SECRET-LINK").unwrap();
-        std::os::unix::fs::symlink(w.outside_dir(), w.tmp.path().join("output-editorial/site/escape"))
-            .expect("symlink");
+        std::os::unix::fs::symlink(
+            w.outside_dir(),
+            w.tmp.path().join("output-editorial/site/escape"),
+        )
+        .expect("symlink");
         match render_view(&w, "/escape/") {
             Response::Error(_) => {}
             other => panic!("/escape/ must be refused, got {other:?}"),
@@ -12624,10 +14908,18 @@ mod path_boundary_tests {
     fn links_with_a_traversal_stem_reads_nothing() {
         let w = world();
         // Control: a known stem answers.
-        let known = w.conductor.handle_command(Command::ListLinkOptions { stem: "post".to_string() });
-        assert!(matches!(known.response, Response::LinkOptions(_)), "{:?}", known.response);
+        let known = w.conductor.handle_command(Command::ListLinkOptions {
+            stem: "post".to_string(),
+        });
+        assert!(
+            matches!(known.response, Response::LinkOptions(_)),
+            "{:?}",
+            known.response
+        );
         for stem in ["../../x", "../templates/post", "/etc", "nope", "post/../x"] {
-            let result = w.conductor.handle_command(Command::ListLinkOptions { stem: stem.to_string() });
+            let result = w.conductor.handle_command(Command::ListLinkOptions {
+                stem: stem.to_string(),
+            });
             assert!(
                 response_is_error(&result.response),
                 "stem {stem:?} must be refused: {:?}",
@@ -12642,14 +14934,18 @@ mod path_boundary_tests {
     fn grammar_with_an_unknown_stem_is_an_error() {
         let w = world();
         for stem in ["../../x", "../schemas/post/item", "/etc/passwd", "nope"] {
-            let result = w.conductor.handle_command(Command::GetGrammar { stem: stem.to_string() });
+            let result = w.conductor.handle_command(Command::GetGrammar {
+                stem: stem.to_string(),
+            });
             assert!(
                 matches!(result.response, Response::SchemaSource(None)),
                 "stem {stem:?} must be not found: {:?}",
                 result.response
             );
         }
-        let known = w.conductor.handle_command(Command::GetGrammar { stem: "post".to_string() });
+        let known = w.conductor.handle_command(Command::GetGrammar {
+            stem: "post".to_string(),
+        });
         assert!(matches!(known.response, Response::SchemaSource(Some(_))));
     }
 
@@ -12658,12 +14954,20 @@ mod path_boundary_tests {
     #[test]
     fn schema_render_with_a_traversal_stem_is_an_error() {
         let w = world();
-        for url in ["/_schema/../item", "/_schema/../index", "/_schema/nope/item"] {
+        for url in [
+            "/_schema/../item",
+            "/_schema/../index",
+            "/_schema/nope/item",
+        ] {
             let result = w.conductor.handle_command(Command::RenderPage {
                 path: url.to_string(),
                 mode: RenderMode::Schema,
             });
-            assert!(response_is_error(&result.response), "{url}: {:?}", result.response);
+            assert!(
+                response_is_error(&result.response),
+                "{url}: {:?}",
+                result.response
+            );
         }
     }
 
@@ -12674,12 +14978,24 @@ mod path_boundary_tests {
         let page = w.conductor.handle_command(Command::SchemaUrlForPage {
             page_url: "/../../outside".to_string(),
         });
-        assert!(matches!(page.response, Response::SchemaUrl(None)), "{:?}", page.response);
-        for schema_url in ["/_schema/../item", "/_schema/../../x/item", "/_schema/nope/item"] {
+        assert!(
+            matches!(page.response, Response::SchemaUrl(None)),
+            "{:?}",
+            page.response
+        );
+        for schema_url in [
+            "/_schema/../item",
+            "/_schema/../../x/item",
+            "/_schema/nope/item",
+        ] {
             let result = w.conductor.handle_command(Command::PageUrlForSchema {
                 schema_url: schema_url.to_string(),
             });
-            assert!(matches!(result.response, Response::PageUrl(None)), "{schema_url}: {:?}", result.response);
+            assert!(
+                matches!(result.response, Response::PageUrl(None)),
+                "{schema_url}: {:?}",
+                result.response
+            );
         }
     }
 
@@ -12692,7 +15008,11 @@ mod path_boundary_tests {
                 stem: "post".to_string(),
                 slug: slug.to_string(),
             });
-            assert!(response_is_error(&result.response), "{slug}: {:?}", result.response);
+            assert!(
+                response_is_error(&result.response),
+                "{slug}: {:?}",
+                result.response
+            );
         }
         assert!(!w.outside_dir().join("evil.md").exists());
         assert!(!w.tmp.path().join("evil.md").exists());

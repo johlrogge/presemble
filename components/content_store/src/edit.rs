@@ -11,14 +11,14 @@ use std::fmt;
 
 use content::inline::{InlineContext, InlinePath, Inlines, SearchReplaceError};
 use content::{ContentElement, RoundTripError, Spacing, check_block_round_trip};
-use editorial_types::{PlanFailure, StaleCause};
 pub use editorial_types::{CommentPlace, NedMutation, TargetKind};
+use editorial_types::{PlanFailure, StaleCause};
 use ned::{NodeTree, Selection};
 use node_store::{Node, NodeId, NodeStore};
 
 use crate::block::{
-    BLOCK_CONTAINER_KINDS, BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, TEXT_BLOCK_KINDS, block_from_node,
-    block_to_store, inline_context_of, tree_to_block,
+    BLOCK_CONTAINER_KINDS, BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, TEXT_BLOCK_KINDS,
+    block_from_node, block_to_store, inline_context_of, tree_to_block,
 };
 use crate::inline_store::{inlines_from_store, inlines_from_tree, inlines_to_store};
 
@@ -69,12 +69,26 @@ impl From<AddressError> for StaleCause {
 /// The single node a selection addresses, with its structural context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
-    Text { text: NodeId, block: NodeId, document: NodeId },
+    Text {
+        text: NodeId,
+        block: NodeId,
+        document: NodeId,
+    },
     /// An inline container (a heading) as the scope of a text search or of
     /// `SetInlines`.
-    TextScope { block: NodeId, document: NodeId },
-    Block { block: NodeId, container: NodeId, document: NodeId },
-    Container { container: NodeId, document: NodeId },
+    TextScope {
+        block: NodeId,
+        document: NodeId,
+    },
+    Block {
+        block: NodeId,
+        container: NodeId,
+        document: NodeId,
+    },
+    Container {
+        container: NodeId,
+        document: NodeId,
+    },
 }
 
 impl Target {
@@ -187,7 +201,10 @@ fn container_document(
         Some(name) if BLOCK_CONTAINER_KINDS.contains(&name) => {
             block_context(store, id, expected).map(|(_, document)| document)
         }
-        _ => Err(AddressError::WrongKind { expected, found: kind_label(store, id) }),
+        _ => Err(AddressError::WrongKind {
+            expected,
+            found: kind_label(store, id),
+        }),
     }
 }
 
@@ -200,7 +217,10 @@ fn block_context(
     match element_name(store, id) {
         Some(name) if BLOCK_KINDS.contains(&name) => {}
         _ => {
-            return Err(AddressError::WrongKind { expected, found: kind_label(store, id) });
+            return Err(AddressError::WrongKind {
+                expected,
+                found: kind_label(store, id),
+            });
         }
     }
     let container = single_parent(store, id, expected)?;
@@ -215,7 +235,10 @@ fn resolve_text(
     id: NodeId,
     expected: TargetKind,
 ) -> Result<Target, AddressError> {
-    let wrong = || AddressError::WrongKind { expected, found: kind_label(store, id) };
+    let wrong = || AddressError::WrongKind {
+        expected,
+        found: kind_label(store, id),
+    };
     if !matches!(store.get(id), Some(Node::Text(_))) {
         return Err(wrong());
     }
@@ -235,7 +258,11 @@ fn resolve_text(
         return Err(wrong());
     }
     let document = text_owner_document(store, block, expected)?;
-    Ok(Target::Text { text: id, block, document })
+    Ok(Target::Text {
+        text: id,
+        block,
+        document,
+    })
 }
 
 /// The live document of an inline container: of the block itself, or, for a
@@ -256,7 +283,10 @@ fn text_owner_document(
             }
         }
         if element_name(store, block) != Some(TABLE_KIND) {
-            return Err(AddressError::WrongKind { expected, found: kind_label(store, owner) });
+            return Err(AddressError::WrongKind {
+                expected,
+                found: kind_label(store, owner),
+            });
         }
     }
     let (_container, document) = block_context(store, block, expected)?;
@@ -273,7 +303,11 @@ pub fn resolve(
     let id = match ids.as_slice() {
         [] => return Err(AddressError::Unresolved),
         [one] => *one,
-        many => return Err(AddressError::Ambiguous { matches: many.len() }),
+        many => {
+            return Err(AddressError::Ambiguous {
+                matches: many.len(),
+            });
+        }
     };
     // Selections are evaluated before the lock is taken, so ids can be stale.
     if store.get(id).is_none() {
@@ -285,7 +319,10 @@ pub fn resolve(
         TargetKind::TextScope => {
             if element_name(store, id).is_some_and(|n| INLINE_CONTAINER_KINDS.contains(&n)) {
                 let document = text_owner_document(store, id, kind)?;
-                Ok(Target::TextScope { block: id, document })
+                Ok(Target::TextScope {
+                    block: id,
+                    document,
+                })
             } else {
                 // A Text node is a scope too: the search runs inside it.
                 resolve_text(store, id, kind)
@@ -293,11 +330,18 @@ pub fn resolve(
         }
         TargetKind::Block => {
             let (container, document) = block_context(store, id, kind)?;
-            Ok(Target::Block { block: id, container, document })
+            Ok(Target::Block {
+                block: id,
+                container,
+                document,
+            })
         }
         TargetKind::Container => {
             let document = container_document(store, id, kind)?;
-            Ok(Target::Container { container: id, document })
+            Ok(Target::Container {
+                container: id,
+                document,
+            })
         }
     }
 }
@@ -308,7 +352,10 @@ pub fn resolve(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
     /// The target is not of the kind the mutation needs.
-    TargetMismatch { expected: TargetKind, found: TargetKind },
+    TargetMismatch {
+        expected: TargetKind,
+        found: TargetKind,
+    },
     /// A payload holds `NodeTree::Existing`.
     ExistingNode,
     /// Replace or an insert with no trees.
@@ -321,7 +368,9 @@ pub enum EditError {
     Postcondition(RoundTripError),
     EmptySearch,
     SearchNotFound,
-    SearchNotUnique { occurrences: usize },
+    SearchNotUnique {
+        occurrences: usize,
+    },
     /// The search text matches across an image, raw HTML or a hard break.
     SpansAtom,
     /// The edited inline content would not read back as itself when written
@@ -346,9 +395,10 @@ impl fmt::Display for EditError {
             EditError::Postcondition(e) => e.fmt(f),
             EditError::EmptySearch => f.write_str("empty search text"),
             EditError::SearchNotFound => StaleCause::SearchNotFound.fmt(f),
-            EditError::SearchNotUnique { occurrences } => {
-                StaleCause::SearchNotUnique { occurrences: *occurrences }.fmt(f)
+            EditError::SearchNotUnique { occurrences } => StaleCause::SearchNotUnique {
+                occurrences: *occurrences,
             }
+            .fmt(f),
             EditError::SpansAtom => StaleCause::SpansAtom.fmt(f),
             EditError::InlinesNotWritable => {
                 f.write_str("the edited text cannot be written as markdown")
@@ -376,7 +426,9 @@ impl From<EditError> for StaleCause {
             }
             EditError::SpansAtom => StaleCause::SpansAtom,
             EditError::NoChange => StaleCause::NoChange,
-            other => StaleCause::InvalidValue { detail: other.to_string() },
+            other => StaleCause::InvalidValue {
+                detail: other.to_string(),
+            },
         }
     }
 }
@@ -411,16 +463,43 @@ impl PreparedEdit {
 /// with `block_to_store`, the canonical encoding.
 #[derive(Debug, Clone, PartialEq)]
 enum Change {
-    SetText { text: NodeId, value: String },
+    SetText {
+        text: NodeId,
+        value: String,
+    },
     /// Replace the children of an inline container with `inlines`.
-    SetInlines { container: NodeId, inlines: Inlines },
-    Delete { block: NodeId },
+    SetInlines {
+        container: NodeId,
+        inlines: Inlines,
+    },
+    Delete {
+        block: NodeId,
+    },
     /// Replace the comments of `host` under the trivia attribute `attr`.
-    SetComments { host: NodeId, attr: &'static str, comments: Vec<String> },
-    Replace { block: NodeId, container: NodeId, blocks: Vec<ContentElement> },
-    InsertBefore { anchor: NodeId, container: NodeId, blocks: Vec<ContentElement> },
-    InsertAfter { anchor: NodeId, container: NodeId, blocks: Vec<ContentElement> },
-    InsertChild { container: NodeId, blocks: Vec<ContentElement> },
+    SetComments {
+        host: NodeId,
+        attr: &'static str,
+        comments: Vec<String>,
+    },
+    Replace {
+        block: NodeId,
+        container: NodeId,
+        blocks: Vec<ContentElement>,
+    },
+    InsertBefore {
+        anchor: NodeId,
+        container: NodeId,
+        blocks: Vec<ContentElement>,
+    },
+    InsertAfter {
+        anchor: NodeId,
+        container: NodeId,
+        blocks: Vec<ContentElement>,
+    },
+    InsertChild {
+        container: NodeId,
+        blocks: Vec<ContentElement>,
+    },
 }
 
 /// Preconditions, payload decode, the edit in the content domain, postcondition.
@@ -440,7 +519,13 @@ pub fn prepare(
             if current_text(store, text, block)? == value {
                 return Err(EditError::NoChange);
             }
-            (block, Change::SetText { text, value: value.clone() })
+            (
+                block,
+                Change::SetText {
+                    text,
+                    value: value.clone(),
+                },
+            )
         }
         (NedMutation::SearchReplace { search, replace }, Target::Text { text, block, .. }) => {
             if search.is_empty() {
@@ -491,31 +576,81 @@ pub fn prepare(
             return set_inlines(block, document, ctx, &current, edited);
         }
         (NedMutation::Delete, Target::Block { block, .. }) => (block, Change::Delete { block }),
-        (NedMutation::Replace(trees), Target::Block { block, container, .. }) => {
-            (block, Change::Replace { block, container, blocks: decode_payload(trees)? })
-        }
-        (NedMutation::InsertBefore(trees), Target::Block { block, container, .. }) => (
-            block,
-            Change::InsertBefore { anchor: block, container, blocks: decode_payload(trees)? },
-        ),
-        (NedMutation::InsertAfter(trees), Target::Block { block, container, .. }) => (
-            block,
-            Change::InsertAfter { anchor: block, container, blocks: decode_payload(trees)? },
-        ),
-        (NedMutation::InsertChild(trees), Target::Container { container, .. }) => {
-            (container, Change::InsertChild { container, blocks: decode_payload(trees)? })
-        }
         (
-            NedMutation::SetComments { place: CommentPlace::Before, comments },
+            NedMutation::Replace(trees),
+            Target::Block {
+                block, container, ..
+            },
+        ) => (
+            block,
+            Change::Replace {
+                block,
+                container,
+                blocks: decode_payload(trees)?,
+            },
+        ),
+        (
+            NedMutation::InsertBefore(trees),
+            Target::Block {
+                block, container, ..
+            },
+        ) => (
+            block,
+            Change::InsertBefore {
+                anchor: block,
+                container,
+                blocks: decode_payload(trees)?,
+            },
+        ),
+        (
+            NedMutation::InsertAfter(trees),
+            Target::Block {
+                block, container, ..
+            },
+        ) => (
+            block,
+            Change::InsertAfter {
+                anchor: block,
+                container,
+                blocks: decode_payload(trees)?,
+            },
+        ),
+        (NedMutation::InsertChild(trees), Target::Container { container, .. }) => (
+            container,
+            Change::InsertChild {
+                container,
+                blocks: decode_payload(trees)?,
+            },
+        ),
+        (
+            NedMutation::SetComments {
+                place: CommentPlace::Before,
+                comments,
+            },
             Target::Block { block, .. },
         ) => {
-            return prepare_comments(store, block, ned::trivia::ATTR_TRIVIA_BEFORE, comments, document);
+            return prepare_comments(
+                store,
+                block,
+                ned::trivia::ATTR_TRIVIA_BEFORE,
+                comments,
+                document,
+            );
         }
         (
-            NedMutation::SetComments { place: CommentPlace::End, comments },
+            NedMutation::SetComments {
+                place: CommentPlace::End,
+                comments,
+            },
             Target::Container { container, .. },
         ) => {
-            return prepare_comments(store, container, ned::trivia::ATTR_TRIVIA_END, comments, document);
+            return prepare_comments(
+                store,
+                container,
+                ned::trivia::ATTR_TRIVIA_END,
+                comments,
+                document,
+            );
         }
         (mutation, target) => {
             return Err(EditError::TargetMismatch {
@@ -524,7 +659,11 @@ pub fn prepare(
             });
         }
     };
-    Ok(PreparedEdit { footprint, document, change })
+    Ok(PreparedEdit {
+        footprint,
+        document,
+        change,
+    })
 }
 
 /// `SetComments`: every string must be an HTML comment, and the list must
@@ -553,7 +692,11 @@ fn prepare_comments(
     Ok(PreparedEdit {
         footprint: host,
         document,
-        change: Change::SetComments { host, attr, comments: comments.to_vec() },
+        change: Change::SetComments {
+            host,
+            attr,
+            comments: comments.to_vec(),
+        },
     })
 }
 
@@ -630,18 +773,25 @@ fn set_inlines(
     if ctx == InlineContext::Paragraph && edited.is_empty() {
         return Err(EditError::EmptiesParagraph);
     }
-    edited.check_writable(ctx).map_err(|_| EditError::InlinesNotWritable)?;
+    edited
+        .check_writable(ctx)
+        .map_err(|_| EditError::InlinesNotWritable)?;
     Ok(PreparedEdit {
         footprint: block,
         document,
-        change: Change::SetInlines { container: block, inlines: edited },
+        change: Change::SetInlines {
+            container: block,
+            inlines: edited,
+        },
     })
 }
 
 /// A block that carries no text cannot be the owner of a text edit.
 fn no_text(store: &NodeStore, block: NodeId) -> EditError {
     EditError::OwningBlock(BlockDecodeError::MissingTextChild {
-        kind: element_name(store, block).unwrap_or("non-element").to_string(),
+        kind: element_name(store, block)
+            .unwrap_or("non-element")
+            .to_string(),
     })
 }
 
@@ -752,7 +902,11 @@ fn write(store: &mut NodeStore, change: Change) {
             }
             inlines_to_store(store, container, &inlines);
         }
-        Change::SetComments { host, attr, comments } => {
+        Change::SetComments {
+            host,
+            attr,
+            comments,
+        } => {
             // What was there goes, trivia element included; the new list is
             // written fresh.
             if let Some(trivia) = ned::trivia::trivia_element(store, host, attr) {
@@ -766,33 +920,50 @@ fn write(store: &mut NodeStore, change: Change) {
         }
         Change::Delete { block } => {
             let parent = element_parent(store, block);
-            assert!(delete(store, block) > 0, "the prepared block is a live node");
+            assert!(
+                delete(store, block) > 0,
+                "the prepared block is a live node"
+            );
             if let Some(parent) = parent {
-                normalise_lists_above(store,parent);
+                normalise_lists_above(store, parent);
             }
         }
-        Change::InsertBefore { anchor, container, blocks } => {
+        Change::InsertBefore {
+            anchor,
+            container,
+            blocks,
+        } => {
             let at = anchor_index(store, container, anchor);
             insert_blocks(store, container, at, &blocks);
-            normalise_lists_above(store,container);
+            normalise_lists_above(store, container);
         }
-        Change::InsertAfter { anchor, container, blocks } => {
+        Change::InsertAfter {
+            anchor,
+            container,
+            blocks,
+        } => {
             let at = anchor_index(store, container, anchor);
             insert_blocks(store, container, at + 1, &blocks);
-            normalise_lists_above(store,container);
+            normalise_lists_above(store, container);
         }
         Change::InsertChild { container, blocks } => {
             let at = store.children(container).len();
             insert_blocks(store, container, at, &blocks);
-            normalise_lists_above(store,container);
+            normalise_lists_above(store, container);
         }
-        Change::Replace { block, container, blocks } => {
+        Change::Replace {
+            block,
+            container,
+            blocks,
+        } => {
             let at = anchor_index(store, container, block);
             let created = insert_blocks(store, container, at, &blocks);
             // ADR-062 D5: the replaced block's leading comments move to the
             // first new root, before the edge goes (delete relocates through
             // the parent).
-            let first = *created.first().expect("a prepared replace has at least one block");
+            let first = *created
+                .first()
+                .expect("a prepared replace has at least one block");
             ned::trivia::move_trivia(
                 store,
                 block,
@@ -806,7 +977,7 @@ fn write(store: &mut NodeStore, change: Change) {
             relocate_inner_trivia(store, block, InnerTrivia::Replaced { first });
             store.remove_child_edge(container, block);
             delete(store, block);
-            normalise_lists_above(store,container);
+            normalise_lists_above(store, container);
         }
     }
 }
@@ -917,7 +1088,11 @@ enum InnerTrivia {
     Replaced { first: NodeId },
     /// The block is deleted: all go to `attr` of `host`, from `placement`, in
     /// document order (so after the block's own leading comments).
-    Deleted { host: NodeId, attr: &'static str, placement: ned::trivia::Placement },
+    Deleted {
+        host: NodeId,
+        attr: &'static str,
+        placement: ned::trivia::Placement,
+    },
 }
 
 /// A place a comment inside a container block sits in: before the block at
@@ -965,8 +1140,7 @@ fn inner_trivia(store: &NodeStore, block: NodeId) -> Vec<(Spot, NodeId, &'static
 /// its items) or an item (ADR-059 stage 9). The separator is never in the
 /// store, so a list has none of its own.
 fn holds_inner_trivia(store: &NodeStore, id: NodeId) -> bool {
-    element_name(store, id)
-        .is_some_and(|n| n == LIST_KIND || BLOCK_CONTAINER_KINDS.contains(&n))
+    element_name(store, id).is_some_and(|n| n == LIST_KIND || BLOCK_CONTAINER_KINDS.contains(&n))
 }
 
 /// Where `spot` of a replaced container is in `root`, the container that
@@ -1014,7 +1188,11 @@ fn relocate_inner_trivia(store: &mut NodeStore, block: NodeId, to: InnerTrivia) 
                 move_trivia(store, host, attr, first, ATTR_TRIVIA_BEFORE, Placement::End);
             }
         }
-        InnerTrivia::Deleted { host: to_host, attr: to_attr, mut placement } => {
+        InnerTrivia::Deleted {
+            host: to_host,
+            attr: to_attr,
+            mut placement,
+        } => {
             for (_, host, attr) in inner {
                 let moved = move_trivia(store, host, attr, to_host, to_attr, placement);
                 if let Placement::At(at) = &mut placement {
@@ -1040,9 +1218,24 @@ fn delete(store: &mut NodeStore, node: NodeId) -> usize {
         // In front of whatever the home holds: the block's comments come
         // before the sibling's own, and before the container's end comments,
         // as they did in the source.
-        let moved = move_trivia(store, node, ATTR_TRIVIA_BEFORE, host, attr, Placement::At(0));
+        let moved = move_trivia(
+            store,
+            node,
+            ATTR_TRIVIA_BEFORE,
+            host,
+            attr,
+            Placement::At(0),
+        );
         let placement = Placement::At(moved);
-        relocate_inner_trivia(store, node, InnerTrivia::Deleted { host, attr, placement });
+        relocate_inner_trivia(
+            store,
+            node,
+            InnerTrivia::Deleted {
+                host,
+                attr,
+                placement,
+            },
+        );
     }
 
     let count_before = store.node_count();
@@ -1147,7 +1340,10 @@ pub enum PlanCause {
     Edit(EditError),
     /// The step changes what an earlier step changes: the same node, or one
     /// inside the other.
-    Overlap { with: usize, with_origin: &'static str },
+    Overlap {
+        with: usize,
+        with_origin: &'static str,
+    },
 }
 
 /// The first step of a plan that cannot be applied. `entry` is 0-based.
@@ -1182,7 +1378,9 @@ impl From<PlanError> for StaleCause {
             PlanCause::Address(a) => a.into(),
             PlanCause::Edit(edit) => edit.into(),
             // Steps are 1-based for people.
-            PlanCause::Overlap { with, .. } => StaleCause::Overlap { with_step: with + 1 },
+            PlanCause::Overlap { with, .. } => StaleCause::Overlap {
+                with_step: with + 1,
+            },
         }
     }
 }
@@ -1216,7 +1414,11 @@ pub fn execute(store: &mut NodeStore, plan: Plan) -> Result<Executed, PlanError>
     let mut prepared: Vec<(usize, PreparedEdit, &'static str)> = Vec::with_capacity(plan.len());
     let mut skipped = Vec::new();
     for (entry, step) in plan.0.iter().enumerate() {
-        let fail = |cause| PlanError { entry, origin: step.origin, cause };
+        let fail = |cause| PlanError {
+            entry,
+            origin: step.origin,
+            cause,
+        };
         let target = resolve(store, &step.targets, step.mutation.target_kind())
             .map_err(|e| fail(PlanCause::Address(e)))?;
         let edit = match prepare(store, &target, &step.mutation) {
@@ -1235,8 +1437,10 @@ pub fn execute(store: &mut NodeStore, plan: Plan) -> Result<Executed, PlanError>
         }
         prepared.push((entry, edit, step.origin));
     }
-    let Committed { documents } =
-        commit(store, prepared.into_iter().map(|(_, edit, _)| edit).collect());
+    let Committed { documents } = commit(
+        store,
+        prepared.into_iter().map(|(_, edit, _)| edit).collect(),
+    );
     Ok(Executed { documents, skipped })
 }
 

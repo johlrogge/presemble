@@ -39,7 +39,13 @@ fn slot_to_store(slot: &Slot, store: &mut NodeStore) -> NodeId {
     // name attribute
     let name_attr = store.intern("name");
     let name_val = store.add_node(Node::Text(slot.name.as_str().to_string()));
-    store.add_edge(id, Edge::Attribute { name: name_attr, value: name_val });
+    store.add_edge(
+        id,
+        Edge::Attribute {
+            name: name_attr,
+            value: name_val,
+        },
+    );
 
     // element child
     let element_id = element_to_store(&slot.element, store);
@@ -55,7 +61,13 @@ fn slot_to_store(slot: &Slot, store: &mut NodeStore) -> NodeId {
     if let Some(hint) = &slot.hint_text {
         let hint_attr = store.intern("hint");
         let hint_val = store.add_node(Node::Text(hint.clone()));
-        store.add_edge(id, Edge::Attribute { name: hint_attr, value: hint_val });
+        store.add_edge(
+            id,
+            Edge::Attribute {
+                name: hint_attr,
+                value: hint_val,
+            },
+        );
     }
 
     id
@@ -69,11 +81,23 @@ fn element_to_store(element: &Element, store: &mut NodeStore) -> NodeId {
 
             let min_attr = store.intern("min-level");
             let min_val = store.add_node(Node::Integer(level.min.value() as i64));
-            store.add_edge(id, Edge::Attribute { name: min_attr, value: min_val });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: min_attr,
+                    value: min_val,
+                },
+            );
 
             let max_attr = store.intern("max-level");
             let max_val = store.add_node(Node::Integer(level.max.value() as i64));
-            store.add_edge(id, Edge::Attribute { name: max_attr, value: max_val });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: max_attr,
+                    value: max_val,
+                },
+            );
 
             id
         }
@@ -87,7 +111,13 @@ fn element_to_store(element: &Element, store: &mut NodeStore) -> NodeId {
 
             let pattern_attr = store.intern("pattern");
             let pattern_val = store.add_node(Node::Text(pattern.clone()));
-            store.add_edge(id, Edge::Attribute { name: pattern_attr, value: pattern_val });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: pattern_attr,
+                    value: pattern_val,
+                },
+            );
 
             id
         }
@@ -97,7 +127,13 @@ fn element_to_store(element: &Element, store: &mut NodeStore) -> NodeId {
 
             let pattern_attr = store.intern("pattern");
             let pattern_val = store.add_node(Node::Text(pattern.clone()));
-            store.add_edge(id, Edge::Attribute { name: pattern_attr, value: pattern_val });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: pattern_attr,
+                    value: pattern_val,
+                },
+            );
 
             id
         }
@@ -119,34 +155,88 @@ fn constraint_to_store(constraint: &Constraint, store: &mut NodeStore) -> NodeId
             match count_range {
                 CountRange::Exactly(n) => {
                     let kind_val = store.add_node(Node::Text("exactly".to_string()));
-                    store.add_edge(id, Edge::Attribute { name: kind_attr, value: kind_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: kind_attr,
+                            value: kind_val,
+                        },
+                    );
                     let value_attr = store.intern("value");
                     let value_val = store.add_node(Node::Integer(*n as i64));
-                    store.add_edge(id, Edge::Attribute { name: value_attr, value: value_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: value_attr,
+                            value: value_val,
+                        },
+                    );
                 }
                 CountRange::AtLeast(n) => {
                     let kind_val = store.add_node(Node::Text("at-least".to_string()));
-                    store.add_edge(id, Edge::Attribute { name: kind_attr, value: kind_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: kind_attr,
+                            value: kind_val,
+                        },
+                    );
                     let value_attr = store.intern("value");
                     let value_val = store.add_node(Node::Integer(*n as i64));
-                    store.add_edge(id, Edge::Attribute { name: value_attr, value: value_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: value_attr,
+                            value: value_val,
+                        },
+                    );
                 }
                 CountRange::AtMost(n) => {
                     let kind_val = store.add_node(Node::Text("at-most".to_string()));
-                    store.add_edge(id, Edge::Attribute { name: kind_attr, value: kind_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: kind_attr,
+                            value: kind_val,
+                        },
+                    );
                     let value_attr = store.intern("value");
                     let value_val = store.add_node(Node::Integer(*n as i64));
-                    store.add_edge(id, Edge::Attribute { name: value_attr, value: value_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: value_attr,
+                            value: value_val,
+                        },
+                    );
                 }
                 CountRange::Between { min, max } => {
                     let kind_val = store.add_node(Node::Text("between".to_string()));
-                    store.add_edge(id, Edge::Attribute { name: kind_attr, value: kind_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: kind_attr,
+                            value: kind_val,
+                        },
+                    );
                     let min_attr = store.intern("min");
                     let min_val = store.add_node(Node::Integer(*min as i64));
-                    store.add_edge(id, Edge::Attribute { name: min_attr, value: min_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: min_attr,
+                            value: min_val,
+                        },
+                    );
                     let max_attr = store.intern("max");
                     let max_val = store.add_node(Node::Integer(*max as i64));
-                    store.add_edge(id, Edge::Attribute { name: max_attr, value: max_val });
+                    store.add_edge(
+                        id,
+                        Edge::Attribute {
+                            name: max_attr,
+                            value: max_val,
+                        },
+                    );
                 }
             }
 
@@ -158,7 +248,13 @@ fn constraint_to_store(constraint: &Constraint, store: &mut NodeStore) -> NodeId
 
             let kind_attr = store.intern("kind");
             let kind_val = store.add_node(Node::Text("capitalized".to_string()));
-            store.add_edge(id, Edge::Attribute { name: kind_attr, value: kind_val });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: kind_attr,
+                    value: kind_val,
+                },
+            );
 
             id
         }
@@ -167,8 +263,15 @@ fn constraint_to_store(constraint: &Constraint, store: &mut NodeStore) -> NodeId
             let id = store.add_node(Node::Element(name));
 
             let required_attr = store.intern("required");
-            let required_val = store.add_node(Node::Boolean(matches!(alt, AltRequirement::Required)));
-            store.add_edge(id, Edge::Attribute { name: required_attr, value: required_val });
+            let required_val =
+                store.add_node(Node::Boolean(matches!(alt, AltRequirement::Required)));
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: required_attr,
+                    value: required_val,
+                },
+            );
 
             id
         }
@@ -182,7 +285,13 @@ fn constraint_to_store(constraint: &Constraint, store: &mut NodeStore) -> NodeId
                 Orientation::Portrait => "portrait",
             };
             let value_val = store.add_node(Node::Text(orientation_str.to_string()));
-            store.add_edge(id, Edge::Attribute { name: value_attr, value: value_val });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: value_attr,
+                    value: value_val,
+                },
+            );
 
             id
         }
@@ -192,7 +301,13 @@ fn constraint_to_store(constraint: &Constraint, store: &mut NodeStore) -> NodeId
 
             let schema_attr = store.intern("schema");
             let schema_val = store.add_node(Node::Text(schema_name.clone()));
-            store.add_edge(id, Edge::Attribute { name: schema_attr, value: schema_val });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: schema_attr,
+                    value: schema_val,
+                },
+            );
 
             id
         }
@@ -209,11 +324,23 @@ fn body_rules_to_store(body: &BodyRules, store: &mut NodeStore) -> NodeId {
 
         let min_attr = store.intern("min");
         let min_val = store.add_node(Node::Integer(range.min.value() as i64));
-        store.add_edge(range_id, Edge::Attribute { name: min_attr, value: min_val });
+        store.add_edge(
+            range_id,
+            Edge::Attribute {
+                name: min_attr,
+                value: min_val,
+            },
+        );
 
         let max_attr = store.intern("max");
         let max_val = store.add_node(Node::Integer(range.max.value() as i64));
-        store.add_edge(range_id, Edge::Attribute { name: max_attr, value: max_val });
+        store.add_edge(
+            range_id,
+            Edge::Attribute {
+                name: max_attr,
+                value: max_val,
+            },
+        );
 
         store.add_edge(id, Edge::Child(range_id));
     }
@@ -365,8 +492,10 @@ fn store_to_body_rules(store: &NodeStore, id: NodeId) -> BodyRules {
             if tag == "heading-range" {
                 let min_val = find_attr_int(store, child, "min").unwrap_or(1) as u8;
                 let max_val = find_attr_int(store, child, "max").unwrap_or(6) as u8;
-                let min = HeadingLevel::new(min_val).unwrap_or_else(|| HeadingLevel::new(1).unwrap());
-                let max = HeadingLevel::new(max_val).unwrap_or_else(|| HeadingLevel::new(6).unwrap());
+                let min =
+                    HeadingLevel::new(min_val).unwrap_or_else(|| HeadingLevel::new(1).unwrap());
+                let max =
+                    HeadingLevel::new(max_val).unwrap_or_else(|| HeadingLevel::new(6).unwrap());
                 heading_range = Some(HeadingLevelRange { min, max });
             }
         }
@@ -433,7 +562,10 @@ mod tests {
             Element::Image { .. } => "image",
             Element::List => "list",
         };
-        assert_eq!(tag, expected, "Expected element tag '{expected}' but got '{tag}'");
+        assert_eq!(
+            tag, expected,
+            "Expected element tag '{expected}' but got '{tag}'"
+        );
     }
 
     #[test]
@@ -527,10 +659,16 @@ mod tests {
         }
 
         // Check Content(Capitalized)
-        assert!(matches!(slot.constraints[1], Constraint::Content(ContentConstraint::Capitalized)));
+        assert!(matches!(
+            slot.constraints[1],
+            Constraint::Content(ContentConstraint::Capitalized)
+        ));
 
         // Check Alt(Required)
-        assert!(matches!(slot.constraints[2], Constraint::Alt(AltRequirement::Required)));
+        assert!(matches!(
+            slot.constraints[2],
+            Constraint::Alt(AltRequirement::Required)
+        ));
     }
 
     #[test]
@@ -562,7 +700,9 @@ mod tests {
         let grammar = Grammar {
             preamble: vec![Slot {
                 name: SlotName::new("related"),
-                element: Element::Link { pattern: ".*".to_string() },
+                element: Element::Link {
+                    pattern: ".*".to_string(),
+                },
                 constraints: vec![Constraint::TypeLink("post".to_string())],
                 hint_text: None,
                 span: Span { start: 0, end: 0 },
@@ -611,7 +751,10 @@ mod tests {
 
         assert_eq!(result.preamble.len(), 1);
         let slot = &result.preamble[0];
-        assert_eq!(slot.hint_text.as_deref(), Some("Write a brief caption here"));
+        assert_eq!(
+            slot.hint_text.as_deref(),
+            Some("Write a brief caption here")
+        );
     }
 
     #[test]

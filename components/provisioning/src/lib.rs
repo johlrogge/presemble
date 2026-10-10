@@ -197,12 +197,8 @@ pub trait ConductorLauncher: Send + Sync + 'static {
 #[async_trait]
 pub trait HealthChecker: Send + Sync + 'static {
     /// Poll `http://<host>:<port>/` until it returns 200, or until `timeout` elapses.
-    async fn wait_ready(
-        &self,
-        host: &str,
-        port: u16,
-        timeout: Duration,
-    ) -> Result<(), HealthError>;
+    async fn wait_ready(&self, host: &str, port: u16, timeout: Duration)
+    -> Result<(), HealthError>;
 }
 
 /// Seam for managing Caddy reverse-proxy routes.
@@ -303,9 +299,7 @@ impl ConductorLauncher for TokioProcessLauncher {
         // kill_on_drop is false by default — dropping the handle must NOT
         // kill the process.  The process must survive the launch future,
         // which drops its local handle at the end of `provision`.
-        let child = cmd
-            .spawn()
-            .map_err(|e| LaunchError::Spawn(e.to_string()))?;
+        let child = cmd.spawn().map_err(|e| LaunchError::Spawn(e.to_string()))?;
 
         // Verify the process is still alive by checking id() before returning.
         if child.id().is_none() {
@@ -369,7 +363,6 @@ impl ConductorLauncher for TokioProcessLauncher {
         Ok(())
     }
 }
-
 
 /// Real health checker: HTTP-polls `GET http://host:port/` until 200.
 ///
@@ -485,17 +478,12 @@ impl CaddyRouter for HttpCaddyRouter {
             }]
         });
 
-        let body_bytes = serde_json::to_vec(&route_json)
-            .map_err(|e| RouterError::AddFailed {
-                subdomain: subdomain.as_str().into(),
-                reason: e.to_string(),
-            })?;
+        let body_bytes = serde_json::to_vec(&route_json).map_err(|e| RouterError::AddFailed {
+            subdomain: subdomain.as_str().into(),
+            reason: e.to_string(),
+        })?;
 
-        let url = format!(
-            "http://{}/id/{}",
-            self.admin_addr,
-            subdomain.as_str()
-        );
+        let url = format!("http://{}/id/{}", self.admin_addr, subdomain.as_str());
 
         let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
 
@@ -509,10 +497,13 @@ impl CaddyRouter for HttpCaddyRouter {
                 reason: e.to_string(),
             })?;
 
-        let resp = client.request(req).await.map_err(|e| RouterError::AddFailed {
-            subdomain: subdomain.as_str().into(),
-            reason: e.to_string(),
-        })?;
+        let resp = client
+            .request(req)
+            .await
+            .map_err(|e| RouterError::AddFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: e.to_string(),
+            })?;
 
         let status = resp.status();
 
@@ -546,11 +537,7 @@ impl CaddyRouter for HttpCaddyRouter {
         use hyper_util::client::legacy::Client;
         use hyper_util::rt::TokioExecutor;
 
-        let url = format!(
-            "http://{}/id/{}",
-            self.admin_addr,
-            subdomain.as_str()
-        );
+        let url = format!("http://{}/id/{}", self.admin_addr, subdomain.as_str());
 
         let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
 
@@ -563,10 +550,13 @@ impl CaddyRouter for HttpCaddyRouter {
                 reason: e.to_string(),
             })?;
 
-        let resp = client.request(req).await.map_err(|e| RouterError::RemoveFailed {
-            subdomain: subdomain.as_str().into(),
-            reason: e.to_string(),
-        })?;
+        let resp = client
+            .request(req)
+            .await
+            .map_err(|e| RouterError::RemoveFailed {
+                subdomain: subdomain.as_str().into(),
+                reason: e.to_string(),
+            })?;
 
         let status = resp.status();
 
@@ -1086,11 +1076,7 @@ impl SharedVmProvisioner {
     }
 
     /// Validate that no existing placement uses the same site_path or port.
-    fn check_uniqueness(
-        &self,
-        site_path: &Path,
-        port: u16,
-    ) -> Result<(), ProvisionError> {
+    fn check_uniqueness(&self, site_path: &Path, port: u16) -> Result<(), ProvisionError> {
         let placements = self.registry.all_placements();
         for (_, p) in &placements {
             if p.site_path == site_path {
@@ -1125,12 +1111,9 @@ impl ConductorProvisioner for SharedVmProvisioner {
         // 1b. Scaffold: resolve template and write starter files to site_path.
         //     This happens BEFORE port reservation — a scaffold failure requires no
         //     compensation because no port or route has been allocated yet.
-        let template = site_templates::template_by_name(&starter.template_name)
-            .ok_or_else(|| {
-                ProvisionError::Scaffold(format!(
-                    "unknown template: {}",
-                    starter.template_name
-                ))
+        let template =
+            site_templates::template_by_name(&starter.template_name).ok_or_else(|| {
+                ProvisionError::Scaffold(format!("unknown template: {}", starter.template_name))
             })?;
         template
             .scaffold(&site_path, &starter.format, &starter.style)
@@ -1231,11 +1214,7 @@ impl ConductorProvisioner for SharedVmProvisioner {
         self.router.remove_route(subdomain).await?;
 
         // Stop running handle if present
-        let handle = self
-            .running
-            .lock()
-            .await
-            .remove(subdomain.as_str());
+        let handle = self.running.lock().await.remove(subdomain.as_str());
         if let Some(h) = handle {
             let _ = self.launcher.stop(&h).await;
         }
@@ -1483,10 +1462,7 @@ mod tests {
         assert_eq!(placement.host, "127.0.0.1");
 
         // site_path is accounts_root / account_id / site_id
-        let expected_path = dir
-            .path()
-            .join(acc.as_str())
-            .join(site.id.as_str());
+        let expected_path = dir.path().join(acc.as_str()).join(site.id.as_str());
         assert_eq!(placement.site_path, expected_path);
 
         // Launch happened with correct port and session_key carried through
@@ -1612,7 +1588,11 @@ mod tests {
         );
 
         // Process was stopped (compensation)
-        assert_eq!(launcher.stop_count().await, 1, "process must be stopped on router failure");
+        assert_eq!(
+            launcher.stop_count().await,
+            1,
+            "process must be stopped on router failure"
+        );
 
         // Status is Failed
         let sites = registry.sites_for(&acc);
@@ -1620,7 +1600,10 @@ mod tests {
         assert_eq!(s.status, SiteStatus::Failed);
 
         // Placement was cleared
-        assert!(s.placement.is_none(), "placement must be cleared on router failure");
+        assert!(
+            s.placement.is_none(),
+            "placement must be cleared on router failure"
+        );
     }
 
     // ── T7: Deprovision ───────────────────────────────────────────────────────
@@ -1756,14 +1739,25 @@ mod tests {
         provisioner.reconcile().await.unwrap();
 
         // Exactly 3 routes (not 4)
-        assert_eq!(router.route_count().await, 3, "reconcile must inject exactly 3 Ready routes");
+        assert_eq!(
+            router.route_count().await,
+            3,
+            "reconcile must inject exactly 3 Ready routes"
+        );
 
         // No launches happened
-        assert_eq!(launcher.launch_count().await, 0, "reconcile must not launch conductors");
+        assert_eq!(
+            launcher.launch_count().await,
+            0,
+            "reconcile must not launch conductors"
+        );
 
         // Failed site has no route
         let routes = router.routes().await;
-        assert!(!routes.contains_key("failsite"), "failed site must not be routed");
+        assert!(
+            !routes.contains_key("failsite"),
+            "failed site must not be routed"
+        );
     }
 
     // ── T9: Concurrent provisions ─────────────────────────────────────────────
@@ -1830,7 +1824,8 @@ mod tests {
                 let a = acc.clone();
                 let subdomain = Subdomain::new(format!("concurrent{i}")).unwrap();
                 tokio::spawn(async move {
-                    p.provision(&a, &site.id, &subdomain, &personal_starter()).await
+                    p.provision(&a, &site.id, &subdomain, &personal_starter())
+                        .await
                 })
             })
             .collect();
@@ -1857,7 +1852,11 @@ mod tests {
         assert_eq!(paths.len(), k, "all site_paths must be distinct");
 
         // All K subdomains are routed exactly once
-        assert_eq!(router.route_count().await, k, "each subdomain must have exactly one route");
+        assert_eq!(
+            router.route_count().await,
+            k,
+            "each subdomain must have exactly one route"
+        );
     }
 
     // ── T10: Collision rejection ──────────────────────────────────────────────
@@ -1891,7 +1890,9 @@ mod tests {
         // Manually register and attempt a second provision for the same account+site
         // By transitioning back to Provisioning then re-running
         registry.set_status(&site.id, SiteStatus::Failed).unwrap();
-        registry.set_status(&site.id, SiteStatus::Provisioning).unwrap();
+        registry
+            .set_status(&site.id, SiteStatus::Provisioning)
+            .unwrap();
 
         let result = provisioner
             .provision(&acc, &site.id, &sub("dupe2"), &personal_starter())

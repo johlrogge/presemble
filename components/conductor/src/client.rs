@@ -1,6 +1,8 @@
 use nng::options::Options;
 
-use crate::protocol::{Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response};
+use crate::protocol::{
+    Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response,
+};
 
 /// Client for sending commands to the conductor via nng REQ socket.
 ///
@@ -30,13 +32,15 @@ impl ConductorClient {
         socket
             .dial(url)
             .map_err(|e| format!("failed to connect to conductor at {url}: {e}"))?;
-        Ok(Self { socket: std::sync::Mutex::new(socket) })
+        Ok(Self {
+            socket: std::sync::Mutex::new(socket),
+        })
     }
 
     /// Send a command and receive a response.
     pub fn send(&self, cmd: &Command) -> Result<Response, String> {
-        let data = serde_json::to_vec(cmd)
-            .map_err(|e| format!("failed to serialize command: {e}"))?;
+        let data =
+            serde_json::to_vec(cmd).map_err(|e| format!("failed to serialize command: {e}"))?;
         let msg = nng::Message::from(data.as_slice());
         let socket = self.socket.lock().unwrap();
         socket
@@ -45,8 +49,7 @@ impl ConductorClient {
         let reply = socket
             .recv()
             .map_err(|e| format!("failed to receive reply: {e}"))?;
-        serde_json::from_slice(&reply)
-            .map_err(|e| format!("failed to deserialize response: {e}"))
+        serde_json::from_slice(&reply).map_err(|e| format!("failed to deserialize response: {e}"))
     }
 
     /// Convenience: ping the conductor.
@@ -68,7 +71,9 @@ impl ConductorClient {
 
     /// Get the schema source for a given stem.
     pub fn get_schema_source(&self, stem: &str) -> Result<Option<String>, String> {
-        match self.send(&Command::GetGrammar { stem: stem.to_string() })? {
+        match self.send(&Command::GetGrammar {
+            stem: stem.to_string(),
+        })? {
             Response::SchemaSource(src) => Ok(src),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),
@@ -76,7 +81,10 @@ impl ConductorClient {
     }
 
     /// Get the in-memory text of a document (editor buffer or disk fallback).
-    pub fn get_document_text(&self, path: &editorial_types::SitePath) -> Result<Option<String>, String> {
+    pub fn get_document_text(
+        &self,
+        path: &editorial_types::SitePath,
+    ) -> Result<Option<String>, String> {
         match self.send(&Command::GetDocumentText { path: path.clone() })? {
             Response::DocumentText(text) => Ok(text),
             Response::Error(e) => Err(e),
@@ -104,7 +112,9 @@ impl ConductorClient {
 
     /// List link options for completions for a given schema stem.
     pub fn list_link_options(&self, stem: &str) -> Result<Vec<LinkOption>, String> {
-        match self.send(&Command::ListLinkOptions { stem: stem.to_string() })? {
+        match self.send(&Command::ListLinkOptions {
+            stem: stem.to_string(),
+        })? {
             Response::LinkOptions(opts) => Ok(opts),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),
@@ -122,7 +132,9 @@ impl ConductorClient {
 
     /// List files that depend on a given schema stem.
     pub fn list_dependents(&self, stem: &str) -> Result<Vec<DependentFile>, String> {
-        match self.send(&Command::ListDependents { stem: stem.to_string() })? {
+        match self.send(&Command::ListDependents {
+            stem: stem.to_string(),
+        })? {
             Response::Dependents(deps) => Ok(deps),
             Response::Error(e) => Err(e),
             other => Err(format!("unexpected response: {other:?}")),
@@ -194,8 +206,8 @@ pub fn ensure_conductor(site_dir: &std::path::Path) -> Result<ConductorClient, S
     }
 
     // Start conductor daemon as background process
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("cannot find presemble executable: {e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("cannot find presemble executable: {e}"))?;
 
     let child = std::process::Command::new(&exe)
         .arg("conductor")
@@ -371,9 +383,13 @@ mod tests {
 
         // A valid event must still be delivered after the decode error — the
         // subscription survives undecodable messages.
-        let event = ConductorEvent::BuildFailed { error_pages: vec!["/x".to_string()] };
+        let event = ConductorEvent::BuildFailed {
+            error_pages: vec!["/x".to_string()],
+        };
         let bytes = serde_json::to_vec(&event).unwrap();
-        publisher.send(nng::Message::from(bytes.as_slice())).unwrap();
+        publisher
+            .send(nng::Message::from(bytes.as_slice()))
+            .unwrap();
 
         // Earlier garbage sends may still be queued; skip those decode errors.
         let mut received = None;

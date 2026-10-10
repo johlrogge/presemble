@@ -12,13 +12,25 @@ struct Mode {
 
 impl Mode {
     fn nested(self, ctx: InlineContext) -> Mode {
-        Mode { ctx, single_line: self.single_line }
+        Mode {
+            ctx,
+            single_line: self.single_line,
+        }
     }
 }
 
 pub(super) fn normalise(items: Vec<Inline>, ctx: InlineContext) -> Vec<Inline> {
-    let mut out = normalise_in(items, Mode { ctx, single_line: ctx.is_single_line() });
-    if matches!(ctx, InlineContext::Heading | InlineContext::Paragraph | InlineContext::Cell) {
+    let mut out = normalise_in(
+        items,
+        Mode {
+            ctx,
+            single_line: ctx.is_single_line(),
+        },
+    );
+    if matches!(
+        ctx,
+        InlineContext::Heading | InlineContext::Paragraph | InlineContext::Cell
+    ) {
         trim_edges(&mut out);
     }
     out
@@ -80,13 +92,25 @@ fn normalise_in(items: Vec<Inline>, mode: Mode) -> Vec<Inline> {
             }
             Inline::Emph(inner) => push_emphasis(&mut out, inner, mode, Kind::Emph),
             Inline::Strong(inner) => push_emphasis(&mut out, inner, mode, Kind::Strong),
-            Inline::Link { destination, title, text } => {
+            Inline::Link {
+                destination,
+                title,
+                text,
+            } => {
                 let text = normalise_in(text.into_items(), mode.nested(InlineContext::LinkText));
-                out.push(Inline::Link { destination, title, text: Inlines::from_normal(text) });
+                out.push(Inline::Link {
+                    destination,
+                    title,
+                    text: Inlines::from_normal(text),
+                });
             }
             Inline::Image { source, title, alt } => {
                 let alt = normalise_in(alt.into_items(), mode.nested(InlineContext::Alt));
-                out.push(Inline::Image { source, title, alt: Inlines::from_normal(alt) });
+                out.push(Inline::Image {
+                    source,
+                    title,
+                    alt: Inlines::from_normal(alt),
+                });
             }
             other @ (Inline::LineBreak | Inline::Html(_) | Inline::Comment(_)) => out.push(other),
         }
@@ -100,7 +124,11 @@ fn normalise_in(items: Vec<Inline>, mode: Mode) -> Vec<Inline> {
             Inline::Text(s) => {
                 let s = tidy_line_breaks(&s, mode.single_line);
                 // N5: a reader strips the spaces that start a line.
-                let s = if after_break { s.trim_start_matches([' ', '\t']).to_string() } else { s };
+                let s = if after_break {
+                    s.trim_start_matches([' ', '\t']).to_string()
+                } else {
+                    s
+                };
                 if !s.is_empty() {
                     result.push(Inline::Text(s));
                 }
@@ -173,7 +201,11 @@ fn push_emphasis_node(out: &mut Vec<Inline>, mut inner: Vec<Inline>, mut kind: K
         return;
     }
     if let [only @ (Inline::Emph(_) | Inline::Strong(_))] = inner.as_slice() {
-        let only_kind = if matches!(only, Inline::Emph(_)) { Kind::Emph } else { Kind::Strong };
+        let only_kind = if matches!(only, Inline::Emph(_)) {
+            Kind::Emph
+        } else {
+            Kind::Strong
+        };
         let content = match inner.pop() {
             Some(Inline::Emph(c) | Inline::Strong(c)) => c.into_items(),
             _ => unreachable!("checked above"),
@@ -259,8 +291,16 @@ fn tidy_line_breaks(s: &str, single_line: bool) -> String {
         .iter()
         .enumerate()
         .map(|(i, part)| {
-            let part = if i > 0 { part.trim_start_matches([' ', '\t']) } else { part };
-            if i < last { part.trim_end_matches([' ', '\t']) } else { part }
+            let part = if i > 0 {
+                part.trim_start_matches([' ', '\t'])
+            } else {
+                part
+            };
+            if i < last {
+                part.trim_end_matches([' ', '\t'])
+            } else {
+                part
+            }
         })
         .enumerate()
         .filter(|(i, part)| *i == 0 || *i == last || !part.is_empty())
@@ -288,7 +328,15 @@ mod tests {
     #[test]
     fn text_nodes_merge_and_empty_text_is_dropped() {
         let got = norm(
-            vec![t("a"), t(""), t("b"), Inline::Code("x".into()), t(""), t("c"), t("d")],
+            vec![
+                t("a"),
+                t(""),
+                t("b"),
+                Inline::Code("x".into()),
+                t(""),
+                t("c"),
+                t("d"),
+            ],
             InlineContext::Paragraph,
         );
         assert_eq!(got, vec![t("ab"), Inline::Code("x".into()), t("cd")]);
@@ -328,7 +376,11 @@ mod tests {
         );
         assert_eq!(
             got,
-            vec![t("x\t"), Inline::Strong(p(vec![Inline::Code("y".into())])), t(" z")]
+            vec![
+                t("x\t"),
+                Inline::Strong(p(vec![Inline::Code("y".into())])),
+                t(" z")
+            ]
         );
 
         // All-whitespace content leaves plain text behind.
@@ -347,18 +399,33 @@ mod tests {
         );
         assert_eq!(
             got,
-            vec![t("a "), Inline::Emph(p(vec![Inline::Strong(p(vec![t("x")]))]))]
+            vec![
+                t("a "),
+                Inline::Emph(p(vec![Inline::Strong(p(vec![t("x")]))]))
+            ]
         );
     }
 
     #[test]
     fn whitespace_around_soft_break_is_trimmed() {
-        assert_eq!(norm(vec![t("a \t\n  b")], InlineContext::Paragraph), vec![t("a\nb")]);
+        assert_eq!(
+            norm(vec![t("a \t\n  b")], InlineContext::Paragraph),
+            vec![t("a\nb")]
+        );
         // After a merge, too.
-        assert_eq!(norm(vec![t("a "), t("\n b")], InlineContext::Paragraph), vec![t("a\nb")]);
+        assert_eq!(
+            norm(vec![t("a "), t("\n b")], InlineContext::Paragraph),
+            vec![t("a\nb")]
+        );
         // A paragraph never holds a blank line.
-        assert_eq!(norm(vec![t("a\n\n\nb")], InlineContext::Paragraph), vec![t("a\nb")]);
-        assert_eq!(norm(vec![t("a\r\nb")], InlineContext::Paragraph), vec![t("a\nb")]);
+        assert_eq!(
+            norm(vec![t("a\n\n\nb")], InlineContext::Paragraph),
+            vec![t("a\nb")]
+        );
+        assert_eq!(
+            norm(vec![t("a\r\nb")], InlineContext::Paragraph),
+            vec![t("a\nb")]
+        );
     }
 
     #[test]
@@ -368,11 +435,17 @@ mod tests {
             assert_eq!(norm(vec![t("a \n b")], ctx), vec![t("a b")]);
             assert_eq!(norm(vec![t("a\r\nb")], ctx), vec![t("a b")]);
             // A hard break cannot occur here either.
-            assert_eq!(norm(vec![t("a"), Inline::LineBreak, t("b")], ctx), vec![t("a b")]);
+            assert_eq!(
+                norm(vec![t("a"), Inline::LineBreak, t("b")], ctx),
+                vec![t("a b")]
+            );
         }
         // A paragraph keeps both.
         assert_eq!(
-            norm(vec![t("a"), Inline::LineBreak, t("b\nc")], InlineContext::Paragraph),
+            norm(
+                vec![t("a"), Inline::LineBreak, t("b\nc")],
+                InlineContext::Paragraph
+            ),
             vec![t("a"), Inline::LineBreak, t("b\nc")]
         );
     }
@@ -387,7 +460,10 @@ mod tests {
             ],
             InlineContext::Paragraph,
         );
-        assert_eq!(got, vec![Inline::Code("a b".into()), Inline::Code("c d".into())]);
+        assert_eq!(
+            got,
+            vec![Inline::Code("a b".into()), Inline::Code("c d".into())]
+        );
     }
 
     /// Content that has not been through the top-level rules (N7).
@@ -397,7 +473,11 @@ mod tests {
 
     #[test]
     fn top_level_run_edges_are_trimmed() {
-        for ctx in [InlineContext::Heading, InlineContext::Paragraph, InlineContext::Cell] {
+        for ctx in [
+            InlineContext::Heading,
+            InlineContext::Paragraph,
+            InlineContext::Cell,
+        ] {
             assert_eq!(norm(vec![t(" \n a b \t\n")], ctx), vec![t("a b")]);
             assert_eq!(norm(vec![t("  x  ")], ctx), vec![t("x")]);
             assert!(norm(vec![t(" \t\n ")], ctx).is_empty());
@@ -407,18 +487,31 @@ mod tests {
                 vec![Inline::Emph(raw(vec![t("x")]))]
             );
             // U+00A0 is not trimmed: CommonMark strips only spaces and tabs.
-            assert_eq!(norm(vec![t("\u{a0}x\u{a0}")], ctx), vec![t("\u{a0}x\u{a0}")]);
+            assert_eq!(
+                norm(vec![t("\u{a0}x\u{a0}")], ctx),
+                vec![t("\u{a0}x\u{a0}")]
+            );
         }
         // Hard breaks at the edges go, and the text behind them is trimmed.
         assert_eq!(
             norm(
-                vec![Inline::LineBreak, t(" "), Inline::LineBreak, t("a"), Inline::LineBreak, t(" ")],
+                vec![
+                    Inline::LineBreak,
+                    t(" "),
+                    Inline::LineBreak,
+                    t("a"),
+                    Inline::LineBreak,
+                    t(" ")
+                ],
                 InlineContext::Paragraph
             ),
             vec![t("a")]
         );
         // Not at the top level: link text and alt text keep their edges.
-        assert_eq!(norm(vec![t(" x ")], InlineContext::LinkText), vec![t(" x ")]);
+        assert_eq!(
+            norm(vec![t(" x ")], InlineContext::LinkText),
+            vec![t(" x ")]
+        );
         assert_eq!(norm(vec![t(" x ")], InlineContext::Alt), vec![t(" x ")]);
         let link = Inline::Link {
             destination: super::super::LinkDestination::new("/x"),
@@ -426,7 +519,9 @@ mod tests {
             text: raw(vec![t(" x ")]),
         };
         let got = norm(vec![link], InlineContext::Paragraph);
-        let [Inline::Link { text, .. }] = got.as_slice() else { panic!("{got:?}") };
+        let [Inline::Link { text, .. }] = got.as_slice() else {
+            panic!("{got:?}")
+        };
         assert_eq!(text.as_slice(), &[t(" x ")]);
     }
 
@@ -438,11 +533,20 @@ mod tests {
         let para = InlineContext::Paragraph;
         // Emph of Emph, Strong of Strong: one node.
         assert_eq!(norm(vec![em(vec![em(x())])], para), vec![em(x())]);
-        assert_eq!(norm(vec![strong(vec![strong(x())])], para), vec![strong(x())]);
+        assert_eq!(
+            norm(vec![strong(vec![strong(x())])], para),
+            vec![strong(x())]
+        );
         // Strong of Emph: Emph of Strong.
-        assert_eq!(norm(vec![strong(vec![em(x())])], para), vec![em(vec![strong(x())])]);
+        assert_eq!(
+            norm(vec![strong(vec![em(x())])], para),
+            vec![em(vec![strong(x())])]
+        );
         // Emph of Strong stays; so does a node with more than one child.
-        assert_eq!(norm(vec![em(vec![strong(x())])], para), vec![em(vec![strong(x())])]);
+        assert_eq!(
+            norm(vec![em(vec![strong(x())])], para),
+            vec![em(vec![strong(x())])]
+        );
         let two = vec![em(x()), t(" y")];
         assert_eq!(norm(vec![strong(two.clone())], para), vec![strong(two)]);
         // Through every level.
@@ -458,14 +562,20 @@ mod tests {
         let em = |c: Vec<Inline>| Inline::Emph(raw(c));
         let strong = |c: Vec<Inline>| Inline::Strong(raw(c));
         let para = InlineContext::Paragraph;
-        assert_eq!(norm(vec![em(vec![t("a")]), em(vec![t("b")])], para), vec![em(vec![t("ab")])]);
+        assert_eq!(
+            norm(vec![em(vec![t("a")]), em(vec![t("b")])], para),
+            vec![em(vec![t("ab")])]
+        );
         assert_eq!(
             norm(vec![strong(vec![t("a")]), strong(vec![t("b")])], para),
             vec![strong(vec![t("ab")])]
         );
         // Empty text between them does not keep them apart; three merge into one.
         assert_eq!(
-            norm(vec![em(vec![t("a")]), t(""), em(vec![t("b")]), em(vec![t("c")])], para),
+            norm(
+                vec![em(vec![t("a")]), t(""), em(vec![t("b")]), em(vec![t("c")])],
+                para
+            ),
             vec![em(vec![t("abc")])]
         );
         // Different kinds, or anything between, stay apart.
@@ -476,12 +586,18 @@ mod tests {
         // The merged content is normalised again: nested touching emphasis
         // merges, at every level.
         assert_eq!(
-            norm(vec![em(vec![t("x "), em(vec![t("a")]), em(vec![t("b")])])], para),
+            norm(
+                vec![em(vec![t("x "), em(vec![t("a")]), em(vec![t("b")])])],
+                para
+            ),
             vec![em(vec![t("x "), em(vec![t("ab")])])]
         );
         assert_eq!(
             norm(
-                vec![em(vec![strong(vec![t("a")])]), em(vec![strong(vec![t("b")])])],
+                vec![
+                    em(vec![strong(vec![t("a")])]),
+                    em(vec![strong(vec![t("b")])])
+                ],
                 para
             ),
             vec![em(vec![strong(vec![t("ab")])])]
@@ -489,7 +605,10 @@ mod tests {
         // Together with N8: two `Strong(Emph)` become `Emph(Strong)` and merge.
         assert_eq!(
             norm(
-                vec![strong(vec![em(vec![t("x")])]), strong(vec![em(vec![t("y")])])],
+                vec![
+                    strong(vec![em(vec![t("x")])]),
+                    strong(vec![em(vec![t("y")])])
+                ],
                 para
             ),
             vec![em(vec![strong(vec![t("xy")])])]
@@ -505,12 +624,18 @@ mod tests {
     fn whitespace_after_hard_break_is_trimmed() {
         let code = Inline::Code("x".into());
         assert_eq!(
-            norm(vec![t("a"), Inline::LineBreak, t("  \tb")], InlineContext::Paragraph),
+            norm(
+                vec![t("a"), Inline::LineBreak, t("  \tb")],
+                InlineContext::Paragraph
+            ),
             vec![t("a"), Inline::LineBreak, t("b")]
         );
         // Text that is only whitespace goes, and so does what moves outside.
         assert_eq!(
-            norm(vec![t("a"), Inline::LineBreak, t(" "), code.clone()], InlineContext::Paragraph),
+            norm(
+                vec![t("a"), Inline::LineBreak, t(" "), code.clone()],
+                InlineContext::Paragraph
+            ),
             vec![t("a"), Inline::LineBreak, code]
         );
         assert_eq!(
@@ -522,7 +647,10 @@ mod tests {
         );
         // Whitespace before the break stays.
         assert_eq!(
-            norm(vec![t("a "), Inline::LineBreak, t("b")], InlineContext::Paragraph),
+            norm(
+                vec![t("a "), Inline::LineBreak, t("b")],
+                InlineContext::Paragraph
+            ),
             vec![t("a "), Inline::LineBreak, t("b")]
         );
         // Inside nested runs, too.
@@ -532,7 +660,9 @@ mod tests {
             text: raw(vec![t("a"), Inline::LineBreak, t(" b")]),
         };
         let got = norm(vec![link], InlineContext::Paragraph);
-        let [Inline::Link { text, .. }] = got.as_slice() else { panic!("{got:?}") };
+        let [Inline::Link { text, .. }] = got.as_slice() else {
+            panic!("{got:?}")
+        };
         assert_eq!(text.as_slice(), &[t("a"), Inline::LineBreak, t("b")]);
     }
 
@@ -544,7 +674,9 @@ mod tests {
             text: Inlines::new(vec![t("a\nb")], InlineContext::LinkText),
         };
         let got = norm(vec![link], InlineContext::Heading);
-        let [Inline::Link { text, .. }] = got.as_slice() else { panic!("{got:?}") };
+        let [Inline::Link { text, .. }] = got.as_slice() else {
+            panic!("{got:?}")
+        };
         assert_eq!(text.as_slice(), &[t("a b")]);
     }
 }

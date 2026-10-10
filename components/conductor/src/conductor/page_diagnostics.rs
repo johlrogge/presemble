@@ -14,9 +14,12 @@
 //! no lines, so no line is given.
 
 use super::*;
-use content::{AddressContainer, ContentElement, Document, Location, NestedStep, Severity, ValidationDiagnostic};
+use content::{
+    AddressContainer, ContentElement, Document, Location, NestedStep, Severity,
+    ValidationDiagnostic,
+};
 use node_store::{NodeId, NodeStore};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use template::constants::{ATTR_ADDRESS, ATTR_PATH, ATTR_SLOT};
 use template::dom::{Element, Form, Node};
 
@@ -29,7 +32,10 @@ enum Target {
     /// A block: the top-level element with this address, and inside it the
     /// element with this path (the nearest one on the way, if the block itself
     /// renders none).
-    Block { address: String, path: Vec<NestedStep> },
+    Block {
+        address: String,
+        path: Vec<NestedStep>,
+    },
     /// The first element of a slot.
     Slot(String),
     /// No element: the page lists it.
@@ -64,8 +70,16 @@ fn target(
     file: &str,
     addresses: &mut HashMap<String, Vec<Option<String>>>,
 ) -> Target {
-    let slot_fallback = d.slot.as_ref().map(|s| Target::Slot(s.as_str().to_string()));
-    let Some(Location { container, index, path }) = &d.location else {
+    let slot_fallback = d
+        .slot
+        .as_ref()
+        .map(|s| Target::Slot(s.as_str().to_string()));
+    let Some(Location {
+        container,
+        index,
+        path,
+    }) = &d.location
+    else {
         return slot_fallback.unwrap_or(Target::Unplaced);
     };
     let (key, container_address, elements) = match container {
@@ -74,7 +88,11 @@ fn target(
             let Some(slot) = doc.preamble.iter().find(|s| s.name == *name) else {
                 return Target::Unplaced;
             };
-            (name.as_str().to_string(), AddressContainer::Slot(name.as_str()), &slot.elements)
+            (
+                name.as_str().to_string(),
+                AddressContainer::Slot(name.as_str()),
+                &slot.elements,
+            )
         }
         // Never rendered.
         content::Container::Unassigned => return Target::Unplaced,
@@ -84,7 +102,10 @@ fn target(
         content::block_addresses(file, container_address, &blocks)
     });
     match of_container.get(*index).cloned().flatten() {
-        Some(address) => Target::Block { address, path: path.clone() },
+        Some(address) => Target::Block {
+            address,
+            path: path.clone(),
+        },
         // A block with no address (a link expression, an ambiguous heading)
         // renders no element of its own: its slot, if it has one.
         None => match container {
@@ -113,14 +134,26 @@ fn locate(nodes: &[Node], matches: &dyn Fn(&Element) -> bool) -> Option<Vec<usiz
 
 fn element_at<'a>(nodes: &'a [Node], at: &[usize]) -> Option<&'a Element> {
     let (first, rest) = at.split_first()?;
-    let Node::Element(element) = nodes.get(*first)? else { return None };
-    if rest.is_empty() { Some(element) } else { element_at(&element.children, rest) }
+    let Node::Element(element) = nodes.get(*first)? else {
+        return None;
+    };
+    if rest.is_empty() {
+        Some(element)
+    } else {
+        element_at(&element.children, rest)
+    }
 }
 
 fn element_at_mut<'a>(nodes: &'a mut [Node], at: &[usize]) -> Option<&'a mut Element> {
     let (first, rest) = at.split_first()?;
-    let Node::Element(element) = nodes.get_mut(*first)? else { return None };
-    if rest.is_empty() { Some(element) } else { element_at_mut(&mut element.children, rest) }
+    let Node::Element(element) = nodes.get_mut(*first)? else {
+        return None;
+    };
+    if rest.is_empty() {
+        Some(element)
+    } else {
+        element_at_mut(&mut element.children, rest)
+    }
 }
 
 fn has_attr(element: &Element, name: &str, value: &str) -> bool {
@@ -138,7 +171,9 @@ fn resolve(nodes: &[Node], target: &Target) -> Option<Vec<usize>> {
             // The block itself, or the nearest enclosing element that has a path.
             for depth in (1..=path.len()).rev() {
                 let wanted = path_text(&path[..depth]);
-                if let Some(below) = locate(&top_element.children, &|e| has_attr(e, ATTR_PATH, &wanted)) {
+                if let Some(below) =
+                    locate(&top_element.children, &|e| has_attr(e, ATTR_PATH, &wanted))
+                {
                     return Some(top.iter().copied().chain(below).collect());
                 }
             }
@@ -171,7 +206,10 @@ impl PageDiagnostics {
         for (at, diagnostics) in placed {
             if let Some(element) = element_at_mut(nodes, &at) {
                 let list: Vec<Value> = diagnostics.iter().map(|d| diagnostic_json(d)).collect();
-                element.attrs.push((ATTR_DIAGNOSTICS.to_string(), Form::Str(Value::Array(list).to_string())));
+                element.attrs.push((
+                    ATTR_DIAGNOSTICS.to_string(),
+                    Form::Str(Value::Array(list).to_string()),
+                ));
             }
         }
         unplaced
@@ -179,7 +217,12 @@ impl PageDiagnostics {
 
     /// The page script: the counts of every diagnostic, and the unplaced ones.
     fn script(&self, unplaced: &[&ValidationDiagnostic]) -> String {
-        let count = |severity: Severity| self.diagnostics.iter().filter(|d| d.severity == severity).count();
+        let count = |severity: Severity| {
+            self.diagnostics
+                .iter()
+                .filter(|d| d.severity == severity)
+                .count()
+        };
         let page = json!({
             "errors": count(Severity::Error),
             "warnings": count(Severity::Warning),
@@ -196,7 +239,8 @@ impl Conductor {
     /// `None` when the document cannot be decoded.
     fn validate_page(&self, store: &NodeStore, doc_root: NodeId) -> Option<PageDiagnostics> {
         let doc = node_store_bridge::content_bridge::store_to_document(store, doc_root).ok()?;
-        let find = |name: &str| node_store_bridge::content_bridge::find_attr_text(store, doc_root, name);
+        let find =
+            |name: &str| node_store_bridge::content_bridge::find_attr_text(store, doc_root, name);
         let stem = find("stem")?;
         let file = find("file").unwrap_or_default();
         let key = if find("page-kind").as_deref() == Some("collection") {
@@ -205,21 +249,37 @@ impl Conductor {
             // The item schema, or the stem's own.
             let cache = self.schema_cache.read().unwrap_or_else(|e| e.into_inner());
             let item_key = format!("{stem}/item");
-            if cache.contains_key(&item_key) { item_key } else { stem.clone() }
+            if cache.contains_key(&item_key) {
+                item_key
+            } else {
+                stem.clone()
+            }
         };
         // A page with no schema (template-only) has nothing to validate.
         let diagnostics = match self.grammar_for(&key) {
             Some(grammar) => content::validate(&doc, &grammar).diagnostics,
             None => Vec::new(),
         };
-        Some(PageDiagnostics { doc, file, diagnostics })
+        Some(PageDiagnostics {
+            doc,
+            file,
+            diagnostics,
+        })
     }
 
     /// The grammar of the schema cached under `key`, parsed once per source.
     fn grammar_for(&self, key: &str) -> Option<Arc<schema::Grammar>> {
-        let source = self.schema_cache.read().unwrap_or_else(|e| e.into_inner()).get(key).cloned()?;
-        if let Some((parsed_from, grammar)) =
-            self.parsed_grammars.read().unwrap_or_else(|e| e.into_inner()).get(key)
+        let source = self
+            .schema_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()?;
+        if let Some((parsed_from, grammar)) = self
+            .parsed_grammars
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
             && *parsed_from == source
         {
             return Some(grammar.clone());
@@ -234,7 +294,12 @@ impl Conductor {
 
     /// The editorial HTML of a rendered page: its nodes serialized, with the
     /// page's diagnostics attached where they arise, and the page script.
-    pub(super) fn editorial_html(&self, store: &NodeStore, doc_root: NodeId, mut nodes: Vec<Node>) -> String {
+    pub(super) fn editorial_html(
+        &self,
+        store: &NodeStore,
+        doc_root: NodeId,
+        mut nodes: Vec<Node>,
+    ) -> String {
         let Some(page) = self.validate_page(store, doc_root) else {
             return template::serialize_nodes(&nodes);
         };
@@ -267,7 +332,9 @@ mod tests {
         std::fs::write(root.join("schemas/post/item.md"), SCHEMA).unwrap();
         std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
         std::fs::write(root.join("content/post/x.md"), content).unwrap();
-        let repo = site_repository::SiteRepository::builder().from_dir(root).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
         let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
         (tmp, conductor)
     }
@@ -275,7 +342,9 @@ mod tests {
     /// The editorial page of `content`.
     fn editorial_page(content: &str) -> String {
         let (_tmp, conductor) = conductor_with(content);
-        conductor.render_page("/post/x", &RenderMode::View).expect("rendered")
+        conductor
+            .render_page("/post/x", &RenderMode::View)
+            .expect("rendered")
     }
 
     /// The opening tags in `html` that carry the attribute `name`.
@@ -288,12 +357,18 @@ mod tests {
     }
 
     fn unescape(attr: &str) -> String {
-        attr.replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+        attr.replace("&quot;", "\"")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
     }
 
     /// The diagnostics an element carries.
     fn carried(tag: &str) -> Vec<Value> {
-        let start = tag.find("data-presemble-diagnostics=\"").expect("the attribute") + 28;
+        let start = tag
+            .find("data-presemble-diagnostics=\"")
+            .expect("the attribute")
+            + 28;
         let end = start + tag[start..].find('"').expect("closed");
         serde_json::from_str(&unescape(&tag[start..end])).expect("a JSON array")
     }
@@ -307,7 +382,10 @@ mod tests {
     }
 
     fn messages(diagnostics: &[Value]) -> Vec<String> {
-        diagnostics.iter().map(|d| d["message"].as_str().unwrap_or_default().to_string()).collect()
+        diagnostics
+            .iter()
+            .map(|d| d["message"].as_str().unwrap_or_default().to_string())
+            .collect()
     }
 
     #[test]
@@ -316,11 +394,18 @@ mod tests {
         let tags = tags_with(&html, "data-presemble-diagnostics");
         assert_eq!(tags.len(), 1, "{tags:#?}");
         assert!(tags[0].starts_with("<p "), "{}", tags[0]);
-        assert!(tags[0].contains("&quot;paragraph&quot; 1"), "the second paragraph: {}", tags[0]);
+        assert!(
+            tags[0].contains("&quot;paragraph&quot; 1"),
+            "the second paragraph: {}",
+            tags[0]
+        );
         let diagnostics = carried(&tags[0]);
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
         assert_eq!(diagnostics[0]["severity"], "error");
-        assert!(messages(&diagnostics)[0].contains("inline HTML"), "{diagnostics:#?}");
+        assert!(
+            messages(&diagnostics)[0].contains("inline HTML"),
+            "{diagnostics:#?}"
+        );
     }
 
     #[test]
@@ -330,13 +415,26 @@ mod tests {
         );
         let tags = tags_with(&html, "data-presemble-diagnostics");
         assert_eq!(tags.len(), 2, "{tags:#?}");
-        let in_item = tags.iter().find(|t| t.contains("data-presemble-path=\"i1/b0\"")).expect("the item paragraph");
-        let in_quote = tags.iter().find(|t| t.contains("data-presemble-path=\"b1\"")).expect("the quote paragraph");
-        assert!(in_item.starts_with("<p ") && in_quote.starts_with("<p "), "{tags:#?}");
+        let in_item = tags
+            .iter()
+            .find(|t| t.contains("data-presemble-path=\"i1/b0\""))
+            .expect("the item paragraph");
+        let in_quote = tags
+            .iter()
+            .find(|t| t.contains("data-presemble-path=\"b1\""))
+            .expect("the quote paragraph");
+        assert!(
+            in_item.starts_with("<p ") && in_quote.starts_with("<p "),
+            "{tags:#?}"
+        );
         assert!(messages(&carried(in_item))[0].contains("inline HTML"));
         assert!(messages(&carried(in_quote))[0].contains("inline HTML"));
         // The list and the quote themselves carry nothing.
-        assert!(tags.iter().all(|t| !t.starts_with("<ul") && !t.starts_with("<blockquote")), "{tags:#?}");
+        assert!(
+            tags.iter()
+                .all(|t| !t.starts_with("<ul") && !t.starts_with("<blockquote")),
+            "{tags:#?}"
+        );
     }
 
     #[test]
@@ -344,25 +442,45 @@ mod tests {
         let html = editorial_page("----\n\nBody.\n");
         let tags = tags_with(&html, "data-presemble-diagnostics");
         assert_eq!(tags.len(), 1, "{tags:#?}");
-        assert!(tags[0].contains("data-presemble-slot=\"title\""), "the title placeholder: {}", tags[0]);
+        assert!(
+            tags[0].contains("data-presemble-slot=\"title\""),
+            "the title placeholder: {}",
+            tags[0]
+        );
         assert!(tags[0].contains("data-presemble-hint"), "{}", tags[0]);
         let diagnostics = carried(&tags[0]);
         assert!(
-            messages(&diagnostics).iter().any(|m| m.contains("missing required heading")),
+            messages(&diagnostics)
+                .iter()
+                .any(|m| m.contains("missing required heading")),
             "{diagnostics:#?}"
         );
-        assert!(page_script(&html)["unplaced"].as_array().expect("a list").is_empty());
+        assert!(
+            page_script(&html)["unplaced"]
+                .as_array()
+                .expect("a list")
+                .is_empty()
+        );
     }
 
     #[test]
     fn editorial_page_lists_unassigned_content_and_unplaced_diagnostics() {
         let html = editorial_page("# Title\n\nStray paragraph.\n\n----\n\nBody.\n");
-        assert!(tags_with(&html, "data-presemble-diagnostics").is_empty(), "nothing rendered carries it");
+        assert!(
+            tags_with(&html, "data-presemble-diagnostics").is_empty(),
+            "nothing rendered carries it"
+        );
         let script = page_script(&html);
         let unplaced = script["unplaced"].as_array().expect("a list");
         assert_eq!(unplaced.len(), 1, "{script}");
         assert_eq!(unplaced[0]["severity"], "error");
-        assert!(unplaced[0]["message"].as_str().unwrap_or_default().contains("Stray paragraph"), "{script}");
+        assert!(
+            unplaced[0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Stray paragraph"),
+            "{script}"
+        );
     }
 
     #[test]
@@ -376,7 +494,11 @@ mod tests {
         assert_eq!(script["errors"], 2, "{script}");
         assert_eq!(script["warnings"], 1, "{script}");
         // Every diagnostic is counted, placed or not; the unplaced are listed.
-        assert_eq!(script["unplaced"].as_array().expect("a list").len(), 2, "{script}");
+        assert_eq!(
+            script["unplaced"].as_array().expect("a list").len(),
+            2,
+            "{script}"
+        );
         assert_eq!(tags_with(&html, "data-presemble-diagnostics").len(), 1);
     }
 
@@ -385,14 +507,23 @@ mod tests {
     /// attribute) and run code in the editorial page.
     #[test]
     fn a_message_quoting_a_script_end_tag_cannot_break_out() {
-        let html = editorial_page("# Title\n\n----\n\nFine </script><script>alert(1)</script> text.\n");
+        let html =
+            editorial_page("# Title\n\n----\n\nFine </script><script>alert(1)</script> text.\n");
 
         // The page script: one end tag after its opening tag, and the JSON
         // reads back as the original message.
         let open = "<script type=\"application/json\" id=\"presemble-diagnostics\">";
         let after_open = &html[html.find(open).expect("the page script") + open.len()..];
-        assert_eq!(after_open.matches("</script>").count(), 1, "only ours ends the script: {after_open}");
-        assert_eq!(html.matches("</script>").count(), 1, "no other end tag anywhere: {html}");
+        assert_eq!(
+            after_open.matches("</script>").count(),
+            1,
+            "only ours ends the script: {after_open}"
+        );
+        assert_eq!(
+            html.matches("</script>").count(),
+            1,
+            "no other end tag anywhere: {html}"
+        );
         let script = page_script(&html);
         assert_eq!(script["errors"], 1, "{script}");
 
@@ -400,9 +531,19 @@ mod tests {
         // HTML holds none of the quoted tags.
         let tags = tags_with(&html, "data-presemble-diagnostics");
         assert_eq!(tags.len(), 1, "{tags:#?}");
-        assert!(!tags[0].contains("</script>") && !tags[0].contains("<script>"), "{}", tags[0]);
-        let message = carried(&tags[0])[0]["message"].as_str().expect("a message").to_string();
-        assert!(message.contains("</script><script>alert(1)</script>"), "{message}");
+        assert!(
+            !tags[0].contains("</script>") && !tags[0].contains("<script>"),
+            "{}",
+            tags[0]
+        );
+        let message = carried(&tags[0])[0]["message"]
+            .as_str()
+            .expect("a message")
+            .to_string();
+        assert!(
+            message.contains("</script><script>alert(1)</script>"),
+            "{message}"
+        );
         assert!(
             script["unplaced"].as_array().expect("a list").is_empty(),
             "placed on its paragraph: {script}"
@@ -416,8 +557,16 @@ mod tests {
         let html = editorial_page("# Title\n\n----\n\nIntro.\n\n- fine\n- a <b>x</b> b\n");
         let tags = tags_with(&html, "data-presemble-diagnostics");
         assert_eq!(tags.len(), 1, "{tags:#?}");
-        assert!(tags[0].starts_with("<li "), "the item, not the whole list: {}", tags[0]);
-        assert!(tags[0].contains("data-presemble-path=\"i1\""), "{}", tags[0]);
+        assert!(
+            tags[0].starts_with("<li "),
+            "the item, not the whole list: {}",
+            tags[0]
+        );
+        assert!(
+            tags[0].contains("data-presemble-path=\"i1\""),
+            "{}",
+            tags[0]
+        );
         assert!(messages(&carried(&tags[0]))[0].contains("inline HTML"));
     }
 
@@ -425,7 +574,8 @@ mod tests {
     /// element its Error belongs to, not the panel.
     #[test]
     fn the_raw_html_placeholder_carries_its_error() {
-        let html = editorial_page("# Title\n\n----\n\nBefore.\n\n<div class=\"x\">raw</div>\n\nAfter.\n");
+        let html =
+            editorial_page("# Title\n\n----\n\nBefore.\n\n<div class=\"x\">raw</div>\n\nAfter.\n");
         let tags = tags_with(&html, "data-presemble-diagnostics");
         assert_eq!(tags.len(), 1, "{tags:#?}");
         assert!(
@@ -435,7 +585,10 @@ mod tests {
         );
         assert_eq!(carried(&tags[0])[0]["severity"], "error");
         let script = page_script(&html);
-        assert!(script["unplaced"].as_array().expect("a list").is_empty(), "{script}");
+        assert!(
+            script["unplaced"].as_array().expect("a list").is_empty(),
+            "{script}"
+        );
         assert_eq!(script["errors"], 1, "{script}");
     }
 
@@ -450,8 +603,17 @@ mod tests {
             "the placeholder: {}",
             tags[0]
         );
-        assert!(tags[0].contains("data-presemble-path=\"b1\""), "{}", tags[0]);
-        assert!(page_script(&html)["unplaced"].as_array().expect("a list").is_empty());
+        assert!(
+            tags[0].contains("data-presemble-path=\"b1\""),
+            "{}",
+            tags[0]
+        );
+        assert!(
+            page_script(&html)["unplaced"]
+                .as_array()
+                .expect("a list")
+                .is_empty()
+        );
     }
 
     /// GUARD: the placeholder is addressed (so its Error finds it) but is not
@@ -473,15 +635,22 @@ mod tests {
     /// GUARD: published output holds the placeholder with no editor data.
     #[test]
     fn published_placeholder_carries_no_editor_attributes() {
-        let (_tmp, conductor) = conductor_with("# Title\n\n----\n\n> q\n>\n> <div>in</div>\n\n<div>raw</div>\n");
+        let (_tmp, conductor) =
+            conductor_with("# Title\n\n----\n\n> q\n>\n> <div>in</div>\n\n<div>raw</div>\n");
         conductor.build_all_pages(template::OutputMode::Published);
         let path = site_index::output_path_for_stem_slug(&conductor.output_dir, "post", "x");
         let html = std::fs::read_to_string(path).expect("the page");
         let placeholders = tags_with(&html, "class");
-        let placeholders: Vec<_> = placeholders.iter().filter(|t| t.contains("presemble-html-removed")).collect();
+        let placeholders: Vec<_> = placeholders
+            .iter()
+            .filter(|t| t.contains("presemble-html-removed"))
+            .collect();
         assert_eq!(placeholders.len(), 2, "{html}");
         for tag in placeholders {
-            assert!(!tag.contains("data-presemble-"), "no editor attribute: {tag}");
+            assert!(
+                !tag.contains("data-presemble-"),
+                "no editor attribute: {tag}"
+            );
         }
     }
 
@@ -506,7 +675,11 @@ mod tests {
         conductor.build_all_pages(template::OutputMode::Published);
         let path = site_index::output_path_for_stem_slug(&conductor.output_dir, "post", "x");
         let html = std::fs::read_to_string(path).expect("the page");
-        for editor_only in ["data-presemble-diagnostics", "data-presemble-path", "presemble-diagnostics"] {
+        for editor_only in [
+            "data-presemble-diagnostics",
+            "data-presemble-path",
+            "presemble-diagnostics",
+        ] {
             assert!(!html.contains(editor_only), "{editor_only}: {html}");
         }
     }

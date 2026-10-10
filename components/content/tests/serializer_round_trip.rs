@@ -65,11 +65,11 @@
 //! decision is lossy, by teaching `expected_after_round_trip` the canonical
 //! form. The properties themselves should not need to change.
 
-use content::{
-    parse_document, serialize_document, ContentElement, Document, DocumentSlot, Keyword, LinkOp,
-    LinkTarget, LinkText, RefsToTarget,
-};
 use content::inline::{Inline, InlineContext, Inlines};
+use content::{
+    ContentElement, Document, DocumentSlot, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget,
+    parse_document, serialize_document,
+};
 use schema::{HeadingLevel, SlotName, Span, Spanned};
 
 /// Fixed seed list. Each seed produces one document.
@@ -153,49 +153,196 @@ struct Domain {
 
 const DOMAIN: Domain = Domain {
     words: &[
-        "hello", "World", "x1", "2024", "a-b", "it's", "end.", "#tag", "1.5", "(paren)", "q?",
-        "+1", "a>b", "--", "a#b", "C#", "\"quoted\"", "50%", "e=mc2", "x:y", "/path", "ünï",
-        "日本", "a.b.c", "!", "@me", "-x", "=", "~tilde",
+        "hello",
+        "World",
+        "x1",
+        "2024",
+        "a-b",
+        "it's",
+        "end.",
+        "#tag",
+        "1.5",
+        "(paren)",
+        "q?",
+        "+1",
+        "a>b",
+        "--",
+        "a#b",
+        "C#",
+        "\"quoted\"",
+        "50%",
+        "e=mc2",
+        "x:y",
+        "/path",
+        "ünï",
+        "日本",
+        "a.b.c",
+        "!",
+        "@me",
+        "-x",
+        "=",
+        "~tilde",
     ],
     openers_with_tail: &[
-        "# ", "## ", "###### ", "> ", ">", "- ", "+ ", "* ", "1. ", "1) ", "42. ", "7) ",
-        "``` ", "```", "~~~ ", "~~~", "````rust ", "<div> ", "<div>", "<!-- ", "<?x ",
-        "<script> ", "</p ", "  # ", " > ", "   - ", "  1. ",
+        "# ",
+        "## ",
+        "###### ",
+        "> ",
+        ">",
+        "- ",
+        "+ ",
+        "* ",
+        "1. ",
+        "1) ",
+        "42. ",
+        "7) ",
+        "``` ",
+        "```",
+        "~~~ ",
+        "~~~",
+        "````rust ",
+        "<div> ",
+        "<div>",
+        "<!-- ",
+        "<?x ",
+        "<script> ",
+        "</p ",
+        "  # ",
+        " > ",
+        "   - ",
+        "  1. ",
     ],
     openers_alone: &[
-        "#", "###", "-", "+", "*", "1.", "3)", "---", "***", "___", "- - -", "* * *",
-        "```", "~~~~", "<span>", "</p>", "<a href=\"x\">", "<br/>",
+        "#",
+        "###",
+        "-",
+        "+",
+        "*",
+        "1.",
+        "3)",
+        "---",
+        "***",
+        "___",
+        "- - -",
+        "* * *",
+        "```",
+        "~~~~",
+        "<span>",
+        "</p>",
+        "<a href=\"x\">",
+        "<br/>",
     ],
     indentation: &["    ", "\t", "      ", "  \t", " ", "  ", "   "],
     table_lines: &[
-        "a | b", "| a | b |", "x|y", "a | b | c", "a \\| b", "--- | ---", "|---|---|",
-        ":-: | :--", "-|-", "| - |", "   --- | ---", "--- | :", "--- | --- | ---", "-||-",
+        "a | b",
+        "| a | b |",
+        "x|y",
+        "a | b | c",
+        "a \\| b",
+        "--- | ---",
+        "|---|---|",
+        ":-: | :--",
+        "-|-",
+        "| - |",
+        "   --- | ---",
+        "--- | :",
+        "--- | --- | ---",
+        "-||-",
     ],
     definition_lines: &[
-        "[a]: /x", "[a]:", "[b]: /y \"t\"", "[ ]: /x", "[a] : /x", "[a\\]b]: /z", "[a",
-        "b]: /x", "[p](->> :post)",
+        "[a]: /x",
+        "[a]:",
+        "[b]: /y \"t\"",
+        "[ ]: /x",
+        "[a] : /x",
+        "[a\\]b]: /z",
+        "[a",
+        "b]: /x",
+        "[p](->> :post)",
     ],
     heading_tails: &[" #", " ##", " ###", " ####### ", "#", "##"],
     code_lines: &[
-        "fn main() {}", "`", "``", "```", "````", "~~~", "~~~~~", "    indented", "",
-        "x = `y`", "# not heading", "> not quote", "- not list", "\tTab", "</div>", "\\*esc\\*",
+        "fn main() {}",
+        "`",
+        "``",
+        "```",
+        "````",
+        "~~~",
+        "~~~~~",
+        "    indented",
+        "",
+        "x = `y`",
+        "# not heading",
+        "> not quote",
+        "- not list",
+        "\tTab",
+        "</div>",
+        "\\*esc\\*",
     ],
     languages: &[
-        "rust", "c++", "a`b", "``", "x~y", "foo bar", "a\\*b", "a&amp;b", "{.class}",
-        "rust,ignore", "ünï", "a&b", "a\\b", "a\\", "&#38;",
+        "rust",
+        "c++",
+        "a`b",
+        "``",
+        "x~y",
+        "foo bar",
+        "a\\*b",
+        "a&amp;b",
+        "{.class}",
+        "rust,ignore",
+        "ünï",
+        "a&b",
+        "a\\b",
+        "a\\",
+        "&#38;",
     ],
     hrefs: &[
-        "/a/b", "https://x.y/p?q=1", "/a b", "/x(1)", "/x (y)", "(z)", "a<b>c", "/p)", "/p(",
-        "#frag", "mailto:me@x.y", "../up/one.md", "/with space/and (parens)", "<", ">",
-        "/?a=1&b=2", "/a&amp;b", "/a\\b", "/a\\*b", "/a\\", "/a b\\", "/x &#38; y",
+        "/a/b",
+        "https://x.y/p?q=1",
+        "/a b",
+        "/x(1)",
+        "/x (y)",
+        "(z)",
+        "a<b>c",
+        "/p)",
+        "/p(",
+        "#frag",
+        "mailto:me@x.y",
+        "../up/one.md",
+        "/with space/and (parens)",
+        "<",
+        ">",
+        "/?a=1&b=2",
+        "/a&amp;b",
+        "/a\\b",
+        "/a\\*b",
+        "/a\\",
+        "/a b\\",
+        "/x &#38; y",
     ],
     link_paths: &["fragments/header", "a/b", "a b", "x&amp;y", "p\\", "(z)"],
     link_sources: &["post", "feature", "author"],
     link_fields: &["published", "category", "title"],
     link_values: &[
-        "news", "/a/b", "self", "x&amp;y", "a\\b", "a b", "say \"hi\"", "a%20b", "(x)",
+        "news",
+        "/a/b",
+        "self",
+        "x&amp;y",
+        "a\\b",
+        "a b",
+        "say \"hi\"",
+        "a%20b",
+        "(x)",
     ],
-    link_labels: &["posts", "hdr", "items", "x1", "latest", "Latest posts", "In the news"],
+    link_labels: &[
+        "posts",
+        "hdr",
+        "items",
+        "x1",
+        "latest",
+        "Latest posts",
+        "In the news",
+    ],
     link_slots: &[None, Some("latest"), Some("news"), Some("a-b_1")],
     link_statics: &["(str title)", "(x)"],
     inline_markup: &["`c`", "*em*", "[a](/x)", "![i](/p.png)"],
@@ -206,14 +353,21 @@ const DOMAIN: Domain = Domain {
 
 fn gen_words(rng: &mut Rng, min: usize, max: usize) -> String {
     let n = min + rng.below(max - min + 1);
-    (0..n).map(|_| rng.pick(DOMAIN.words)).collect::<Vec<_>>().join(" ")
+    (0..n)
+        .map(|_| rng.pick(DOMAIN.words))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Single-line text that may start with a leading block opener.
 fn gen_opener_text(rng: &mut Rng, allow_indentation: bool) -> String {
     match rng.below(if allow_indentation { 5 } else { 3 }) {
         0 => gen_words(rng, 1, 5),
-        1 => format!("{}{}", rng.pick(DOMAIN.openers_with_tail), gen_words(rng, 1, 4)),
+        1 => format!(
+            "{}{}",
+            rng.pick(DOMAIN.openers_with_tail),
+            gen_words(rng, 1, 4)
+        ),
         2 => rng.pick(DOMAIN.openers_alone).to_string(),
         3 => format!("{}{}", rng.pick(DOMAIN.indentation), gen_words(rng, 1, 4)),
         // Indentation that would make a code block, hiding a block opener.
@@ -240,7 +394,10 @@ fn gen_paragraph_line(rng: &mut Rng) -> String {
 /// A paragraph of 2-4 non-blank lines joined with `\n`.
 fn gen_multiline_paragraph(rng: &mut Rng) -> ContentElement {
     let n = 2 + rng.below(3);
-    let text = (0..n).map(|_| gen_paragraph_line(rng)).collect::<Vec<_>>().join("\n");
+    let text = (0..n)
+        .map(|_| gen_paragraph_line(rng))
+        .collect::<Vec<_>>()
+        .join("\n");
     literal_paragraph(&text)
 }
 
@@ -253,7 +410,10 @@ fn lone_link(text: &str, href: &str) -> ContentElement {
             vec![Inline::Link {
                 destination: content::inline::LinkDestination::new(href),
                 title: None,
-                text: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::LinkText),
+                text: Inlines::new(
+                    vec![Inline::Text(text.to_string())],
+                    InlineContext::LinkText,
+                ),
             }],
             InlineContext::Paragraph,
         ),
@@ -269,7 +429,11 @@ fn lone_image(alt: &str, src: &str) -> ContentElement {
                 source: content::inline::AssetRef::new(src),
                 title: None,
                 alt: Inlines::new(
-                    if alt.is_empty() { vec![] } else { vec![Inline::Text(alt.to_string())] },
+                    if alt.is_empty() {
+                        vec![]
+                    } else {
+                        vec![Inline::Text(alt.to_string())]
+                    },
                     InlineContext::Alt,
                 ),
             }],
@@ -281,7 +445,10 @@ fn lone_image(alt: &str, src: &str) -> ContentElement {
 
 fn literal_paragraph(text: &str) -> ContentElement {
     ContentElement::Paragraph {
-        content: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::Paragraph),
+        content: Inlines::new(
+            vec![Inline::Text(text.to_string())],
+            InlineContext::Paragraph,
+        ),
         marker: None,
     }
 }
@@ -306,7 +473,11 @@ fn gen_heading(rng: &mut Rng) -> ContentElement {
     let level = HeadingLevel::new(1 + rng.below(6) as u8).expect("1..=6");
     let text = match rng.below(5) {
         0 => gen_words(rng, 1, 4),
-        1 => format!("{}{}", gen_words(rng, 1, 3), rng.pick(DOMAIN.heading_tails).trim_end()),
+        1 => format!(
+            "{}{}",
+            gen_words(rng, 1, 3),
+            rng.pick(DOMAIN.heading_tails).trim_end()
+        ),
         2 => rng.pick(DOMAIN.heading_tails).trim().to_string(),
         3 => {
             let n = 1 + rng.below(4);
@@ -333,7 +504,10 @@ fn gen_code(rng: &mut Rng) -> ContentElement {
         Some(rng.pick(DOMAIN.languages).to_string())
     };
     let n = rng.below(5);
-    let code = (0..n).map(|_| rng.pick(DOMAIN.code_lines)).collect::<Vec<_>>().join("\n");
+    let code = (0..n)
+        .map(|_| rng.pick(DOMAIN.code_lines))
+        .collect::<Vec<_>>()
+        .join("\n");
     ContentElement::CodeBlock { language, code }
 }
 
@@ -390,7 +564,12 @@ fn gen_link_expression(rng: &mut Rng) -> ContentElement {
 fn gen_list(rng: &mut Rng) -> ContentElement {
     let ordered = rng.chance(50);
     // `--` is left out: an item like `- --` is a thematic break, not a list.
-    let words: Vec<&str> = DOMAIN.words.iter().copied().filter(|w| *w != "--").collect();
+    let words: Vec<&str> = DOMAIN
+        .words
+        .iter()
+        .copied()
+        .filter(|w| *w != "--")
+        .collect();
     let n = 1 + rng.below(4);
     let items = (0..n)
         .map(|_| {
@@ -405,12 +584,18 @@ fn gen_list(rng: &mut Rng) -> ContentElement {
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            content::Blocks::from_elements(im::vector![spanned(ContentElement::paragraph_from_markdown(&text))])
+            content::Blocks::from_elements(im::vector![spanned(
+                ContentElement::paragraph_from_markdown(&text)
+            )])
         })
         .collect();
     ContentElement::List {
         list: content::List {
-            kind: if ordered { content::ListKind::Ordered { start: 1 } } else { content::ListKind::Bullet },
+            kind: if ordered {
+                content::ListKind::Ordered { start: 1 }
+            } else {
+                content::ListKind::Bullet
+            },
             spacing: content::Spacing::Tight,
             items,
         },
@@ -434,7 +619,11 @@ fn gen_block(rng: &mut Rng) -> ContentElement {
         3 => gen_code(rng),
         4 => lone_link(&gen_words(rng, 1, 3), rng.pick(DOMAIN.hrefs)),
         5 => lone_image(
-            &if rng.chance(30) { String::new() } else { gen_words(rng, 1, 3) },
+            &if rng.chance(30) {
+                String::new()
+            } else {
+                gen_words(rng, 1, 3)
+            },
             rng.pick(DOMAIN.hrefs),
         ),
         8 => gen_link_expression(rng),
@@ -443,7 +632,10 @@ fn gen_block(rng: &mut Rng) -> ContentElement {
 }
 
 fn spanned(node: ContentElement) -> Spanned<ContentElement> {
-    Spanned { node, span: Span { start: 0, end: 0 } }
+    Spanned {
+        node,
+        span: Span { start: 0, end: 0 },
+    }
 }
 
 fn gen_document(seed: u64) -> Document {
@@ -452,12 +644,21 @@ fn gen_document(seed: u64) -> Document {
     let preamble = (0..slots)
         .map(|i| DocumentSlot {
             name: SlotName::new(format!("slot{i}")),
-            elements: (0..1 + rng.below(2)).map(|_| spanned(gen_block(&mut rng))).collect(),
+            elements: (0..1 + rng.below(2))
+                .map(|_| spanned(gen_block(&mut rng)))
+                .collect(),
         })
         .collect();
     let has_separator = rng.chance(60);
-    let body = (0..rng.below(6)).map(|_| spanned(gen_block(&mut rng))).collect();
-    Document { preamble, body, has_separator, ..Document::default() }
+    let body = (0..rng.below(6))
+        .map(|_| spanned(gen_block(&mut rng)))
+        .collect();
+    Document {
+        preamble,
+        body,
+        has_separator,
+        ..Document::default()
+    }
 }
 
 // ── Properties ──────────────────────────────────────────────────────────────
@@ -505,8 +706,10 @@ fn round_trip_preserves_flattened_blocks() {
             .iter()
             .map(|s| s.node.clone())
             .collect();
-        let expected: Vec<ContentElement> =
-            flatten(&doc).iter().map(expected_after_round_trip).collect();
+        let expected: Vec<ContentElement> = flatten(&doc)
+            .iter()
+            .map(expected_after_round_trip)
+            .collect();
         if parsed != expected {
             failures.push(format!(
                 "seed {seed}\n--- markdown ---\n{markdown}\n--- expected ---\n{expected:#?}\n--- parsed ---\n{parsed:#?}"
@@ -536,7 +739,9 @@ fn serialization_is_a_fixed_point() {
             .collect();
         let second = serialize_document(&body_only(&reparsed));
         if first != second {
-            failures.push(format!("seed {seed}\n--- first ---\n{first}\n--- second ---\n{second}"));
+            failures.push(format!(
+                "seed {seed}\n--- first ---\n{first}\n--- second ---\n{second}"
+            ));
         }
     }
     assert!(
@@ -561,7 +766,9 @@ fn generator_exercises_every_block_kind_and_opener() {
     for seed in SEEDS {
         for block in flatten(&gen_document(seed)) {
             if let ContentElement::Paragraph { content, .. } = &block {
-                let [Inline::Text(text)] = content.as_slice() else { continue };
+                let [Inline::Text(text)] = content.as_slice() else {
+                    continue;
+                };
                 let out = serialize_document(&body_only(std::slice::from_ref(&block)));
                 let out = out.trim();
                 if out != text.as_str() {
@@ -575,7 +782,10 @@ fn generator_exercises_every_block_kind_and_opener() {
                         escaped_later_lines += 1;
                     }
                     let second = rest_out.lines().next().unwrap_or("");
-                    if second.trim_start().trim_start_matches(['|', ':', ' ']).starts_with("\\-")
+                    if second
+                        .trim_start()
+                        .trim_start_matches(['|', ':', ' '])
+                        .starts_with("\\-")
                         && second.contains('|')
                     {
                         escaped_tables += 1;
@@ -585,9 +795,8 @@ fn generator_exercises_every_block_kind_and_opener() {
                     let lines: Vec<&str> = out.lines().collect();
                     for pair in lines.windows(2).skip(1) {
                         let (prev, line) = (pair[0], pair[1]);
-                        let escaped_hyphen = line
-                            .find('-')
-                            .is_some_and(|at| line[..at].ends_with('\\'));
+                        let escaped_hyphen =
+                            line.find('-').is_some_and(|at| line[..at].ends_with('\\'));
                         if escaped_hyphen && prev.trim_start().starts_with('|') {
                             escaped_later_tables += 1;
                         }
@@ -602,7 +811,11 @@ fn generator_exercises_every_block_kind_and_opener() {
     }
     // Heading, paragraph, blockquote, code block, list, link expression and
     // separator: a lone link or image is a paragraph.
-    assert_eq!(kinds.len(), 7, "expected 7 block kinds in the generated domain");
+    assert_eq!(
+        kinds.len(),
+        7,
+        "expected 7 block kinds in the generated domain"
+    );
     let (mut links, mut images) = (0, 0);
     for seed in SEEDS {
         for block in flatten(&gen_document(seed)) {
@@ -610,16 +823,34 @@ fn generator_exercises_every_block_kind_and_opener() {
             images += usize::from(block.sole_image().is_some());
         }
     }
-    assert!(links > 100 && images > 100, "lone links {links}, lone images {images}");
-    assert!(escaped_paragraphs > 50, "too few paragraphs needed escaping: {escaped_paragraphs}");
-    assert!(multiline > 100, "too few multi-line paragraphs: {multiline}");
-    assert!(escaped_later_lines > 30, "too few later lines escaped: {escaped_later_lines}");
-    assert!(escaped_tables > 5, "too few table delimiter rows escaped: {escaped_tables}");
+    assert!(
+        links > 100 && images > 100,
+        "lone links {links}, lone images {images}"
+    );
+    assert!(
+        escaped_paragraphs > 50,
+        "too few paragraphs needed escaping: {escaped_paragraphs}"
+    );
+    assert!(
+        multiline > 100,
+        "too few multi-line paragraphs: {multiline}"
+    );
+    assert!(
+        escaped_later_lines > 30,
+        "too few later lines escaped: {escaped_later_lines}"
+    );
+    assert!(
+        escaped_tables > 5,
+        "too few table delimiter rows escaped: {escaped_tables}"
+    );
     assert!(
         escaped_later_tables > 0,
         "no table delimiter row escaped on line 3 or later: {escaped_later_tables}"
     );
-    assert!(escaped_definitions > 20, "too few definitions escaped: {escaped_definitions}");
+    assert!(
+        escaped_definitions > 20,
+        "too few definitions escaped: {escaped_definitions}"
+    );
 }
 
 // ── Bound link expressions (ADR-058, decision 9) ────────────────────────────
@@ -668,13 +899,21 @@ fn slot_marker_survives_a_save() {
         doc.preamble
             .iter()
             .map(|s| {
-                (s.name.as_str().to_string(), s.elements.iter().map(|e| e.node.clone()).collect())
+                (
+                    s.name.as_str().to_string(),
+                    s.elements.iter().map(|e| e.node.clone()).collect(),
+                )
             })
             .collect()
     };
     assert_eq!(nodes(&second), nodes(&first));
     assert_eq!(serialize_document(&second), saved);
-    let news = &first.preamble.iter().find(|s| s.name.as_str() == "news").expect("news").elements;
+    let news = &first
+        .preamble
+        .iter()
+        .find(|s| s.name.as_str() == "news")
+        .expect("news")
+        .elements;
     assert!(
         matches!(
             &news[0].node,
@@ -687,7 +926,9 @@ fn slot_marker_survives_a_save() {
 // ── HTML blocks (ADR-062) ───────────────────────────────────────────────────
 
 fn html(source: &str) -> ContentElement {
-    ContentElement::HtmlBlock { source: source.to_string() }
+    ContentElement::HtmlBlock {
+        source: source.to_string(),
+    }
 }
 
 /// Every CommonMark HTML block type is kept as one `HtmlBlock` holding its
@@ -730,7 +971,11 @@ fn html_blocks_round_trip_byte_exactly() {
             failures.push(format!("{block:?} was written as {out:?}"));
         }
     }
-    assert!(failures.is_empty(), "HTML blocks did not round-trip:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "HTML blocks did not round-trip:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// A blank line ends a type-6 block, so markdown between an opening and a
@@ -741,7 +986,11 @@ fn markdown_between_html_tags_is_three_elements() {
     let parsed = parse_blocks(src);
     assert_eq!(
         parsed,
-        vec![html("<div>"), ContentElement::paragraph_from_markdown("*md*"), html("</div>")]
+        vec![
+            html("<div>"),
+            ContentElement::paragraph_from_markdown("*md*"),
+            html("</div>")
+        ]
     );
     assert_eq!(serialize_document(&body_only(&parsed)), src);
 }
@@ -751,11 +1000,16 @@ fn markdown_between_html_tags_is_three_elements() {
 fn html_block_and_paragraph_interplay() {
     assert_eq!(
         parse_blocks("A paragraph line\n<div>x</div>\n"),
-        vec![ContentElement::paragraph_from_markdown("A paragraph line"), html("<div>x</div>")]
+        vec![
+            ContentElement::paragraph_from_markdown("A paragraph line"),
+            html("<div>x</div>")
+        ]
     );
     assert_eq!(
         parse_blocks("A paragraph line\n<custom-el a=\"1\">\n"),
-        vec![ContentElement::paragraph_from_markdown("A paragraph line\n<custom-el a=\"1\">")]
+        vec![ContentElement::paragraph_from_markdown(
+            "A paragraph line\n<custom-el a=\"1\">"
+        )]
     );
 }
 
@@ -815,7 +1069,11 @@ fn from_disk_corpus_is_written_unchanged() {
             failures.push(format!("{md:?} was written as {:?}", out.trim()));
         }
     }
-    assert!(failures.is_empty(), "from-disk markdown changed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "from-disk markdown changed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// A paragraph is written canonically (ADR-059 stage 5): what its nodes do
@@ -834,7 +1092,11 @@ fn from_disk_markdown_that_is_canonicalised_by_a_save() {
         let parsed = parse_blocks(md);
         let out = serialize_document(&body_only(&parsed));
         assert_eq!(out.trim(), canonical, "{md:?}");
-        assert_eq!(parse_blocks(&out), parsed, "{md:?} did not read back as the same nodes");
+        assert_eq!(
+            parse_blocks(&out),
+            parsed,
+            "{md:?} did not read back as the same nodes"
+        );
     }
 }
 
@@ -862,7 +1124,10 @@ const REPOSITORY_MARKDOWN: &[(&str, &str)] = &[
         "fixtures/blog-site/schemas/article/item.md",
         include_str!("../../../fixtures/blog-site/schemas/article/item.md"),
     ),
-    ("site/content/index.md", include_str!("../../../site/content/index.md")),
+    (
+        "site/content/index.md",
+        include_str!("../../../site/content/index.md"),
+    ),
     (
         "site/content/post/building-presemble.md",
         include_str!("../../../site/content/post/building-presemble.md"),
@@ -895,13 +1160,22 @@ const REPOSITORY_MARKDOWN: &[(&str, &str)] = &[
         "site/content/feature/site-wizard.md",
         include_str!("../../../site/content/feature/site-wizard.md"),
     ),
-    ("site/content/author/johlrogge.md", include_str!("../../../site/content/author/johlrogge.md")),
-    ("site/content/guide/user-guide.md", include_str!("../../../site/content/guide/user-guide.md")),
+    (
+        "site/content/author/johlrogge.md",
+        include_str!("../../../site/content/author/johlrogge.md"),
+    ),
+    (
+        "site/content/guide/user-guide.md",
+        include_str!("../../../site/content/guide/user-guide.md"),
+    ),
     (
         "site/content/feature/the-presemble-repl.md",
         include_str!("../../../site/content/feature/the-presemble-repl.md"),
     ),
-    ("site/content/post/index.md", include_str!("../../../site/content/post/index.md")),
+    (
+        "site/content/post/index.md",
+        include_str!("../../../site/content/post/index.md"),
+    ),
     (
         "example-sites/blog/content/author/default.md",
         include_str!("../../../example-sites/blog/content/author/default.md"),
@@ -916,7 +1190,11 @@ fn repository_markdown_round_trips() {
         let markdown = serialize_document(&body_only(&first));
         let second = parse_blocks(&markdown);
         if first != second {
-            let at = first.iter().zip(&second).position(|(a, b)| a != b).unwrap_or(first.len().min(second.len()));
+            let at = first
+                .iter()
+                .zip(&second)
+                .position(|(a, b)| a != b)
+                .unwrap_or(first.len().min(second.len()));
             failures.push(format!(
                 "{path}: {} blocks, then {}; first difference at block {at}:\n  before: {:?}\n  after:  {:?}",
                 first.len(),
@@ -926,5 +1204,9 @@ fn repository_markdown_round_trips() {
             ));
         }
     }
-    assert!(failures.is_empty(), "repository markdown did not round-trip:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "repository markdown did not round-trip:\n{}",
+        failures.join("\n")
+    );
 }

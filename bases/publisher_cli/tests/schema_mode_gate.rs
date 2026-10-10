@@ -54,7 +54,10 @@ fn schema_urls(schemas: &Path, dir: &Path, out: &mut Vec<String>) {
             schema_urls(schemas, &path, out);
         } else if path.extension().is_some_and(|e| e == "md") {
             let rel = path.strip_prefix(schemas).unwrap().with_extension("");
-            out.push(format!("/_schema/{}", rel.to_string_lossy().replace('\\', "/")));
+            out.push(format!(
+                "/_schema/{}",
+                rel.to_string_lossy().replace('\\', "/")
+            ));
         }
     }
 }
@@ -83,14 +86,20 @@ fn render(name: &str, src: &Path, hiccup_templates: bool) -> Vec<String> {
         });
         let line = match result.response {
             conductor::Response::PageRendered { html } => {
-                assert!(!html.contains("<presemble:"), "{name}{url} holds a presemble: element");
+                assert!(
+                    !html.contains("<presemble:"),
+                    "{name}{url} holds a presemble: element"
+                );
                 format!("{:016x}", fnv1a(html.as_bytes()))
             }
             other => format!("NOT-RENDERED {other:?}"),
         };
         hashes.insert(url, line);
     }
-    hashes.into_iter().map(|(url, hash)| format!("{name}{url} {hash}")).collect()
+    hashes
+        .into_iter()
+        .map(|(url, hash)| format!("{name}{url} {hash}"))
+        .collect()
 }
 
 #[test]
@@ -98,8 +107,15 @@ fn schema_mode_renders_unchanged() {
     let root = repo_root();
     let mut actual: Vec<String> = render("site", &root.join("site"), false);
     for example in ["blog", "personal", "portfolio"] {
-        actual.extend(render(example, &root.join("example-sites").join(example), true));
+        actual.extend(render(
+            example,
+            &root.join("example-sites").join(example),
+            true,
+        ));
     }
     let actual = actual.join("\n") + "\n";
-    assert_eq!(actual, EXPECTED, "schema mode output changed; the new hashes:\n{actual}");
+    assert_eq!(
+        actual, EXPECTED,
+        "schema mode output changed; the new hashes:\n{actual}"
+    );
 }

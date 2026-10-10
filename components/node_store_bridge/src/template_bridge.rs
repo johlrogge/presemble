@@ -52,23 +52,47 @@ fn form_to_store(form: &Form, store: &mut NodeStore) -> NodeId {
             let id = store.add_node(Node::Element(tag));
             let value_name = store.intern("value");
             let val_id = store.add_node(Node::Text(s.clone()));
-            store.add_edge(id, Edge::Attribute { name: value_name, value: val_id });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: value_name,
+                    value: val_id,
+                },
+            );
             id
         }
 
-        Form::Keyword { namespace: Some(ns), name } => {
+        Form::Keyword {
+            namespace: Some(ns),
+            name,
+        } => {
             let tag = store.intern("keyword");
             let id = store.add_node(Node::Element(tag));
             let ns_attr = store.intern("namespace");
             let name_attr = store.intern("name");
             let ns_id = store.add_node(Node::Text(ns.clone()));
             let name_id = store.add_node(Node::Text(name.clone()));
-            store.add_edge(id, Edge::Attribute { name: ns_attr, value: ns_id });
-            store.add_edge(id, Edge::Attribute { name: name_attr, value: name_id });
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: ns_attr,
+                    value: ns_id,
+                },
+            );
+            store.add_edge(
+                id,
+                Edge::Attribute {
+                    name: name_attr,
+                    value: name_id,
+                },
+            );
             id
         }
 
-        Form::Keyword { namespace: None, name } => {
+        Form::Keyword {
+            namespace: None,
+            name,
+        } => {
             let interned = store.intern(name);
             store.add_node(Node::Keyword(interned))
         }
@@ -147,8 +171,12 @@ fn store_id_to_tnode(store: &NodeStore, id: NodeId) -> Option<TNode> {
             }
         }
         // Raw value nodes at the top level: not valid template nodes; skip.
-        Node::Keyword(_) | Node::Integer(_) | Node::Boolean(_) | Node::Nil
-        | Node::Collection | Node::Opaque(_) => None,
+        Node::Keyword(_)
+        | Node::Integer(_)
+        | Node::Boolean(_)
+        | Node::Nil
+        | Node::Collection
+        | Node::Opaque(_) => None,
     }
 }
 
@@ -301,7 +329,10 @@ mod tests {
     fn element_equal(a: &Element, b: &Element) -> bool {
         a.name == b.name
             && a.attrs.len() == b.attrs.len()
-            && a.attrs.iter().zip(b.attrs.iter()).all(|((ka, va), (kb, vb))| ka == kb && va == vb)
+            && a.attrs
+                .iter()
+                .zip(b.attrs.iter())
+                .all(|((ka, va), (kb, vb))| ka == kb && va == vb)
             && nodes_equal(&a.children, &b.children)
     }
 
@@ -318,7 +349,10 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "roundtrip mismatch: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "roundtrip mismatch: {output:?}"
+        );
     }
 
     #[test]
@@ -333,14 +367,23 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "symbol attr roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "symbol attr roundtrip failed: {output:?}"
+        );
     }
 
     #[test]
     fn roundtrip_keyword_without_namespace() {
         let input = vec![TNode::Element(Element {
             name: "p".into(),
-            attrs: vec![("role".into(), Form::Keyword { namespace: None, name: "button".into() })],
+            attrs: vec![(
+                "role".into(),
+                Form::Keyword {
+                    namespace: None,
+                    name: "button".into(),
+                },
+            )],
             children: vec![],
         })];
 
@@ -348,7 +391,10 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "keyword (no ns) roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "keyword (no ns) roundtrip failed: {output:?}"
+        );
     }
 
     #[test]
@@ -369,7 +415,10 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "keyword (with ns) roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "keyword (with ns) roundtrip failed: {output:?}"
+        );
     }
 
     #[test]
@@ -395,7 +444,10 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "nested elements roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "nested elements roundtrip failed: {output:?}"
+        );
     }
 
     #[test]
@@ -411,7 +463,10 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "form-list roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "form-list roundtrip failed: {output:?}"
+        );
     }
 
     #[test]
@@ -427,14 +482,29 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "form-vector roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "form-vector roundtrip failed: {output:?}"
+        );
     }
 
     #[test]
     fn roundtrip_form_map_in_attribute() {
         let form = Form::Map(vec![
-            (Form::Keyword { namespace: None, name: "x".into() }, Form::Integer(10)),
-            (Form::Keyword { namespace: None, name: "y".into() }, Form::Integer(20)),
+            (
+                Form::Keyword {
+                    namespace: None,
+                    name: "x".into(),
+                },
+                Form::Integer(10),
+            ),
+            (
+                Form::Keyword {
+                    namespace: None,
+                    name: "y".into(),
+                },
+                Form::Integer(20),
+            ),
         ]);
         let input = vec![TNode::Element(Element {
             name: "canvas".into(),
@@ -446,7 +516,10 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "form-map roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "form-map roundtrip failed: {output:?}"
+        );
     }
 
     #[test]
@@ -462,7 +535,10 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "form-set roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "form-set roundtrip failed: {output:?}"
+        );
     }
 
     #[test]
@@ -480,7 +556,10 @@ mod tests {
         let ids = template_to_store(&input, &mut store);
         let output = store_to_template(&store, &ids);
 
-        assert!(nodes_equal(&input, &output), "integer/nil roundtrip failed: {output:?}");
+        assert!(
+            nodes_equal(&input, &output),
+            "integer/nil roundtrip failed: {output:?}"
+        );
     }
 
     #[test]

@@ -12,8 +12,9 @@ use schema::HeadingLevel;
 use crate::access::{add_child_element, add_text_attr, find_child_by_name, make_element};
 use crate::block::{BlockDecodeError, add_trivia, block_from_node, block_to_store};
 use crate::edit::{
-    AddressError, CommentPlace, Committed, EditError, Executed, NedMutation, Plan, PlanCause, PlanError, PlannedMutation,
-    PreparedEdit, Target, TargetKind, commit, execute, prepare, resolve,
+    AddressError, CommentPlace, Committed, EditError, Executed, NedMutation, Plan, PlanCause,
+    PlanError, PlannedMutation, PreparedEdit, Target, TargetKind, commit, execute, prepare,
+    resolve,
 };
 
 fn heading(level: u8, text: &str) -> ContentElement {
@@ -74,7 +75,9 @@ impl Fixture {
         self.store
             .children(preamble)
             .into_iter()
-            .find(|s| crate::access::find_attr_text(&self.store, *s, "name").as_deref() == Some(name))
+            .find(|s| {
+                crate::access::find_attr_text(&self.store, *s, "name").as_deref() == Some(name)
+            })
             .unwrap()
     }
     fn body(&self) -> NodeId {
@@ -116,27 +119,47 @@ fn text_of_single_text_heading_resolves() {
     let heading = f.store.children(f.slot("title"))[0];
     let text = f.text_of(heading);
     let got = f.resolve(&[text], TargetKind::Text).unwrap();
-    assert_eq!(got, Target::Text { text, block: heading, document: f.doc });
+    assert_eq!(
+        got,
+        Target::Text {
+            text,
+            block: heading,
+            document: f.doc
+        }
+    );
 }
 
 #[test]
 fn empty_selection_is_unresolved() {
     let f = fixture();
-    assert_eq!(f.resolve(&[], TargetKind::Text), Err(AddressError::Unresolved));
+    assert_eq!(
+        f.resolve(&[], TargetKind::Text),
+        Err(AddressError::Unresolved)
+    );
 }
 
 #[test]
 fn two_nodes_are_ambiguous() {
     let f = fixture();
-    let texts: Vec<NodeId> =
-        f.store.children(f.slot("summary")).into_iter().map(|b| f.text_of(b)).collect();
-    assert_eq!(f.resolve(&texts, TargetKind::Text), Err(AddressError::Ambiguous { matches: 2 }));
+    let texts: Vec<NodeId> = f
+        .store
+        .children(f.slot("summary"))
+        .into_iter()
+        .map(|b| f.text_of(b))
+        .collect();
+    assert_eq!(
+        f.resolve(&texts, TargetKind::Text),
+        Err(AddressError::Ambiguous { matches: 2 })
+    );
 }
 
 #[test]
 fn missing_node_is_unresolved() {
     let f = fixture();
-    assert_eq!(f.resolve(&[NodeId(999_999)], TargetKind::Block), Err(AddressError::Unresolved));
+    assert_eq!(
+        f.resolve(&[NodeId(999_999)], TargetKind::Block),
+        Err(AddressError::Unresolved)
+    );
 }
 
 #[test]
@@ -145,7 +168,10 @@ fn block_where_text_expected_is_wrong_kind() {
     let heading = f.store.children(f.slot("title"))[0];
     assert_eq!(
         f.resolve(&[heading], TargetKind::Text),
-        Err(AddressError::WrongKind { expected: TargetKind::Text, found: "heading".to_string() })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::Text,
+            found: "heading".to_string()
+        })
     );
 }
 
@@ -154,7 +180,10 @@ fn slot_where_block_expected_is_wrong_kind() {
     let f = fixture();
     assert_eq!(
         f.resolve(&[f.slot("title")], TargetKind::Block),
-        Err(AddressError::WrongKind { expected: TargetKind::Block, found: "slot".to_string() })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::Block,
+            found: "slot".to_string()
+        })
     );
 }
 
@@ -164,17 +193,26 @@ fn body_and_slot_resolve_as_container_but_block_does_not() {
     let body = f.body();
     assert_eq!(
         f.resolve(&[body], TargetKind::Container),
-        Ok(Target::Container { container: body, document: f.doc })
+        Ok(Target::Container {
+            container: body,
+            document: f.doc
+        })
     );
     let slot = f.slot("summary");
     assert_eq!(
         f.resolve(&[slot], TargetKind::Container),
-        Ok(Target::Container { container: slot, document: f.doc })
+        Ok(Target::Container {
+            container: slot,
+            document: f.doc
+        })
     );
     let block = f.body_blocks()[0];
     assert!(matches!(
         f.resolve(&[block], TargetKind::Container),
-        Err(AddressError::WrongKind { expected: TargetKind::Container, .. })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::Container,
+            ..
+        })
     ));
 }
 
@@ -184,7 +222,11 @@ fn block_resolves_with_container_and_document() {
     let block = f.body_blocks()[1];
     assert_eq!(
         f.resolve(&[block], TargetKind::Block),
-        Ok(Target::Block { block, container: f.body(), document: f.doc })
+        Ok(Target::Block {
+            block,
+            container: f.body(),
+            document: f.doc
+        })
     );
 }
 
@@ -195,9 +237,18 @@ fn target_under_superseded_document_is_unresolved() {
     f.store.replace_node(f.doc, Node::Element(kind));
     let block = f.body_blocks()[0];
     let text = f.text_of(block);
-    assert_eq!(f.resolve(&[text], TargetKind::Text), Err(AddressError::Unresolved));
-    assert_eq!(f.resolve(&[block], TargetKind::Block), Err(AddressError::Unresolved));
-    assert_eq!(f.resolve(&[f.body()], TargetKind::Container), Err(AddressError::Unresolved));
+    assert_eq!(
+        f.resolve(&[text], TargetKind::Text),
+        Err(AddressError::Unresolved)
+    );
+    assert_eq!(
+        f.resolve(&[block], TargetKind::Block),
+        Err(AddressError::Unresolved)
+    );
+    assert_eq!(
+        f.resolve(&[f.body()], TargetKind::Container),
+        Err(AddressError::Unresolved)
+    );
 }
 
 #[test]
@@ -211,7 +262,11 @@ fn block_in_multi_valued_slot_with_collection_parent_still_resolves() {
     f.store.add_edge(coll, Edge::Child(first));
     assert_eq!(
         f.resolve(&[first], TargetKind::Block),
-        Ok(Target::Block { block: first, container: summary, document: f.doc })
+        Ok(Target::Block {
+            block: first,
+            container: summary,
+            document: f.doc
+        })
     );
 }
 
@@ -226,7 +281,10 @@ fn block_with_second_element_parent_is_wrong_kind() {
     f.store.add_edge(other, Edge::Child(block));
     assert!(matches!(
         f.resolve(&[block], TargetKind::Block),
-        Err(AddressError::WrongKind { expected: TargetKind::Block, .. })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::Block,
+            ..
+        })
     ));
 }
 
@@ -238,7 +296,9 @@ fn set_text_on_html_block_text_is_rejected_and_store_unchanged() {
     let html = add_block(
         &mut f.store,
         body,
-        &ContentElement::HtmlBlock { source: "<div>x</div>".to_string() },
+        &ContentElement::HtmlBlock {
+            source: "<div>x</div>".to_string(),
+        },
     );
     let text = f.text_of(html);
     let nodes_before = f.store.node_count();
@@ -246,7 +306,10 @@ fn set_text_on_html_block_text_is_rejected_and_store_unchanged() {
     let mutation = NedMutation::SetText("<b>y</b>".to_string());
     assert!(matches!(
         f.resolve(&[text], mutation.target_kind()),
-        Err(AddressError::WrongKind { expected: TargetKind::Text, .. })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::Text,
+            ..
+        })
     ));
     assert_eq!(f.store.node_count(), nodes_before);
     assert!(matches!(f.store.get(text), Some(Node::Text(s)) if s == "<div>x</div>"));
@@ -259,7 +322,10 @@ fn insert_child_into_text_node_is_refused() {
     let text = f.text_of(f.body_blocks()[0]);
     assert!(matches!(
         f.resolve(&[text], TargetKind::Container),
-        Err(AddressError::WrongKind { expected: TargetKind::Container, .. })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::Container,
+            ..
+        })
     ));
 }
 
@@ -269,11 +335,17 @@ fn delete_refuses_frame_node() {
     let f = fixture();
     assert!(matches!(
         f.resolve(&[f.body()], TargetKind::Block),
-        Err(AddressError::WrongKind { expected: TargetKind::Block, .. })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::Block,
+            ..
+        })
     ));
     assert!(matches!(
         f.resolve(&[f.slot("summary")], TargetKind::Block),
-        Err(AddressError::WrongKind { expected: TargetKind::Block, .. })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::Block,
+            ..
+        })
     ));
 }
 
@@ -283,7 +355,10 @@ fn delete_refuses_frame_node() {
 fn set_text_with_same_value_is_no_change() {
     let f = fixture();
     let text = f.text_of(f.body_blocks()[0]);
-    assert_eq!(f.prepare(text, &NedMutation::SetText("a".to_string())), Err(EditError::NoChange));
+    assert_eq!(
+        f.prepare(text, &NedMutation::SetText("a".to_string())),
+        Err(EditError::NoChange)
+    );
 }
 
 /// ADR-059 N5: a line break in a heading is a space in its nodes, so a SetText
@@ -294,7 +369,10 @@ fn newline_in_heading_set_text_becomes_a_space() {
     let block = f.store.children(f.slot("title"))[0];
     let text = f.text_of(block);
     f.run(text, &NedMutation::SetText("Two\nlines".to_string()));
-    assert_eq!(block_from_node(&f.store, block), Ok(heading(1, "Two lines")));
+    assert_eq!(
+        block_from_node(&f.store, block),
+        Ok(heading(1, "Two lines"))
+    );
 }
 
 /// A fixture whose title slot holds the heading `md`.
@@ -315,7 +393,9 @@ impl Fixture {
         block_from_node(&self.store, self.title_block()).expect("the title decodes")
     }
     fn prepare_scope(&self, m: &NedMutation) -> Result<PreparedEdit, EditError> {
-        let target = self.resolve(&[self.title_block()], m.target_kind()).expect("resolves");
+        let target = self
+            .resolve(&[self.title_block()], m.target_kind())
+            .expect("resolves");
         prepare(&self.store, &target, m)
     }
 }
@@ -329,7 +409,11 @@ fn set_text_at_depth_in_a_heading() {
     let inner = f.store.children(emph)[0];
     assert_eq!(
         f.resolve(&[inner], TargetKind::Text),
-        Ok(Target::Text { text: inner, block: heading_block, document: f.doc })
+        Ok(Target::Text {
+            text: inner,
+            block: heading_block,
+            document: f.doc
+        })
     );
     f.run(inner, &NedMutation::SetText("Presemble".to_string()));
     assert_eq!(f.title(), heading(1, "Hello *Presemble*"));
@@ -353,7 +437,9 @@ impl Fixture {
         block_from_node(&self.store, self.paragraph_block()).expect("the paragraph decodes")
     }
     fn prepare_paragraph_scope(&self, m: &NedMutation) -> Result<PreparedEdit, EditError> {
-        let target = self.resolve(&[self.paragraph_block()], m.target_kind()).expect("resolves");
+        let target = self
+            .resolve(&[self.paragraph_block()], m.target_kind())
+            .expect("resolves");
         prepare(&self.store, &target, m)
     }
 }
@@ -367,7 +453,11 @@ fn set_text_at_depth_in_a_paragraph() {
     let inner = f.store.children(emph)[0];
     assert_eq!(
         f.resolve(&[inner], TargetKind::Text),
-        Ok(Target::Text { text: inner, block, document: f.doc })
+        Ok(Target::Text {
+            text: inner,
+            block,
+            document: f.doc
+        })
     );
     f.run(inner, &NedMutation::SetText("Presemble".to_string()));
     assert_eq!(f.paragraph(), para("Hello *Presemble*"));
@@ -377,7 +467,10 @@ fn set_text_at_depth_in_a_paragraph() {
 #[test]
 fn search_replace_on_paragraph_spans_formatting() {
     let mut f = fixture_with_paragraph("a *bc* d");
-    let m = NedMutation::SearchReplace { search: "c d".to_string(), replace: "X".to_string() };
+    let m = NedMutation::SearchReplace {
+        search: "c d".to_string(),
+        replace: "X".to_string(),
+    };
     let edit = f.prepare_paragraph_scope(&m).expect("valid");
     commit(&mut f.store, vec![edit]);
     assert_eq!(f.paragraph(), para("a *bX*"));
@@ -393,16 +486,29 @@ fn emptying_a_paragraph_is_refused() {
         NedMutation::SetText("  \n ".to_string()),
         sr("Hello", ""),
     ] {
-        let err = f.prepare(text, &m).expect_err(&format!("{m:?} must be refused"));
-        assert!(err.to_string().contains("delete it instead"), "{m:?}: {err}");
+        let err = f
+            .prepare(text, &m)
+            .expect_err(&format!("{m:?} must be refused"));
+        assert!(
+            err.to_string().contains("delete it instead"),
+            "{m:?}: {err}"
+        );
     }
-    let scope = NedMutation::SearchReplace { search: "Hello".to_string(), replace: String::new() };
+    let scope = NedMutation::SearchReplace {
+        search: "Hello".to_string(),
+        replace: String::new(),
+    };
     let err = f.prepare_paragraph_scope(&scope).expect_err("refused");
     assert!(err.to_string().contains("delete it instead"), "{err}");
-    let err = f.prepare_paragraph_scope(&NedMutation::SetInlines(vec![])).expect_err("refused");
+    let err = f
+        .prepare_paragraph_scope(&NedMutation::SetInlines(vec![]))
+        .expect_err("refused");
     assert!(err.to_string().contains("delete it instead"), "{err}");
     // A refused edit surfaces as an invalid value, not as a stale selection.
-    assert!(matches!(StaleCause::from(err), StaleCause::InvalidValue { .. }));
+    assert!(matches!(
+        StaleCause::from(err),
+        StaleCause::InvalidValue { .. }
+    ));
 }
 
 /// A blank line in a paragraph's text would be two paragraphs: refused for
@@ -412,24 +518,36 @@ fn a_blank_line_in_a_paragraph_edit_is_refused() {
     let f = fixture_with_paragraph("Hello *there*");
     let block = f.paragraph_block();
     let text = f.store.children(block)[0];
-    assert!(f.prepare(text, &NedMutation::SetText("a\n\nb".to_string())).is_err());
+    assert!(
+        f.prepare(text, &NedMutation::SetText("a\n\nb".to_string()))
+            .is_err()
+    );
     assert!(f.prepare(text, &sr("Hello", "a\n\nb")).is_err());
     assert!(f.prepare_paragraph_scope(&sr("there", "a\n\nb")).is_err());
     let blank = NodeTree::element("paragraph").with_child(NodeTree::text("a\n\nb"));
-    assert!(f.prepare(block, &NedMutation::Replace(vec![blank])).is_err());
+    assert!(
+        f.prepare(block, &NedMutation::Replace(vec![blank]))
+            .is_err()
+    );
 }
 
 /// The scope of a search is the heading's whole text, across its formatting.
 #[test]
 fn search_replace_on_heading_spans_formatting() {
     let mut f = fixture_with_title("a *bc* d");
-    let m = NedMutation::SearchReplace { search: "c d".to_string(), replace: "X".to_string() };
+    let m = NedMutation::SearchReplace {
+        search: "c d".to_string(),
+        replace: "X".to_string(),
+    };
     let edit = f.prepare_scope(&m).expect("valid");
     commit(&mut f.store, vec![edit]);
     assert_eq!(f.title(), heading(1, "a *bX*"));
     // Within one Text node it works as before.
     let text = f.store.children(f.title_block())[0];
-    let m = NedMutation::SearchReplace { search: "a".to_string(), replace: "Z".to_string() };
+    let m = NedMutation::SearchReplace {
+        search: "a".to_string(),
+        replace: "Z".to_string(),
+    };
     f.run(text, &m);
     assert_eq!(f.title(), heading(1, "Z *bX*"));
 }
@@ -443,15 +561,18 @@ fn search_replace_refuses_match_spanning_atom() {
     };
     assert_eq!(f.prepare_scope(&m), Err(EditError::SpansAtom));
     // A match next to the atom is fine.
-    let m = NedMutation::SearchReplace { search: "b".to_string(), replace: "X".to_string() };
+    let m = NedMutation::SearchReplace {
+        search: "b".to_string(),
+        replace: "X".to_string(),
+    };
     assert!(f.prepare_scope(&m).is_ok());
 }
 
 #[test]
 fn set_inlines_replaces_heading_content() {
     let mut f = fixture_with_title("Old");
-    let inlines = content::inline::parse_inlines("New *x*", content::inline::InlineContext::Heading)
-        .unwrap();
+    let inlines =
+        content::inline::parse_inlines("New *x*", content::inline::InlineContext::Heading).unwrap();
     let m = NedMutation::SetInlines(crate::inlines_to_tree(&inlines));
     let edit = f.prepare_scope(&m).expect("valid");
     commit(&mut f.store, vec![edit]);
@@ -474,11 +595,17 @@ fn a_paragraph_block_is_a_text_scope_and_a_code_block_is_not() {
     let code = add_block(
         &mut f.store,
         body,
-        &ContentElement::CodeBlock { language: None, code: "x".to_string() },
+        &ContentElement::CodeBlock {
+            language: None,
+            code: "x".to_string(),
+        },
     );
     assert!(matches!(
         f.resolve(&[code], TargetKind::TextScope),
-        Err(AddressError::WrongKind { expected: TargetKind::TextScope, .. })
+        Err(AddressError::WrongKind {
+            expected: TargetKind::TextScope,
+            ..
+        })
     ));
 }
 
@@ -498,27 +625,36 @@ fn set_text_valid_value_is_prepared_on_the_owning_block() {
     let f = fixture();
     let heading = f.store.children(f.slot("title"))[0];
     let text = f.text_of(heading);
-    let edit = f.prepare(text, &NedMutation::SetText("New".to_string())).unwrap();
+    let edit = f
+        .prepare(text, &NedMutation::SetText("New".to_string()))
+        .unwrap();
     assert_eq!(edit.footprint(), heading);
     assert_eq!(edit.document(), f.doc);
 }
 
 fn sr(search: &str, replace: &str) -> NedMutation {
-    NedMutation::SearchReplace { search: search.to_string(), replace: replace.to_string() }
+    NedMutation::SearchReplace {
+        search: search.to_string(),
+        replace: replace.to_string(),
+    }
 }
 
 #[test]
 fn search_replace_zero_occurrences_is_not_found() {
     let f = fixture();
     let text = f.text_of(f.body_blocks()[0]);
-    assert_eq!(f.prepare(text, &sr("zzz", "y")), Err(EditError::SearchNotFound));
+    assert_eq!(
+        f.prepare(text, &sr("zzz", "y")),
+        Err(EditError::SearchNotFound)
+    );
 }
 
 #[test]
 fn search_replace_two_occurrences_is_not_unique() {
     let mut f = fixture();
     let text = f.text_of(f.body_blocks()[0]);
-    f.store.replace_node(text, Node::Text("cat and cat".to_string()));
+    f.store
+        .replace_node(text, Node::Text("cat and cat".to_string()));
     assert_eq!(
         f.prepare(text, &sr("cat", "dog")),
         Err(EditError::SearchNotUnique { occurrences: 2 })
@@ -543,7 +679,8 @@ fn search_replace_search_equal_replace_is_no_change() {
 fn search_replace_unique_writes_the_replaced_text() {
     let mut f = fixture();
     let text = f.text_of(f.body_blocks()[0]);
-    f.store.replace_node(text, Node::Text("the cat sat".to_string()));
+    f.store
+        .replace_node(text, Node::Text("the cat sat".to_string()));
     f.run(text, &sr("cat", "dog"));
     assert_eq!(f.body_texts(), vec!["the dog sat", "b"]);
 }
@@ -552,7 +689,10 @@ fn search_replace_unique_writes_the_replaced_text() {
 fn replace_with_empty_payload_is_refused() {
     let f = fixture();
     let block = f.body_blocks()[0];
-    assert_eq!(f.prepare(block, &NedMutation::Replace(vec![])), Err(EditError::EmptyPayload));
+    assert_eq!(
+        f.prepare(block, &NedMutation::Replace(vec![])),
+        Err(EditError::EmptyPayload)
+    );
 }
 
 #[test]
@@ -594,7 +734,9 @@ fn insert_after_html_block_payload_is_refused() {
     let tree = NodeTree::element("html-block").with_child(NodeTree::text("<div>x</div>"));
     assert_eq!(
         f.prepare(block, &NedMutation::InsertAfter(vec![tree])),
-        Err(EditError::Payload(BlockDecodeError::NotPayloadKind("html-block".to_string())))
+        Err(EditError::Payload(BlockDecodeError::NotPayloadKind(
+            "html-block".to_string()
+        )))
     );
 }
 
@@ -605,7 +747,9 @@ fn image_payload_root_is_refused() {
     let tree = NodeTree::element("image").with_attr("path", "x.png");
     assert_eq!(
         f.prepare(block, &NedMutation::InsertAfter(vec![tree])),
-        Err(EditError::Payload(BlockDecodeError::NotPayloadKind("image".to_string())))
+        Err(EditError::Payload(BlockDecodeError::NotPayloadKind(
+            "image".to_string()
+        )))
     );
 }
 
@@ -627,7 +771,10 @@ fn mutation_kind_mismatch_is_refused() {
     let target = f.resolve(&[block], TargetKind::Block).unwrap();
     assert_eq!(
         prepare(&f.store, &target, &NedMutation::SetText("x".to_string())),
-        Err(EditError::TargetMismatch { expected: TargetKind::Text, found: TargetKind::Block })
+        Err(EditError::TargetMismatch {
+            expected: TargetKind::Text,
+            found: TargetKind::Block
+        })
     );
 }
 
@@ -636,7 +783,8 @@ fn prepare_does_not_touch_the_store() {
     let f = fixture();
     let a = f.body_blocks()[0];
     let nodes = f.store.node_count();
-    f.prepare(a, &NedMutation::Replace(vec![para_tree("X")])).unwrap();
+    f.prepare(a, &NedMutation::Replace(vec![para_tree("X")]))
+        .unwrap();
     f.prepare(a, &NedMutation::Delete).unwrap();
     assert_eq!(f.store.node_count(), nodes);
     assert_eq!(f.body_texts(), vec!["a", "b"]);
@@ -659,7 +807,9 @@ fn prepare_reports_footprint_and_document() {
         (body, NedMutation::InsertChild(tree()), body),
     ];
     for (target, mutation, footprint) in cases {
-        let edit = f.prepare(target, &mutation).unwrap_or_else(|e| panic!("{mutation:?}: {e}"));
+        let edit = f
+            .prepare(target, &mutation)
+            .unwrap_or_else(|e| panic!("{mutation:?}: {e}"));
         assert_eq!(edit.footprint(), footprint, "{mutation:?}");
         assert_eq!(edit.document(), f.doc, "{mutation:?}");
     }
@@ -684,14 +834,20 @@ fn insert_stores_canonical_encoding_not_raw_attrs() {
         .find(|(n, _)| f.store.resolve_name(*n) == "level")
         .and_then(|(_, v)| f.store.get(v).cloned());
     assert!(matches!(level, Some(Node::Integer(2))), "level: {level:?}");
-    assert_eq!(block_from_node(&f.store, new_heading), Ok(heading(2, "Section")));
+    assert_eq!(
+        block_from_node(&f.store, new_heading),
+        Ok(heading(2, "Section"))
+    );
 }
 
 #[test]
 fn insert_after_two_blocks_keeps_order() {
     let mut f = fixture();
     let a = f.body_blocks()[0];
-    f.run(a, &NedMutation::InsertAfter(vec![para_tree("X"), para_tree("Y")]));
+    f.run(
+        a,
+        &NedMutation::InsertAfter(vec![para_tree("X"), para_tree("Y")]),
+    );
     assert_eq!(f.body_texts(), vec!["a", "X", "Y", "b"]);
 }
 
@@ -699,7 +855,10 @@ fn insert_after_two_blocks_keeps_order() {
 fn insert_before_keeps_order() {
     let mut f = fixture();
     let b = f.body_blocks()[1];
-    f.run(b, &NedMutation::InsertBefore(vec![para_tree("X"), para_tree("Y")]));
+    f.run(
+        b,
+        &NedMutation::InsertBefore(vec![para_tree("X"), para_tree("Y")]),
+    );
     assert_eq!(f.body_texts(), vec!["a", "X", "Y", "b"]);
 }
 
@@ -707,7 +866,10 @@ fn insert_before_keeps_order() {
 fn insert_child_appends_in_order() {
     let mut f = fixture();
     let body = f.body();
-    f.run(body, &NedMutation::InsertChild(vec![para_tree("X"), para_tree("Y")]));
+    f.run(
+        body,
+        &NedMutation::InsertChild(vec![para_tree("X"), para_tree("Y")]),
+    );
     assert_eq!(f.body_texts(), vec!["a", "b", "X", "Y"]);
 }
 
@@ -716,10 +878,16 @@ fn replace_one_block_with_two() {
     let mut f = fixture();
     let a = f.body_blocks()[0];
     let a_text = f.text_of(a);
-    f.run(a, &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]));
+    f.run(
+        a,
+        &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]),
+    );
     assert_eq!(f.body_texts(), vec!["X", "Y", "b"]);
     assert!(f.store.get(a).is_none(), "replaced block removed");
-    assert!(f.store.get(a_text).is_none(), "replaced block's text removed");
+    assert!(
+        f.store.get(a_text).is_none(),
+        "replaced block's text removed"
+    );
 }
 
 #[test]
@@ -748,8 +916,16 @@ fn replace_keeps_leading_comments_on_the_first_new_root() {
     // ADR-062 D5: the comments of a replaced block move to the first new block.
     let mut f = fixture();
     let a = f.body_blocks()[0];
-    add_trivia(&mut f.store, a, ned::trivia::ATTR_TRIVIA_BEFORE, &["<!-- note -->"]);
-    f.run(a, &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]));
+    add_trivia(
+        &mut f.store,
+        a,
+        ned::trivia::ATTR_TRIVIA_BEFORE,
+        &["<!-- note -->"],
+    );
+    f.run(
+        a,
+        &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]),
+    );
     let blocks = f.body_blocks();
     assert_eq!(f.body_texts(), vec!["X", "Y", "b"]);
     assert_eq!(leading_comments(&f.store, blocks[0]), vec!["<!-- note -->"]);
@@ -762,7 +938,12 @@ fn replace_keeps_leading_comments_on_the_first_new_root() {
 fn delete_moves_leading_comments_to_the_next_sibling() {
     let mut f = fixture();
     let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
-    add_trivia(&mut f.store, a, ned::trivia::ATTR_TRIVIA_BEFORE, &["<!-- note -->"]);
+    add_trivia(
+        &mut f.store,
+        a,
+        ned::trivia::ATTR_TRIVIA_BEFORE,
+        &["<!-- note -->"],
+    );
     f.run(a, &NedMutation::Delete);
     assert_eq!(f.body_blocks(), vec![b]);
     assert_eq!(leading_comments(&f.store, b), vec!["<!-- note -->"]);
@@ -845,8 +1026,12 @@ fn commit_applies_disjoint_edits_in_order() {
     let title_text = f.text_of(title);
     let a = f.body_blocks()[0];
     // Both are prepared against the same, unedited store.
-    let set = f.prepare(title_text, &NedMutation::SetText("New title".to_string())).unwrap();
-    let insert = f.prepare(a, &NedMutation::InsertAfter(vec![para_tree("X")])).unwrap();
+    let set = f
+        .prepare(title_text, &NedMutation::SetText("New title".to_string()))
+        .unwrap();
+    let insert = f
+        .prepare(a, &NedMutation::InsertAfter(vec![para_tree("X")]))
+        .unwrap();
     commit(&mut f.store, vec![set, insert]);
     assert_eq!(f.body_texts(), vec!["a", "X", "b"]);
     assert_eq!(
@@ -863,12 +1048,30 @@ fn commit_reports_documents() {
     let body_of_other = find_child_by_name(&f.store, other, "body").unwrap();
     let second = {
         let target = f.resolve(&[body_of_other], TargetKind::Container).unwrap();
-        prepare(&f.store, &target, &NedMutation::InsertChild(vec![para_tree("X")])).unwrap()
+        prepare(
+            &f.store,
+            &target,
+            &NedMutation::InsertChild(vec![para_tree("X")]),
+        )
+        .unwrap()
     };
-    let third = f.prepare(f.body_blocks()[1], &NedMutation::InsertAfter(vec![para_tree("Y")])).unwrap();
+    let third = f
+        .prepare(
+            f.body_blocks()[1],
+            &NedMutation::InsertAfter(vec![para_tree("Y")]),
+        )
+        .unwrap();
     let committed = commit(&mut f.store, vec![second, first, third]);
-    assert_eq!(committed, Committed { documents: vec![f.doc, other] });
-    assert_eq!(commit(&mut f.store, vec![]), Committed { documents: vec![] });
+    assert_eq!(
+        committed,
+        Committed {
+            documents: vec![f.doc, other]
+        }
+    );
+    assert_eq!(
+        commit(&mut f.store, vec![]),
+        Committed { documents: vec![] }
+    );
 }
 
 #[test]
@@ -878,7 +1081,9 @@ fn commit_with_vanished_anchor_is_a_broken_invariant() {
     // input: it panics rather than skipping silently.
     let mut f = fixture();
     let a = f.body_blocks()[0];
-    let edit = f.prepare(a, &NedMutation::InsertAfter(vec![para_tree("X")])).unwrap();
+    let edit = f
+        .prepare(a, &NedMutation::InsertAfter(vec![para_tree("X")]))
+        .unwrap();
     let body = f.body();
     f.store.remove_child_edge(body, a);
     commit(&mut f.store, vec![edit]);
@@ -895,11 +1100,24 @@ fn step(ids: &[NodeId], mutation: NedMutation, origin: &'static str) -> PlannedM
 }
 
 fn set_text(id: NodeId, value: &str) -> PlannedMutation {
-    step(&[id], NedMutation::SetText(value.to_string()), "ned/set-text")
+    step(
+        &[id],
+        NedMutation::SetText(value.to_string()),
+        "ned/set-text",
+    )
 }
 
-fn overlap(entry: usize, origin: &'static str, with: usize, with_origin: &'static str) -> PlanError {
-    PlanError { entry, origin, cause: PlanCause::Overlap { with, with_origin } }
+fn overlap(
+    entry: usize,
+    origin: &'static str,
+    with: usize,
+    with_origin: &'static str,
+) -> PlanError {
+    PlanError {
+        entry,
+        origin,
+        cause: PlanCause::Overlap { with, with_origin },
+    }
 }
 
 #[test]
@@ -908,7 +1126,11 @@ fn plan_with_unmatched_selection_applies_nothing() {
     let a = f.body_blocks()[0];
     let plan: Plan = [
         set_text(f.text_of(a), "changed"),
-        step(&[], NedMutation::InsertAfter(vec![para_tree("X")]), "ned/insert-after"),
+        step(
+            &[],
+            NedMutation::InsertAfter(vec![para_tree("X")]),
+            "ned/insert-after",
+        ),
     ]
     .into_iter()
     .collect();
@@ -928,10 +1150,19 @@ fn plan_with_unmatched_selection_applies_nothing() {
 #[test]
 fn plan_with_ambiguous_selection_applies_nothing() {
     let mut f = fixture();
-    let texts: Vec<NodeId> =
-        f.store.children(f.slot("summary")).into_iter().map(|b| f.text_of(b)).collect();
-    let plan: Plan =
-        [step(&texts, NedMutation::SetText("x".to_string()), "ned/set-text")].into_iter().collect();
+    let texts: Vec<NodeId> = f
+        .store
+        .children(f.slot("summary"))
+        .into_iter()
+        .map(|b| f.text_of(b))
+        .collect();
+    let plan: Plan = [step(
+        &texts,
+        NedMutation::SetText("x".to_string()),
+        "ned/set-text",
+    )]
+    .into_iter()
+    .collect();
     assert_eq!(
         execute(&mut f.store, plan),
         Err(PlanError {
@@ -949,7 +1180,9 @@ fn plan_with_ambiguous_selection_applies_nothing() {
 fn two_edits_in_one_block_are_rejected() {
     let mut f = fixture();
     let a = f.body_blocks()[0];
-    let plan: Plan = [set_text(f.text_of(a), "x"), set_text(f.text_of(a), "y")].into_iter().collect();
+    let plan: Plan = [set_text(f.text_of(a), "x"), set_text(f.text_of(a), "y")]
+        .into_iter()
+        .collect();
     assert_eq!(
         execute(&mut f.store, plan),
         Err(overlap(1, "ned/set-text", 0, "ned/set-text"))
@@ -963,7 +1196,11 @@ fn insert_after_a_deleted_block_is_rejected() {
     let a = f.body_blocks()[0];
     let plan: Plan = [
         step(&[a], NedMutation::Delete, "ned/delete"),
-        step(&[a], NedMutation::InsertAfter(vec![para_tree("X")]), "ned/insert-after"),
+        step(
+            &[a],
+            NedMutation::InsertAfter(vec![para_tree("X")]),
+            "ned/insert-after",
+        ),
     ]
     .into_iter()
     .collect();
@@ -979,7 +1216,11 @@ fn edit_inside_a_replaced_block_is_rejected() {
     let mut f = fixture();
     let a = f.body_blocks()[0];
     let plan: Plan = [
-        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+        step(
+            &[a],
+            NedMutation::Replace(vec![para_tree("X")]),
+            "ned/replace",
+        ),
         set_text(f.text_of(a), "y"),
     ]
     .into_iter()
@@ -997,7 +1238,11 @@ fn insert_child_and_edit_in_the_same_container_overlap() {
     let body = f.body();
     let a_text = f.text_of(f.body_blocks()[0]);
     let append = || {
-        step(&[body], NedMutation::InsertChild(vec![para_tree("X")]), "ned/insert-child")
+        step(
+            &[body],
+            NedMutation::InsertChild(vec![para_tree("X")]),
+            "ned/insert-child",
+        )
     };
     // The container is an ancestor of the block, whichever comes first.
     let plan: Plan = [append(), set_text(a_text, "y")].into_iter().collect();
@@ -1020,16 +1265,26 @@ fn independent_edits_apply_together() {
     let a = f.body_blocks()[0];
     let plan: Plan = [
         set_text(f.text_of(title), "New title"),
-        step(&[a], NedMutation::InsertAfter(vec![para_tree("X")]), "ned/insert-after"),
+        step(
+            &[a],
+            NedMutation::InsertAfter(vec![para_tree("X")]),
+            "ned/insert-after",
+        ),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         execute(&mut f.store, plan),
-        Ok(Executed { documents: vec![f.doc], skipped: vec![] })
+        Ok(Executed {
+            documents: vec![f.doc],
+            skipped: vec![]
+        })
     );
     assert_eq!(f.body_texts(), vec!["a", "X", "b"]);
-    assert_eq!(block_from_node(&f.store, title), Ok(heading(1, "New title")));
+    assert_eq!(
+        block_from_node(&f.store, title),
+        Ok(heading(1, "New title"))
+    );
 }
 
 #[test]
@@ -1040,19 +1295,32 @@ fn invalid_second_entry_applies_nothing() {
     let wibble = NodeTree::element("wibble");
     let plan: Plan = [
         set_text(f.text_of(a), "changed"),
-        step(&[body], NedMutation::InsertChild(vec![wibble]), "ned/insert-child"),
+        step(
+            &[body],
+            NedMutation::InsertChild(vec![wibble]),
+            "ned/insert-child",
+        ),
     ]
     .into_iter()
     .collect();
     let nodes = f.store.node_count();
-    let blocks_before: Vec<_> =
-        f.body_blocks().into_iter().map(|b| block_from_node(&f.store, b)).collect();
+    let blocks_before: Vec<_> = f
+        .body_blocks()
+        .into_iter()
+        .map(|b| block_from_node(&f.store, b))
+        .collect();
     let err = execute(&mut f.store, plan).unwrap_err();
     assert_eq!((err.entry, err.origin), (1, "ned/insert-child"));
-    assert!(matches!(err.cause, PlanCause::Edit(EditError::Payload(_))), "{err:?}");
+    assert!(
+        matches!(err.cause, PlanCause::Edit(EditError::Payload(_))),
+        "{err:?}"
+    );
     assert_eq!(f.store.node_count(), nodes);
-    let blocks_after: Vec<_> =
-        f.body_blocks().into_iter().map(|b| block_from_node(&f.store, b)).collect();
+    let blocks_after: Vec<_> = f
+        .body_blocks()
+        .into_iter()
+        .map(|b| block_from_node(&f.store, b))
+        .collect();
     assert_eq!(blocks_after, blocks_before);
     assert_eq!(f.body_texts(), vec!["a", "b"]);
 }
@@ -1073,12 +1341,18 @@ fn no_change_entry_is_skipped() {
     let title = f.store.children(f.slot("title"))[0];
     let a = f.body_blocks()[0];
     // Step 1 sets the title to what it already is; step 2 changes "a".
-    let plan: Plan = [set_text(f.text_of(title), "Title"), set_text(f.text_of(a), "changed")]
-        .into_iter()
-        .collect();
+    let plan: Plan = [
+        set_text(f.text_of(title), "Title"),
+        set_text(f.text_of(a), "changed"),
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(
         execute(&mut f.store, plan),
-        Ok(Executed { documents: vec![f.doc], skipped: vec![0] })
+        Ok(Executed {
+            documents: vec![f.doc],
+            skipped: vec![0]
+        })
     );
     assert_eq!(f.body_texts(), vec!["changed", "b"]);
 }
@@ -1088,13 +1362,19 @@ fn all_no_op_plan_commits_nothing() {
     let mut f = fixture();
     let title = f.store.children(f.slot("title"))[0];
     let a = f.body_blocks()[0];
-    let plan: Plan = [set_text(f.text_of(title), "Title"), set_text(f.text_of(a), "a")]
-        .into_iter()
-        .collect();
+    let plan: Plan = [
+        set_text(f.text_of(title), "Title"),
+        set_text(f.text_of(a), "a"),
+    ]
+    .into_iter()
+    .collect();
     let (nodes, texts) = (f.store.node_count(), all_texts(&f));
     assert_eq!(
         execute(&mut f.store, plan),
-        Ok(Executed { documents: vec![], skipped: vec![0, 1] })
+        Ok(Executed {
+            documents: vec![],
+            skipped: vec![0, 1]
+        })
     );
     assert_eq!(f.store.node_count(), nodes);
     assert_eq!(all_texts(&f), texts);
@@ -1106,13 +1386,20 @@ fn skipped_entry_takes_no_part_in_overlap() {
     let a = f.body_blocks()[0];
     let plan: Plan = [
         set_text(f.text_of(a), "a"),
-        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+        step(
+            &[a],
+            NedMutation::Replace(vec![para_tree("X")]),
+            "ned/replace",
+        ),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         execute(&mut f.store, plan),
-        Ok(Executed { documents: vec![f.doc], skipped: vec![0] })
+        Ok(Executed {
+            documents: vec![f.doc],
+            skipped: vec![0]
+        })
     );
     assert_eq!(f.body_texts(), vec!["X", "b"]);
 }
@@ -1123,7 +1410,11 @@ fn invalid_entry_after_a_no_op_still_refuses() {
     let a = f.body_blocks()[0];
     let plan: Plan = [
         set_text(f.text_of(a), "a"),
-        step(&[], NedMutation::InsertAfter(vec![para_tree("X")]), "ned/insert-after"),
+        step(
+            &[],
+            NedMutation::InsertAfter(vec![para_tree("X")]),
+            "ned/insert-after",
+        ),
     ]
     .into_iter()
     .collect();
@@ -1150,7 +1441,11 @@ fn overlap_names_the_plan_entry_after_a_skipped_step() {
     let plan: Plan = [
         set_text(f.text_of(title), "Title"),
         set_text(f.text_of(a), "changed"),
-        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+        step(
+            &[a],
+            NedMutation::Replace(vec![para_tree("X")]),
+            "ned/replace",
+        ),
     ]
     .into_iter()
     .collect();
@@ -1167,7 +1462,10 @@ fn empty_plan_commits_nothing() {
     assert!(Plan::default().is_empty());
     assert_eq!(
         execute(&mut f.store, Plan::default()),
-        Ok(Executed { documents: vec![], skipped: vec![] })
+        Ok(Executed {
+            documents: vec![],
+            skipped: vec![]
+        })
     );
     assert_eq!(f.store.node_count(), nodes);
 }
@@ -1175,12 +1473,20 @@ fn empty_plan_commits_nothing() {
 #[test]
 fn plan_error_names_entry_and_origin() {
     let mut f = fixture();
-    let texts: Vec<NodeId> =
-        f.store.children(f.slot("summary")).into_iter().map(|b| f.text_of(b)).collect();
+    let texts: Vec<NodeId> = f
+        .store
+        .children(f.slot("summary"))
+        .into_iter()
+        .map(|b| f.text_of(b))
+        .collect();
     let a = f.body_blocks()[0];
     let plan: Plan = [
         set_text(f.text_of(a), "x"),
-        step(&texts, NedMutation::SetText("y".to_string()), "ned/set-text"),
+        step(
+            &texts,
+            NedMutation::SetText("y".to_string()),
+            "ned/set-text",
+        ),
     ]
     .into_iter()
     .collect();
@@ -1191,7 +1497,11 @@ fn plan_error_names_entry_and_origin() {
     );
 
     let plan: Plan = [
-        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+        step(
+            &[a],
+            NedMutation::Replace(vec![para_tree("X")]),
+            "ned/replace",
+        ),
         set_text(f.text_of(a), "y"),
     ]
     .into_iter()
@@ -1202,7 +1512,10 @@ fn plan_error_names_entry_and_origin() {
         "step 2 (ned/set-text) changes what step 1 (ned/replace) changes"
     );
     // Both map onto the suggestion surface.
-    assert_eq!(StaleCause::from(err.clone()), StaleCause::Overlap { with_step: 1 });
+    assert_eq!(
+        StaleCause::from(err.clone()),
+        StaleCause::Overlap { with_step: 1 }
+    );
     // And onto the structured refusal: 1-based step, origin, cause, message.
     let failure = editorial_types::PlanFailure::from(err);
     assert_eq!(failure.step, 2);
@@ -1217,7 +1530,10 @@ fn plan_error_names_entry_and_origin() {
         origin: "ned/set-text",
         cause: PlanCause::Address(AddressError::Ambiguous { matches: 2 }),
     };
-    assert_eq!(StaleCause::from(ambiguous), StaleCause::Ambiguous { matches: 2 });
+    assert_eq!(
+        StaleCause::from(ambiguous),
+        StaleCause::Ambiguous { matches: 2 }
+    );
     let no_change = PlanError {
         entry: 0,
         origin: "ned/set-text",
@@ -1232,16 +1548,28 @@ fn commit_order_is_plan_order() {
     // moves to B first, and the insert lands before B.
     let mut f = fixture();
     let (a, b) = (f.body_blocks()[0], f.body_blocks()[1]);
-    add_trivia(&mut f.store, a, ned::trivia::ATTR_TRIVIA_BEFORE, &["<!-- note -->"]);
+    add_trivia(
+        &mut f.store,
+        a,
+        ned::trivia::ATTR_TRIVIA_BEFORE,
+        &["<!-- note -->"],
+    );
     let plan: Plan = [
         step(&[a], NedMutation::Delete, "ned/delete"),
-        step(&[b], NedMutation::InsertBefore(vec![para_tree("X")]), "ned/insert-before"),
+        step(
+            &[b],
+            NedMutation::InsertBefore(vec![para_tree("X")]),
+            "ned/insert-before",
+        ),
     ]
     .into_iter()
     .collect();
     assert_eq!(
         execute(&mut f.store, plan),
-        Ok(Executed { documents: vec![f.doc], skipped: vec![] })
+        Ok(Executed {
+            documents: vec![f.doc],
+            skipped: vec![]
+        })
     );
     assert_eq!(f.body_texts(), vec!["X", "b"]);
     let blocks = f.body_blocks();
@@ -1253,11 +1581,15 @@ fn commit_order_is_plan_order() {
 // ── blocks inside a blockquote (ADR-059 stage 8.2) ──────────────────────────
 
 fn quote_md(md: &str) -> ContentElement {
-    content::parse_document(md).unwrap().elements[0].node.clone()
+    content::parse_document(md).unwrap().elements[0]
+        .node
+        .clone()
 }
 
 fn quote_tree(children: Vec<NodeTree>) -> NodeTree {
-    children.into_iter().fold(NodeTree::element("blockquote"), |q, c| q.with_child(c))
+    children
+        .into_iter()
+        .fold(NodeTree::element("blockquote"), |q, c| q.with_child(c))
 }
 
 /// A quote read from `md`, appended to the body of the fixture.
@@ -1290,7 +1622,11 @@ fn block_inside_blockquote_is_replaceable() {
     let second = f.store.children(quote)[1];
     assert_eq!(
         f.resolve(&[second], TargetKind::Block),
-        Ok(Target::Block { block: second, container: quote, document: f.doc })
+        Ok(Target::Block {
+            block: second,
+            container: quote,
+            document: f.doc
+        })
     );
     f.run(second, &NedMutation::Replace(vec![para_tree("X")]));
     assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> X\n"));
@@ -1306,11 +1642,18 @@ fn block_inside_a_nested_blockquote_resolves() {
     let b = f.store.children(inner)[0];
     assert_eq!(
         f.resolve(&[b], TargetKind::Block),
-        Ok(Target::Block { block: b, container: inner, document: f.doc })
+        Ok(Target::Block {
+            block: b,
+            container: inner,
+            document: f.doc
+        })
     );
     assert_eq!(
         f.resolve(&[inner], TargetKind::Container),
-        Ok(Target::Container { container: inner, document: f.doc })
+        Ok(Target::Container {
+            container: inner,
+            document: f.doc
+        })
     );
 }
 
@@ -1324,7 +1667,11 @@ fn text_inside_blockquote_resolves_and_edits() {
     let text = f.text_of(first);
     assert_eq!(
         f.resolve(&[text], TargetKind::Text),
-        Ok(Target::Text { text, block: first, document: f.doc })
+        Ok(Target::Text {
+            text,
+            block: first,
+            document: f.doc
+        })
     );
     f.run(text, &NedMutation::SetText("x".to_string()));
     assert_eq!(decoded(&f, quote), quote_md("> x\n>\n> b\n"));
@@ -1336,14 +1683,20 @@ fn insert_into_a_blockquote() {
     let quote = add_quote(&mut f, "> a\n>\n> b\n");
     assert_eq!(
         f.resolve(&[quote], TargetKind::Container),
-        Ok(Target::Container { container: quote, document: f.doc })
+        Ok(Target::Container {
+            container: quote,
+            document: f.doc
+        })
     );
     f.run(quote, &NedMutation::InsertChild(vec![para_tree("X")]));
     assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> b\n>\n> X\n"));
     // Before and after a child.
     let first = f.store.children(quote)[0];
     f.run(first, &NedMutation::InsertAfter(vec![para_tree("Y")]));
-    assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> Y\n>\n> b\n>\n> X\n"));
+    assert_eq!(
+        decoded(&f, quote),
+        quote_md("> a\n>\n> Y\n>\n> b\n>\n> X\n")
+    );
 }
 
 /// D2: deleting the last block leaves an empty quote, not a refusal.
@@ -1365,16 +1718,28 @@ fn replacing_a_blockquote_keeps_the_comments_inside_it() {
     // The same shape, and every child still there.
     let mut f = fixture();
     let quote = add_quote(&mut f, QUOTE_WITH_COMMENTS);
-    f.run(quote, &NedMutation::Replace(vec![quote_tree(vec![para_tree("x"), para_tree("y")])]));
+    f.run(
+        quote,
+        &NedMutation::Replace(vec![quote_tree(vec![para_tree("x"), para_tree("y")])]),
+    );
     let new = f.body_blocks()[2];
-    assert_eq!(decoded(&f, new), quote_md("> x\n>\n> <!-- c1 -->\n>\n> y\n>\n> <!-- end -->\n"));
+    assert_eq!(
+        decoded(&f, new),
+        quote_md("> x\n>\n> <!-- c1 -->\n>\n> y\n>\n> <!-- end -->\n")
+    );
 
     // A child is gone: its comments fall back to the quote's end, in order.
     let mut f = fixture();
     let quote = add_quote(&mut f, QUOTE_WITH_COMMENTS);
-    f.run(quote, &NedMutation::Replace(vec![quote_tree(vec![para_tree("x")])]));
+    f.run(
+        quote,
+        &NedMutation::Replace(vec![quote_tree(vec![para_tree("x")])]),
+    );
     let new = f.body_blocks()[2];
-    assert_eq!(decoded(&f, new), quote_md("> x\n>\n> <!-- c1 -->\n>\n> <!-- end -->\n"));
+    assert_eq!(
+        decoded(&f, new),
+        quote_md("> x\n>\n> <!-- c1 -->\n>\n> <!-- end -->\n")
+    );
 
     // Nested quotes: the path goes down, and falls back to the deepest
     // container that is still there.
@@ -1391,13 +1756,22 @@ fn replacing_a_blockquote_keeps_the_comments_inside_it() {
     let emptied = quote_tree(vec![para_tree("a"), quote_tree(vec![])]);
     f.run(quote, &NedMutation::Replace(vec![emptied]));
     let new = f.body_blocks()[2];
-    assert_eq!(decoded(&f, new), quote_md("> a\n>\n> > <!-- n -->\n> >\n> > <!-- ne -->\n"));
+    assert_eq!(
+        decoded(&f, new),
+        quote_md("> a\n>\n> > <!-- n -->\n> >\n> > <!-- ne -->\n")
+    );
 
     let mut f = fixture();
     let quote = add_quote(&mut f, nested);
-    f.run(quote, &NedMutation::Replace(vec![quote_tree(vec![para_tree("a"), para_tree("b")])]));
+    f.run(
+        quote,
+        &NedMutation::Replace(vec![quote_tree(vec![para_tree("a"), para_tree("b")])]),
+    );
     let new = f.body_blocks()[2];
-    assert_eq!(decoded(&f, new), quote_md("> a\n>\n> b\n>\n> <!-- n -->\n>\n> <!-- ne -->\n"));
+    assert_eq!(
+        decoded(&f, new),
+        quote_md("> a\n>\n> b\n>\n> <!-- n -->\n>\n> <!-- ne -->\n")
+    );
 }
 
 /// D3, another shape: the comments go after the replaced block's own leading
@@ -1407,7 +1781,10 @@ fn replacing_a_blockquote_with_another_shape_keeps_the_comments_in_order() {
     let mut f = fixture();
     let quote = add_quote(&mut f, QUOTE_WITH_COMMENTS);
     add_trivia(&mut f.store, quote, BEFORE, &["<!-- lead -->"]);
-    f.run(quote, &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]));
+    f.run(
+        quote,
+        &NedMutation::Replace(vec![para_tree("X"), para_tree("Y")]),
+    );
     let blocks = f.body_blocks();
     assert_eq!(f.body_texts()[2..], ["X", "Y"]);
     assert_eq!(
@@ -1431,7 +1808,12 @@ fn deleting_a_blockquote_keeps_the_comments_inside_it() {
     assert_eq!(f.body_blocks()[2], after);
     assert_eq!(
         leading_comments(&f.store, after),
-        vec!["<!-- lead -->", "<!-- c1 -->", "<!-- end -->", "<!-- own -->"]
+        vec![
+            "<!-- lead -->",
+            "<!-- c1 -->",
+            "<!-- end -->",
+            "<!-- own -->"
+        ]
     );
 
     // With nothing after it, they go to the end of the container.
@@ -1454,8 +1836,14 @@ fn deleting_the_last_block_keeps_its_comments_before_the_container_end() {
     let quote = add_quote(&mut f, "> a\n>\n> <!-- c -->\n>\n> b\n>\n> <!-- end -->\n");
     let last = f.store.children(quote)[1];
     f.run(last, &NedMutation::Delete);
-    assert_eq!(comments_of(&f.store, quote, END), vec!["<!-- c -->", "<!-- end -->"]);
-    assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> <!-- c -->\n>\n> <!-- end -->\n"));
+    assert_eq!(
+        comments_of(&f.store, quote, END),
+        vec!["<!-- c -->", "<!-- end -->"]
+    );
+    assert_eq!(
+        decoded(&f, quote),
+        quote_md("> a\n>\n> <!-- c -->\n>\n> <!-- end -->\n")
+    );
 
     // At the top level.
     let mut f = fixture();
@@ -1463,7 +1851,10 @@ fn deleting_the_last_block_keeps_its_comments_before_the_container_end() {
     add_trivia(&mut f.store, b, BEFORE, &["<!-- c -->"]);
     add_trivia(&mut f.store, body, END, &["<!-- end -->"]);
     f.run(b, &NedMutation::Delete);
-    assert_eq!(comments_of(&f.store, body, END), vec!["<!-- c -->", "<!-- end -->"]);
+    assert_eq!(
+        comments_of(&f.store, body, END),
+        vec!["<!-- c -->", "<!-- end -->"]
+    );
 }
 
 /// A nested quote deleted from a quote: its comments go to the outer quote.
@@ -1483,12 +1874,19 @@ fn plan_replacing_a_blockquote_and_editing_inside_it_is_rejected() {
     let quote = add_quote(&mut f, "> a\n>\n> b\n");
     let first = f.store.children(quote)[0];
     let plan: Plan = [
-        step(&[quote], NedMutation::Replace(vec![quote_tree(vec![para_tree("X")])]), "ned/replace"),
+        step(
+            &[quote],
+            NedMutation::Replace(vec![quote_tree(vec![para_tree("X")])]),
+            "ned/replace",
+        ),
         set_text(f.text_of(first), "y"),
     ]
     .into_iter()
     .collect();
-    assert_eq!(execute(&mut f.store, plan), Err(overlap(1, "ned/set-text", 0, "ned/replace")));
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(1, "ned/set-text", 0, "ned/replace"))
+    );
     assert_eq!(decoded(&f, quote), quote_md("> a\n>\n> b\n"));
 }
 
@@ -1499,7 +1897,9 @@ fn list_tree(tight: bool, items: Vec<Vec<NodeTree>>) -> NodeTree {
         .with_attr("ordered", "false")
         .with_attr("tight", tight.to_string());
     items.into_iter().fold(list, |list, blocks| {
-        let item = blocks.into_iter().fold(NodeTree::element("item"), |item, b| item.with_child(b));
+        let item = blocks
+            .into_iter()
+            .fold(NodeTree::element("item"), |item, b| item.with_child(b));
         list.with_child(item)
     })
 }
@@ -1521,7 +1921,11 @@ fn block_inside_a_list_item_is_replaceable() {
     let block = f.store.children(item)[0];
     assert_eq!(
         f.resolve(&[block], TargetKind::Block),
-        Ok(Target::Block { block, container: item, document: f.doc })
+        Ok(Target::Block {
+            block,
+            container: item,
+            document: f.doc
+        })
     );
     f.run(block, &NedMutation::Replace(vec![para_tree("X")]));
     assert_eq!(decoded(&f, list), quote_md("- a\n- X\n"));
@@ -1536,9 +1940,15 @@ fn insert_into_a_list_item() {
     let item = f.store.children(list)[0];
     assert_eq!(
         f.resolve(&[item], TargetKind::Container),
-        Ok(Target::Container { container: item, document: f.doc })
+        Ok(Target::Container {
+            container: item,
+            document: f.doc
+        })
     );
-    assert!(f.resolve(&[item], TargetKind::Block).is_err(), "an item is not a block target");
+    assert!(
+        f.resolve(&[item], TargetKind::Block).is_err(),
+        "an item is not a block target"
+    );
     // A second block makes the tight item unwritable as tight: the list reads
     // as loose, with nothing else changed.
     f.run(item, &NedMutation::InsertChild(vec![para_tree("X")]));
@@ -1556,15 +1966,23 @@ fn insert_into_a_list_item() {
 fn deleting_down_to_one_block_makes_a_loose_list_tight() {
     let mut f = fixture();
     let list = add_list(&mut f, "- a\n\n  b\n");
-    let ContentElement::List { list: before } = decoded(&f, list) else { panic!("a list") };
+    let ContentElement::List { list: before } = decoded(&f, list) else {
+        panic!("a list")
+    };
     assert_eq!(before.spacing, content::Spacing::Loose);
     let item = f.store.children(list)[0];
     let second = f.store.children(item)[1];
     f.run(second, &NedMutation::Delete);
 
     let after = decoded(&f, list);
-    let ContentElement::List { list: after_list } = &after else { panic!("a list") };
-    assert_eq!(after_list.spacing, content::Spacing::Tight, "stored tight: {after:?}");
+    let ContentElement::List { list: after_list } = &after else {
+        panic!("a list")
+    };
+    assert_eq!(
+        after_list.spacing,
+        content::Spacing::Tight,
+        "stored tight: {after:?}"
+    );
     // Saved and read again, it is the same N.
     let saved = content::project_markdown(&after, content::Projection::Block).expect("projects");
     assert_eq!(quote_md(&saved), after, "{saved:?}");
@@ -1581,7 +1999,11 @@ fn list_item_text_is_addressable() {
     let text = f.text_of(paragraph);
     assert_eq!(
         f.resolve(&[text], TargetKind::Text),
-        Ok(Target::Text { text, block: paragraph, document: f.doc })
+        Ok(Target::Text {
+            text,
+            block: paragraph,
+            document: f.doc
+        })
     );
     f.run(text, &NedMutation::SetText("x".to_string()));
     assert_eq!(decoded(&f, list), quote_md("- a\n- x\n"));
@@ -1612,7 +2034,10 @@ fn replacing_a_list_keeps_the_comments_inside_its_items() {
     let flat = list_tree(true, vec![vec![para_tree("a")], vec![para_tree("c")]]);
     f.run(list, &NedMutation::Replace(vec![flat]));
     let new = f.body_blocks()[2];
-    assert_eq!(decoded(&f, new), quote_md("- a\n  <!-- c1 -->\n  <!-- end -->\n- c\n"));
+    assert_eq!(
+        decoded(&f, new),
+        quote_md("- a\n  <!-- c1 -->\n  <!-- end -->\n- c\n")
+    );
 
     // Another shape: all go to the first new block, after its own.
     let mut f = fixture();
@@ -1643,14 +2068,20 @@ fn plan_replacing_a_list_and_editing_inside_it_is_rejected() {
     ]
     .into_iter()
     .collect();
-    assert_eq!(execute(&mut f.store, plan), Err(overlap(1, "ned/set-text", 0, "ned/replace")));
+    assert_eq!(
+        execute(&mut f.store, plan),
+        Err(overlap(1, "ned/set-text", 0, "ned/replace"))
+    );
     assert_eq!(decoded(&f, list), quote_md("- a\n- b\n"));
 }
 
 // ── comments (LSP-2, 2.1) ───────────────────────────────────────────────────
 
 fn set_comments(place: CommentPlace, texts: &[&str]) -> NedMutation {
-    NedMutation::SetComments { place, comments: texts.iter().map(|t| t.to_string()).collect() }
+    NedMutation::SetComments {
+        place,
+        comments: texts.iter().map(|t| t.to_string()).collect(),
+    }
 }
 
 /// The comments directly before a block.
@@ -1672,8 +2103,15 @@ fn set_comments_replaces_a_blocks_leading_comments() {
     add_trivia(&mut f.store, b, BEFORE, &["<!-- keep -->"]);
 
     f.run(a, &before(&["<!-- x -->", "<!-- y -->"]));
-    assert_eq!(leading_comments(&f.store, a), vec!["<!-- x -->", "<!-- y -->"]);
-    assert_eq!(leading_comments(&f.store, b), vec!["<!-- keep -->"], "a sibling is untouched");
+    assert_eq!(
+        leading_comments(&f.store, a),
+        vec!["<!-- x -->", "<!-- y -->"]
+    );
+    assert_eq!(
+        leading_comments(&f.store, b),
+        vec!["<!-- keep -->"],
+        "a sibling is untouched"
+    );
     assert_eq!(f.body_texts(), vec!["a", "b"], "the blocks are untouched");
 
     // An empty list removes them all.
@@ -1685,8 +2123,14 @@ fn set_comments_replaces_a_blocks_leading_comments() {
     assert_eq!(leading_comments(&f.store, a), vec!["<!-- z -->"]);
 
     // The same list is no change.
-    assert_eq!(f.prepare(a, &before(&["<!-- z -->"])), Err(EditError::NoChange));
-    assert_eq!(f.prepare(b, &before(&["<!-- keep -->"])), Err(EditError::NoChange));
+    assert_eq!(
+        f.prepare(a, &before(&["<!-- z -->"])),
+        Err(EditError::NoChange)
+    );
+    assert_eq!(
+        f.prepare(b, &before(&["<!-- keep -->"])),
+        Err(EditError::NoChange)
+    );
 }
 
 /// A Container target (body, slot, unassigned, blockquote, item): the list
@@ -1700,8 +2144,15 @@ fn set_comments_on_a_container_sets_its_end_comments() {
     add_trivia(&mut f.store, a, BEFORE, &["<!-- lead -->"]);
 
     f.run(body, &end(&["<!-- e1 -->", "<!-- e2 -->"]));
-    assert_eq!(comments_of(&f.store, body, END), vec!["<!-- e1 -->", "<!-- e2 -->"]);
-    assert_eq!(leading_comments(&f.store, a), vec!["<!-- lead -->"], "leading comments are untouched");
+    assert_eq!(
+        comments_of(&f.store, body, END),
+        vec!["<!-- e1 -->", "<!-- e2 -->"]
+    );
+    assert_eq!(
+        leading_comments(&f.store, a),
+        vec!["<!-- lead -->"],
+        "leading comments are untouched"
+    );
 
     f.run(body, &end(&[]));
     assert!(comments_of(&f.store, body, END).is_empty());
@@ -1734,20 +2185,34 @@ fn set_comments_before_a_blockquote_sets_its_leading_comments() {
 
     f.run(quote, &before(&["<!-- new -->"]));
     assert_eq!(leading_comments(&f.store, quote), vec!["<!-- new -->"]);
-    assert_eq!(comments_of(&f.store, quote, END), vec!["<!-- end -->"], "the end comments stay");
+    assert_eq!(
+        comments_of(&f.store, quote, END),
+        vec!["<!-- end -->"],
+        "the end comments stay"
+    );
 }
 
 /// Each string must be an HTML comment; anything else is refused with the
 /// store untouched.
 #[test]
 fn set_comments_refuses_a_non_comment() {
-    for bad in ["not a comment", "", "<!-- open", "<div>x</div>", "<!-- a --> text"] {
+    for bad in [
+        "not a comment",
+        "",
+        "<!-- open",
+        "<div>x</div>",
+        "<!-- a --> text",
+    ] {
         let mut f = fixture();
         let a = f.body_blocks()[0];
         add_trivia(&mut f.store, a, BEFORE, &["<!-- old -->"]);
-        let plan: Plan = [step(&[a], before(&["<!-- fine -->", bad]), "ned/set-comments-before")]
-            .into_iter()
-            .collect();
+        let plan: Plan = [step(
+            &[a],
+            before(&["<!-- fine -->", bad]),
+            "ned/set-comments-before",
+        )]
+        .into_iter()
+        .collect();
         assert_eq!(
             execute(&mut f.store, plan),
             Err(PlanError {
@@ -1757,7 +2222,11 @@ fn set_comments_refuses_a_non_comment() {
             }),
             "{bad:?}"
         );
-        assert_eq!(leading_comments(&f.store, a), vec!["<!-- old -->"], "{bad:?}: nothing changed");
+        assert_eq!(
+            leading_comments(&f.store, a),
+            vec!["<!-- old -->"],
+            "{bad:?}: nothing changed"
+        );
     }
 }
 
@@ -1768,7 +2237,11 @@ fn replace_and_set_comments_on_one_block_overlap() {
     let mut f = fixture();
     let a = f.body_blocks()[0];
     let plan: Plan = [
-        step(&[a], NedMutation::Replace(vec![para_tree("X")]), "ned/replace"),
+        step(
+            &[a],
+            NedMutation::Replace(vec![para_tree("X")]),
+            "ned/replace",
+        ),
         step(&[a], before(&["<!-- c -->"]), "ned/set-comments-before"),
     ]
     .into_iter()
@@ -1787,7 +2260,9 @@ fn replace_and_set_comments_on_one_block_overlap() {
 fn end_comments_on_a_paragraph_is_wrong_kind() {
     let mut f = fixture();
     let a = f.body_blocks()[0];
-    let plan: Plan = [step(&[a], end(&["<!-- c -->"]), "ned/set-end-comments")].into_iter().collect();
+    let plan: Plan = [step(&[a], end(&["<!-- c -->"]), "ned/set-end-comments")]
+        .into_iter()
+        .collect();
     assert_eq!(
         execute(&mut f.store, plan),
         Err(PlanError {
@@ -1807,8 +2282,13 @@ fn end_comments_on_a_paragraph_is_wrong_kind() {
 fn comments_before_the_body_is_wrong_kind() {
     let mut f = fixture();
     let body = f.body();
-    let plan: Plan =
-        [step(&[body], before(&["<!-- c -->"]), "ned/set-comments-before")].into_iter().collect();
+    let plan: Plan = [step(
+        &[body],
+        before(&["<!-- c -->"]),
+        "ned/set-comments-before",
+    )]
+    .into_iter()
+    .collect();
     assert_eq!(
         execute(&mut f.store, plan),
         Err(PlanError {
@@ -1826,10 +2306,15 @@ fn comments_before_the_body_is_wrong_kind() {
 
 #[test]
 fn edit_error_maps_to_stale_cause() {
-    let invalid = |e: EditError| StaleCause::InvalidValue { detail: e.to_string() };
+    let invalid = |e: EditError| StaleCause::InvalidValue {
+        detail: e.to_string(),
+    };
     let rows: Vec<(EditError, StaleCause)> = vec![
         (
-            EditError::TargetMismatch { expected: TargetKind::Text, found: TargetKind::Block },
+            EditError::TargetMismatch {
+                expected: TargetKind::Text,
+                found: TargetKind::Block,
+            },
             StaleCause::InvalidValue {
                 detail: "the target kind does not match the mutation".to_string(),
             },
@@ -1837,7 +2322,9 @@ fn edit_error_maps_to_stale_cause() {
         (EditError::ExistingNode, invalid(EditError::ExistingNode)),
         (
             EditError::EmptyPayload,
-            StaleCause::InvalidValue { detail: "empty payload".to_string() },
+            StaleCause::InvalidValue {
+                detail: "empty payload".to_string(),
+            },
         ),
         (
             EditError::Payload(BlockDecodeError::NotAnElement),
@@ -1853,7 +2340,9 @@ fn edit_error_maps_to_stale_cause() {
         ),
         (
             EditError::EmptySearch,
-            StaleCause::InvalidValue { detail: "empty search text".to_string() },
+            StaleCause::InvalidValue {
+                detail: "empty search text".to_string(),
+            },
         ),
         (EditError::SearchNotFound, StaleCause::SearchNotFound),
         (

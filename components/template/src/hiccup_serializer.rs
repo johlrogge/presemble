@@ -160,7 +160,10 @@ mod tests {
     fn make_el(name: &str, attrs: Vec<(&str, &str)>, children: Vec<Node>) -> Node {
         Node::Element(Element {
             name: name.to_string(),
-            attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), Form::Str(v.to_string()))).collect(),
+            attrs: attrs
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), Form::Str(v.to_string())))
+                .collect(),
             children,
         })
     }
@@ -186,7 +189,10 @@ mod tests {
     fn no_empty_attrs_map() {
         let nodes = vec![make_el("div", vec![], vec![make_text("text")])];
         let result = serialize_to_hiccup(&nodes);
-        assert!(!result.contains("{}"), "should not have empty map: {result}");
+        assert!(
+            !result.contains("{}"),
+            "should not have empty map: {result}"
+        );
     }
 
     // 4. Namespace element
@@ -198,7 +204,10 @@ mod tests {
             vec![],
         )];
         let result = serialize_to_hiccup(&nodes);
-        assert_eq!(result, "[:presemble/insert {:data \"(ref article.title)\"}]");
+        assert_eq!(
+            result,
+            "[:presemble/insert {:data \"(ref article.title)\"}]"
+        );
     }
 
     // 5. Namespace attribute
@@ -223,8 +232,14 @@ mod tests {
         let outer = make_el("div", vec![], vec![inner]);
         let result = serialize_to_hiccup(&[outer]);
         // Should have multi-line format with indented child
-        assert!(result.contains("[:div\n"), "expected newline after :div: {result}");
-        assert!(result.contains("  [:p \"Hello\"]"), "expected indented :p: {result}");
+        assert!(
+            result.contains("[:div\n"),
+            "expected newline after :div: {result}"
+        );
+        assert!(
+            result.contains("  [:p \"Hello\"]"),
+            "expected indented :p: {result}"
+        );
     }
 
     // 7. Text escaping: newlines, quotes, backslashes
@@ -243,9 +258,16 @@ mod tests {
             make_el("p", vec![], vec![make_text("Body")]),
         ];
         let result = serialize_to_hiccup(&nodes);
-        assert!(result.contains("\n\n"), "expected blank line between top-level nodes: {result}");
+        assert!(
+            result.contains("\n\n"),
+            "expected blank line between top-level nodes: {result}"
+        );
         let parts: Vec<&str> = result.split("\n\n").collect();
-        assert_eq!(parts.len(), 2, "expected exactly one blank line separator: {result}");
+        assert_eq!(
+            parts.len(),
+            2,
+            "expected exactly one blank line separator: {result}"
+        );
         assert_eq!(parts[0], "[:h1 \"Title\"]");
         assert_eq!(parts[1], "[:p \"Body\"]");
     }
@@ -261,7 +283,11 @@ mod tests {
             Node::Text("\n".to_string()),
         ];
         let stripped = strip_whitespace_text_nodes(nodes);
-        assert_eq!(stripped.len(), 1, "should have stripped whitespace text nodes");
+        assert_eq!(
+            stripped.len(),
+            1,
+            "should have stripped whitespace text nodes"
+        );
         assert!(matches!(&stripped[0], Node::Element(el) if el.name == "div"));
     }
 
@@ -307,7 +333,10 @@ mod tests {
                 if let Node::Element(el) = node {
                     for (_, value) in &el.attrs {
                         if matches!(value, Form::List(_) | Form::Symbol(_)) {
-                            out.push(crate::expression::Expression::from_form(value).expect("an expression"));
+                            out.push(
+                                crate::expression::Expression::from_form(value)
+                                    .expect("an expression"),
+                            );
                         }
                     }
                     walk(&el.children, out);
@@ -363,7 +392,11 @@ mod tests {
         });
         let stripped = strip_whitespace_text_nodes(vec![inner]);
         if let Node::Element(el) = &stripped[0] {
-            assert_eq!(el.children.len(), 1, "should have stripped whitespace children");
+            assert_eq!(
+                el.children.len(),
+                1,
+                "should have stripped whitespace children"
+            );
             assert!(matches!(&el.children[0], Node::Text(t) if t == "hello"));
         } else {
             panic!("expected element");

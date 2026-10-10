@@ -5,7 +5,7 @@
 //! of it. [`resolve_in_site`] joins, resolves symlinks on the deepest part that
 //! exists, and refuses a result outside the site directory.
 
-use editorial_types::{canonical_deepest, PathError, SitePath};
+use editorial_types::{PathError, SitePath, canonical_deepest};
 use std::path::{Path, PathBuf};
 
 /// `path` as a file path under `site_dir`, or `OutsideSite` when it resolves
@@ -17,5 +17,9 @@ pub(crate) fn resolve_in_site(site_dir: &Path, path: &SitePath) -> Result<PathBu
     let joined = site_dir.join(path.as_path());
     let site = canonical_deepest(site_dir)?;
     let target = canonical_deepest(&joined)?;
-    if target.starts_with(&site) { Ok(joined) } else { Err(PathError::OutsideSite) }
+    if target.starts_with(&site) {
+        Ok(joined)
+    } else {
+        Err(PathError::OutsideSite)
+    }
 }

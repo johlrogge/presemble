@@ -3,13 +3,14 @@
 use crate::access::{add_child_element, add_child_text, add_text_attr, make_element};
 use crate::block::BlockDecodeError;
 use crate::inline_store::{inlines_from_store, inlines_to_store};
-use content::inline::{parse_inlines, Inline, InlineContext, Inlines};
+use content::inline::{Inline, InlineContext, Inlines, parse_inlines};
 use node_store::{NodeId, NodeStore};
 
 const CORPUS_JSON: &str = include_str!("../../../resources/test/inline-corpus.json");
 
 fn corpus() -> Vec<String> {
-    let all: serde_json::Value = serde_json::from_str(CORPUS_JSON).expect("inline-corpus.json parses");
+    let all: serde_json::Value =
+        serde_json::from_str(CORPUS_JSON).expect("inline-corpus.json parses");
     ["corpus", "nested_emphasis"]
         .into_iter()
         .flat_map(|group| all[group].as_array().expect("a group").clone())
@@ -29,8 +30,14 @@ fn text(s: &str) -> Inline {
 fn inlines_store_round_trip_on_corpus() {
     let mut checked = 0usize;
     for source in corpus() {
-        for ctx in [InlineContext::Paragraph, InlineContext::Heading, InlineContext::Cell] {
-            let Ok(tree) = parse_inlines(&source, ctx) else { continue };
+        for ctx in [
+            InlineContext::Paragraph,
+            InlineContext::Heading,
+            InlineContext::Cell,
+        ] {
+            let Ok(tree) = parse_inlines(&source, ctx) else {
+                continue;
+            };
             let mut store = NodeStore::new();
             let container = paragraph(&mut store);
             inlines_to_store(&mut store, container, &tree);
@@ -50,7 +57,9 @@ fn decode_rejects_unknown_inline_kind() {
     add_child_element(&mut store, container, "wibble");
     assert_eq!(
         inlines_from_store(&store, container, InlineContext::Paragraph),
-        Err(BlockDecodeError::UnknownInline { kind: "wibble".to_string() })
+        Err(BlockDecodeError::UnknownInline {
+            kind: "wibble".to_string()
+        })
     );
 }
 
@@ -80,7 +89,9 @@ fn decode_rejects_code_with_element_child() {
     add_child_element(&mut store, code, "emph");
     assert_eq!(
         inlines_from_store(&store, container, InlineContext::Paragraph),
-        Err(BlockDecodeError::NonTextChild { kind: "code".to_string() })
+        Err(BlockDecodeError::NonTextChild {
+            kind: "code".to_string()
+        })
     );
 
     let mut store = NodeStore::new();
@@ -88,7 +99,10 @@ fn decode_rejects_code_with_element_child() {
     add_child_element(&mut store, container, "code");
     assert_eq!(
         inlines_from_store(&store, container, InlineContext::Paragraph),
-        Err(BlockDecodeError::TextChildCount { kind: "code".to_string(), found: 0 })
+        Err(BlockDecodeError::TextChildCount {
+            kind: "code".to_string(),
+            found: 0
+        })
     );
 }
 
@@ -136,4 +150,3 @@ fn decode_rejects_unwritable_formatting() {
         Err(BlockDecodeError::NotWritable { node: container })
     );
 }
-

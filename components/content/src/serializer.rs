@@ -38,12 +38,21 @@ pub fn serialize_document(doc: &Document) -> String {
         .enumerate()
         .filter(|(i, c)| {
             !written[*i]
-                && matches!(&c.anchor, CommentAnchor::Before(Container::Slot(_), _)
-                    | CommentAnchor::End(Container::Slot(_)))
+                && matches!(
+                    &c.anchor,
+                    CommentAnchor::Before(Container::Slot(_), _)
+                        | CommentAnchor::End(Container::Slot(_))
+                )
         })
         .map(|(i, _)| i)
         .collect();
-    write_container(&mut parts, &Container::Unassigned, &doc.unassigned, doc, &mut written);
+    write_container(
+        &mut parts,
+        &Container::Unassigned,
+        &doc.unassigned,
+        doc,
+        &mut written,
+    );
     for i in orphans.drain(..) {
         parts.comment(doc.comments[i].comment.node.as_str());
         written[i] = true;
@@ -115,7 +124,10 @@ fn write_container(
         }
     };
     for (at, spanned) in elements.iter().enumerate() {
-        write_comments(parts, &|a| matches!(a, CommentAnchor::Before(c, i) if c == container && *i == at));
+        write_comments(
+            parts,
+            &|a| matches!(a, CommentAnchor::Before(c, i) if c == container && *i == at),
+        );
         parts.element(&spanned.node);
     }
     write_comments(parts, &|a| match a {
@@ -199,7 +211,8 @@ fn serialize_list(list: &List) -> String {
 }
 
 pub(crate) fn serialize_elements(elements: &im::Vector<Spanned<ContentElement>>) -> String {
-    elements.iter()
+    elements
+        .iter()
         .map(|s| serialize_element(&s.node))
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -214,15 +227,21 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
     match element {
         // A heading holds inline nodes (ADR-059 stage 4): written as one
         // canonical ATX line.
-        ContentElement::Heading { level, content, marker } => {
-            crate::inline::heading_markdown(*level, content, marker.as_ref())
-        }
+        ContentElement::Heading {
+            level,
+            content,
+            marker,
+        } => crate::inline::heading_markdown(*level, content, marker.as_ref()),
         // A paragraph holds inline nodes (ADR-059 stage 5): written as
         // canonical inlines plus its marker. The first line is escaped when it
         // would read as a link expression (ADR-058).
         ContentElement::Paragraph { content, marker } => {
             let source = crate::inline::paragraph_source_text(content, marker.as_ref());
-            if reads_as_link_expression(&source) { format!("\\{source}") } else { source }
+            if reads_as_link_expression(&source) {
+                format!("\\{source}")
+            } else {
+                source
+            }
         }
         ContentElement::Separator => "----".to_string(),
         ContentElement::CodeBlock { language, code } => {
@@ -231,12 +250,18 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
         // Cells are canonical inlines (`|` escaped, code spans included); the
         // delimiter row writes each column's alignment (ADR-059 stage 6.2).
         ContentElement::Table { columns, rows } => {
-            use crate::inline::{serialize_inlines, InlineContext};
+            use crate::inline::{InlineContext, serialize_inlines};
             let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
-            let cell = |inlines: &crate::inline::Inlines| serialize_inlines(inlines, InlineContext::Cell);
+            let cell =
+                |inlines: &crate::inline::Inlines| serialize_inlines(inlines, InlineContext::Cell);
             let mut lines = vec![
                 line(columns.iter().map(|c| cell(&c.header)).collect()),
-                line(columns.iter().map(|c| c.align.delimiter().to_string()).collect()),
+                line(
+                    columns
+                        .iter()
+                        .map(|c| c.align.delimiter().to_string())
+                        .collect(),
+                ),
             ];
             lines.extend(rows.iter().map(|row| line(row.iter().map(cell).collect())));
             lines.join("\n")
@@ -254,7 +279,13 @@ pub(crate) fn serialize_element(element: &ContentElement) -> String {
             } else {
                 inner
                     .split('\n')
-                    .map(|line| if line.is_empty() { ">".to_string() } else { format!("> {line}") })
+                    .map(|line| {
+                        if line.is_empty() {
+                            ">".to_string()
+                        } else {
+                            format!("> {line}")
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
@@ -471,7 +502,9 @@ fn reads_as_link_expression(text: &str) -> bool {
 /// (`[a]: /x "t" junk`), is not a definition but is escaped anyway. That is
 /// lossless, merely an unnecessary backslash.
 fn starts_link_reference_definition(text: &str) -> bool {
-    let Some(after) = text.strip_prefix('[') else { return false };
+    let Some(after) = text.strip_prefix('[') else {
+        return false;
+    };
     let mut chars = after.char_indices();
     let mut blank = true;
     while let Some((i, c)) = chars.next() {
@@ -659,7 +692,9 @@ fn longest_run(s: &str, c: char) -> usize {
 /// spaces or tabs.
 fn is_thematic_break(rest: &str) -> bool {
     let mut marks = rest.chars().filter(|c| !matches!(c, ' ' | '\t'));
-    let Some(first) = marks.next() else { return false };
+    let Some(first) = marks.next() else {
+        return false;
+    };
     if !matches!(first, '-' | '*' | '_') {
         return false;
     }
@@ -676,25 +711,84 @@ fn is_thematic_break(rest: &str) -> bool {
 /// A run of `=` or `-` with optional trailing spaces or tabs.
 fn is_setext_underline(rest: &str) -> bool {
     let body = rest.trim_end_matches([' ', '\t']);
-    let Some(first) = body.chars().next() else { return false };
+    let Some(first) = body.chars().next() else {
+        return false;
+    };
     matches!(first, '=' | '-') && body.chars().all(|c| c == first)
 }
 
 /// Block-level HTML tag names (CommonMark HTML block type 6).
 const HTML_BLOCK_TAGS: &[&str] = &[
-    "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption",
-    "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt",
-    "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2",
-    "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend", "li", "link",
-    "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param",
-    "search", "section", "summary", "table", "tbody", "td", "tfoot", "th", "thead", "title",
-    "tr", "track", "ul",
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "search",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
 ];
 
 /// Whether `rest` (starting with `<`) opens a CommonMark HTML block.
 /// Types 1-6 can interrupt a paragraph; type 7 only starts one on a fresh line.
 pub(crate) fn starts_html_block(rest: &str, ctx: LineContext) -> bool {
-    let Some(after) = rest.strip_prefix('<') else { return false };
+    let Some(after) = rest.strip_prefix('<') else {
+        return false;
+    };
     let lower = after.to_ascii_lowercase();
     let ends_tag_name = |tail: &str| tail.is_empty() || tail.starts_with([' ', '\t', '>']);
 
@@ -748,7 +842,10 @@ fn parse_tag_name(b: &[u8], i: usize) -> Option<usize> {
         return None;
     }
     let mut j = i + 1;
-    while b.get(j).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'-') {
+    while b
+        .get(j)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'-')
+    {
         j += 1;
     }
     Some(j)
@@ -779,7 +876,10 @@ fn parse_attribute(b: &[u8], i: usize) -> Option<usize> {
         _ => {
             let mut e = v;
             while b.get(e).is_some_and(|c| {
-                !matches!(c, b' ' | b'\t' | b'\n' | b'"' | b'\'' | b'=' | b'<' | b'>' | b'`')
+                !matches!(
+                    c,
+                    b' ' | b'\t' | b'\n' | b'"' | b'\'' | b'=' | b'<' | b'>' | b'`'
+                )
             }) {
                 e += 1;
             }
@@ -862,7 +962,10 @@ fn destination(dest: &str) -> String {
     if !dest.contains([' ', '\t', '(', ')', '<', '>']) {
         return escape_unescapable(dest, true, |_| false);
     }
-    format!("<{}>", escape_unescapable(dest, true, |c| matches!(c, '<' | '>')))
+    format!(
+        "<{}>",
+        escape_unescapable(dest, true, |c| matches!(c, '<' | '>'))
+    )
 }
 
 /// Escape the characters of `s` that the parser would otherwise unescape:
@@ -891,7 +994,9 @@ fn escape_unescapable(s: &str, end_is_punct: bool, always: impl Fn(char) -> bool
 /// Whether `tail` (the text after an `&`) completes an entity reference:
 /// `name;`, `#digits;` (1-7) or `#xhex;` (1-6).
 pub(crate) fn starts_entity(tail: &str) -> bool {
-    let Some(semi) = tail.find(';') else { return false };
+    let Some(semi) = tail.find(';') else {
+        return false;
+    };
     let body = &tail[..semi];
     if let Some(num) = body.strip_prefix('#') {
         return match num.strip_prefix(['x', 'X']) {
@@ -899,7 +1004,8 @@ pub(crate) fn starts_entity(tail: &str) -> bool {
             None => (1..=7).contains(&num.len()) && num.chars().all(|c| c.is_ascii_digit()),
         };
     }
-    body.starts_with(|c: char| c.is_ascii_alphabetic()) && body.chars().all(|c| c.is_ascii_alphanumeric())
+    body.starts_with(|c: char| c.is_ascii_alphabetic())
+        && body.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]
@@ -907,7 +1013,7 @@ mod tests {
     use super::*;
     use crate::document::{Document, DocumentSlot};
     use crate::parser::parse_and_assign;
-    use schema::{parse_schema, HeadingLevel, Span, Spanned};
+    use schema::{HeadingLevel, Span, Spanned, parse_schema};
 
     /// A minimal grammar for building test Documents.
     fn simple_grammar() -> schema::Grammar {
@@ -940,7 +1046,10 @@ headings
             preamble: im::Vector::new(),
             body: elements
                 .into_iter()
-                .map(|node| Spanned { node, span: dummy_span })
+                .map(|node| Spanned {
+                    node,
+                    span: dummy_span,
+                })
                 .collect::<im::Vector<_>>(),
             has_separator: false,
             separator_span: None,
@@ -955,7 +1064,10 @@ headings
             name: schema::SlotName::new(slot_name),
             elements: elements
                 .into_iter()
-                .map(|node| Spanned { node, span: dummy_span })
+                .map(|node| Spanned {
+                    node,
+                    span: dummy_span,
+                })
                 .collect::<im::Vector<_>>(),
         };
         Document {
@@ -972,7 +1084,10 @@ headings
     fn serialize_heading() {
         let d = doc_with_slot(
             "title",
-            vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "Hello")],
+            vec![ContentElement::heading_from_markdown(
+                HeadingLevel::new(1).unwrap(),
+                "Hello",
+            )],
         );
         assert_eq!(serialize_document(&d), "# Hello\n");
     }
@@ -1010,11 +1125,21 @@ headings
              Summary. {#summary}\noccurs\n: 1..2\n\n----\n\nBody.\n",
         )
         .expect("schema parses");
-        for src in ["", "\n----\n", "# T\n\n----\n\nBody.\n", "# T\n\nS.\n\n----\n\nBody.\n", "# T\n"] {
+        for src in [
+            "",
+            "\n----\n",
+            "# T\n\n----\n\nBody.\n",
+            "# T\n\nS.\n\n----\n\nBody.\n",
+            "# T\n",
+        ] {
             let doc = crate::parser::parse_and_assign(src, &grammar).expect("parses");
             let mut without_empty = doc.clone();
-            without_empty.preamble =
-                doc.preamble.iter().filter(|s| !s.elements.is_empty()).cloned().collect();
+            without_empty.preamble = doc
+                .preamble
+                .iter()
+                .filter(|s| !s.elements.is_empty())
+                .cloned()
+                .collect();
             assert_eq!(
                 serialize_document(&doc),
                 serialize_document(&without_empty),
@@ -1051,11 +1176,15 @@ headings
         let src = "```rust\nfn main() {}\n```\n";
         let expected = src.strip_suffix('\n').unwrap();
         let first = serialize_elements(
-            &crate::parser::parse_document(src).expect("parse failed").elements,
+            &crate::parser::parse_document(src)
+                .expect("parse failed")
+                .elements,
         );
         assert_eq!(first, expected);
         let second = serialize_elements(
-            &crate::parser::parse_document(&first).expect("reparse failed").elements,
+            &crate::parser::parse_document(&first)
+                .expect("reparse failed")
+                .elements,
         );
         assert_eq!(second, first);
     }
@@ -1065,7 +1194,12 @@ headings
     /// Parse `md` and return its single block, failing on any other count.
     fn reparse_one(md: &str) -> ContentElement {
         let flat = crate::parser::parse_document(md).expect("serialized markdown parses");
-        assert_eq!(flat.elements.len(), 1, "expected one block from {md:?}: {:#?}", flat.elements);
+        assert_eq!(
+            flat.elements.len(),
+            1,
+            "expected one block from {md:?}: {:#?}",
+            flat.elements
+        );
         flat.elements[0].node.clone()
     }
 
@@ -1078,7 +1212,10 @@ headings
     fn para(text: &str) -> ContentElement {
         use crate::inline::{Inline, InlineContext, Inlines};
         ContentElement::Paragraph {
-            content: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::Paragraph),
+            content: Inlines::new(
+                vec![Inline::Text(text.to_string())],
+                InlineContext::Paragraph,
+            ),
             marker: None,
         }
     }
@@ -1120,10 +1257,14 @@ headings
         for (text, expected) in cases {
             let out = serialize_element(&para(text));
             if out != expected {
-                bad.push(format!("{text:?} was written {out:?}, expected {expected:?}"));
+                bad.push(format!(
+                    "{text:?} was written {out:?}, expected {expected:?}"
+                ));
             }
             if !matches!(reparse_one(&out), ContentElement::Paragraph { .. }) {
-                bad.push(format!("{text:?} written {out:?} did not read back as a paragraph"));
+                bad.push(format!(
+                    "{text:?} written {out:?} did not read back as a paragraph"
+                ));
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
@@ -1132,7 +1273,15 @@ headings
     #[test]
     fn paragraph_non_openers_are_left_alone() {
         let mut bad = Vec::new();
-        for text in ["#tag", "-x", "+1 point", "1.5 litres", "2024 was good", "=== x", "a > b"] {
+        for text in [
+            "#tag",
+            "-x",
+            "+1 point",
+            "1.5 litres",
+            "2024 was good",
+            "=== x",
+            "a > b",
+        ] {
             let out = serialize_element(&para(text));
             if out != text {
                 bad.push(format!("{text:?} was written {out:?}"));
@@ -1167,10 +1316,14 @@ headings
         for (text, expected) in cases {
             let out = serialize_element(&para(text));
             if out != expected {
-                bad.push(format!("{text:?} was written {out:?}, expected {expected:?}"));
+                bad.push(format!(
+                    "{text:?} was written {out:?}, expected {expected:?}"
+                ));
             }
             if !matches!(reparse_one(&out), ContentElement::Paragraph { .. }) {
-                bad.push(format!("{text:?} written {out:?} did not read back as a paragraph"));
+                bad.push(format!(
+                    "{text:?} written {out:?} did not read back as a paragraph"
+                ));
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
@@ -1199,7 +1352,13 @@ headings
     fn quote_of(children: Vec<ContentElement>) -> ContentElement {
         ContentElement::Blockquote {
             blocks: crate::document::Blocks::from_elements(
-                children.into_iter().map(|node| Spanned { node, span: Span { start: 0, end: 0 } }).collect(),
+                children
+                    .into_iter()
+                    .map(|node| Spanned {
+                        node,
+                        span: Span { start: 0, end: 0 },
+                    })
+                    .collect(),
             ),
         }
     }
@@ -1216,7 +1375,11 @@ headings
             assert_eq!(out, expected, "blockquote {text:?}");
             let back = quote_of(vec![para(back)]);
             assert_eq!(reparse_one(&out), back, "blockquote {text:?}");
-            assert_eq!(serialize_element(&back), out, "blockquote {text:?} is not a fixed point");
+            assert_eq!(
+                serialize_element(&back),
+                out,
+                "blockquote {text:?} is not a fixed point"
+            );
         }
     }
 
@@ -1264,9 +1427,16 @@ headings
     #[test]
     fn comment_inside_blockquote_is_trivia() {
         let src = "> a\n>\n> <!-- c -->\n>\n> b\n";
-        let grammar = schema::Grammar { preamble: vec![], body: None };
+        let grammar = schema::Grammar {
+            preamble: vec![],
+            body: None,
+        };
         let doc = crate::parser::parse_and_assign(src, &grammar).expect("parses");
-        assert!(doc.comments.is_empty(), "the comment is not the document's: {:?}", doc.comments);
+        assert!(
+            doc.comments.is_empty(),
+            "the comment is not the document's: {:?}",
+            doc.comments
+        );
         assert_eq!(serialize_document(&doc), format!("{}\n", src.trim_end()));
     }
 
@@ -1277,9 +1447,15 @@ headings
         let cases = [
             ("> a\n>\n> # H\n", "> a\n>\n> # H"),
             ("> a\n>\n> ```\n> x\n> ```\n", "> a\n>\n> ```\n> x\n> ```"),
-            ("> a\n>\n> ````\n> ```\n> ````\n", "> a\n>\n> ````\n> ```\n> ````"),
+            (
+                "> a\n>\n> ````\n> ```\n> ````\n",
+                "> a\n>\n> ````\n> ```\n> ````",
+            ),
             ("> a\n>\n> - l\n", "> a\n>\n> - l"),
-            ("> a\n>\n> | x |\n> | --- |\n> | y |\n", "> a\n>\n> | x |\n> | --- |\n> | y |"),
+            (
+                "> a\n>\n> | x |\n> | --- |\n> | y |\n",
+                "> a\n>\n> | x |\n> | --- |\n> | y |",
+            ),
             ("> a\n>\n> ---\n", "> a\n>\n> ----"),
             ("> a\n>\n> <div>x</div>\n", "> a\n>\n> <div>x</div>"),
             ("> a\n>\n> > n\n", "> a\n>\n> > n"),
@@ -1287,7 +1463,10 @@ headings
         for (src, expected) in cases {
             let blocks = top_level(src);
             assert_eq!(blocks.len(), 1, "{src:?}: {blocks:?}");
-            assert!(matches!(blocks[0], ContentElement::Blockquote { .. }), "{src:?}: {blocks:?}");
+            assert!(
+                matches!(blocks[0], ContentElement::Blockquote { .. }),
+                "{src:?}: {blocks:?}"
+            );
             assert_eq!(saved(src), expected, "{src:?}");
             assert_eq!(saved(expected), expected, "{src:?} is not a fixed point");
         }
@@ -1297,9 +1476,13 @@ headings
     #[test]
     fn a_rule_inside_a_blockquote_is_not_the_body_separator() {
         let grammar =
-            schema::parse_schema("# Title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\n").unwrap();
+            schema::parse_schema("# Title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\n")
+                .unwrap();
         let doc = crate::parser::parse_and_assign("# T\n\n> ---\n\nbody\n", &grammar).unwrap();
-        assert!(!doc.has_separator, "the body starts at a quoted rule: {doc:#?}");
+        assert!(
+            !doc.has_separator,
+            "the body starts at a quoted rule: {doc:#?}"
+        );
     }
 
     #[test]
@@ -1370,12 +1553,29 @@ headings
     #[test]
     fn odd_language_strings_round_trip() {
         for lang in [
-            "c++", "rust,ignore", "foo bar", "a\\*b", "a&amp;b", "x~y", "{.class}", "a&b", "a\\b",
-            "a\\", "&#38;", "&#x26;", "&foo", "a&;b", "\\&amp;",
+            "c++",
+            "rust,ignore",
+            "foo bar",
+            "a\\*b",
+            "a&amp;b",
+            "x~y",
+            "{.class}",
+            "a&b",
+            "a\\b",
+            "a\\",
+            "&#38;",
+            "&#x26;",
+            "&foo",
+            "a&;b",
+            "\\&amp;",
         ] {
             let el = code(Some(lang), "body");
             let out = serialize_element(&el);
-            assert_eq!(reparse_one(&out), el, "language {lang:?} serialized as {out:?}");
+            assert_eq!(
+                reparse_one(&out),
+                el,
+                "language {lang:?} serialized as {out:?}"
+            );
         }
     }
 
@@ -1423,7 +1623,11 @@ headings
                 "href {href:?}"
             );
             // A paragraph that holds the link writes the same bytes.
-            assert_eq!(serialize_element(&lone_link_paragraph("t", href)), expected, "href {href:?}");
+            assert_eq!(
+                serialize_element(&lone_link_paragraph("t", href)),
+                expected,
+                "href {href:?}"
+            );
         }
     }
 
@@ -1435,7 +1639,10 @@ headings
                 vec![Inline::Link {
                     destination: LinkDestination::new(href),
                     title: None,
-                    text: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::LinkText),
+                    text: Inlines::new(
+                        vec![Inline::Text(text.to_string())],
+                        InlineContext::LinkText,
+                    ),
                 }],
                 InlineContext::Paragraph,
             ),
@@ -1494,13 +1701,25 @@ headings
         // A table interrupts a paragraph only when its header line starts
         // with `|` (behind at most three spaces); otherwise only the first
         // line of a paragraph can head a table.
-        assert_eq!(blocks("x\na | b\n--- | ---"), vec![src_para("x\na | b\n--- | ---")]);
-        assert_eq!(blocks("x\ny\na | b\n--- | ---"), vec![src_para("x\ny\na | b\n--- | ---")]);
-        assert_eq!(blocks("x\na | b |\n--- | ---"), vec![src_para("x\na | b |\n--- | ---")]);
+        assert_eq!(
+            blocks("x\na | b\n--- | ---"),
+            vec![src_para("x\na | b\n--- | ---")]
+        );
+        assert_eq!(
+            blocks("x\ny\na | b\n--- | ---"),
+            vec![src_para("x\ny\na | b\n--- | ---")]
+        );
+        assert_eq!(
+            blocks("x\na | b |\n--- | ---"),
+            vec![src_para("x\na | b |\n--- | ---")]
+        );
         let interrupted = |md: &str, before: &str| {
             let got = blocks(md);
             assert_eq!(got.first(), Some(&src_para(before)), "{md:?}: {got:?}");
-            assert!(matches!(got.get(1), Some(ContentElement::Table { .. })), "{md:?}: {got:?}");
+            assert!(
+                matches!(got.get(1), Some(ContentElement::Table { .. })),
+                "{md:?}: {got:?}"
+            );
         };
         interrupted("x\n| a | b |\n--- | ---", "x");
         interrupted("x\n| a | b\n--- | ---", "x");
@@ -1509,28 +1728,95 @@ headings
         interrupted("x\n  | a | b |\n--- | ---", "x");
         interrupted("x\n| a | b |\n   --- | ---", "x");
         interrupted("| a | b |\n| c | d |\n--- | ---", "| a | b |");
-        assert_eq!(blocks("x\n    | a | b |\n--- | ---"), vec![src_para("x\n    | a | b |\n--- | ---")]);
-        assert_eq!(blocks("x\n| a | b |\n    --- | ---"), vec![src_para("x\n| a | b |\n    --- | ---")]);
-        assert_eq!(blocks("x\n| a | b | c\n--- | ---"), vec![src_para("x\n| a | b | c\n--- | ---")]);
-        assert_eq!(blocks("x\n| a \\| b |\n--- | ---"), vec![src_para("x\n| a \\| b |\n--- | ---")]);
+        assert_eq!(
+            blocks("x\n    | a | b |\n--- | ---"),
+            vec![src_para("x\n    | a | b |\n--- | ---")]
+        );
+        assert_eq!(
+            blocks("x\n| a | b |\n    --- | ---"),
+            vec![src_para("x\n| a | b |\n    --- | ---")]
+        );
+        assert_eq!(
+            blocks("x\n| a | b | c\n--- | ---"),
+            vec![src_para("x\n| a | b | c\n--- | ---")]
+        );
+        assert_eq!(
+            blocks("x\n| a \\| b |\n--- | ---"),
+            vec![src_para("x\n| a \\| b |\n--- | ---")]
+        );
         assert_eq!(blocks("x\n| a | b |"), vec![src_para("x\n| a | b |")]);
     }
 
     #[test]
     fn table_predicate_matches_pulldown() {
         let headers = [
-            "a | b", "| a | b |", "a | b |", "| a | b", "a|b", "a", "|", "||", "| |", "a \\| b",
-            "a \\\\| b", "`a | b`", "a | b | c", "| a |", "a | | b", "\\# a | b", "a |  ",
-            "a \\\\\\| b | c", "a\\|b|c", "|a|b|c|", "a | b | c |", "| | a",
+            "a | b",
+            "| a | b |",
+            "a | b |",
+            "| a | b",
+            "a|b",
+            "a",
+            "|",
+            "||",
+            "| |",
+            "a \\| b",
+            "a \\\\| b",
+            "`a | b`",
+            "a | b | c",
+            "| a |",
+            "a | | b",
+            "\\# a | b",
+            "a |  ",
+            "a \\\\\\| b | c",
+            "a\\|b|c",
+            "|a|b|c|",
+            "a | b | c |",
+            "| | a",
         ];
         let delimiters = [
-            "--- | ---", "-|-", "|---|---|", "---|", "|---", "|---|", "| --- |", ":-: | :-:",
-            "--- | --- |", "--- | --- | ", "   --- | ---", "    --- | ---", "\t--- | ---",
-            "--- | --- x", "-||-", "| - | - | - |", "--- --- | ---", ": | :", "|-|", "---",
-            ":--|", "|:", "| - |", "- | - | -", "|| --- | ---", "--- || ---", "--- | | ---",
-            "| | --- |", "--- | --- ||", ":|-", "-:|:-", " | --- | --- |", "|-|-|-|",
-            "--- | :", "--- | :-", "-:- | ---", ": --- | ---", "--- : | ---", "--- | --- :",
-            "::-- | ---", "--::| -", "- - | -", "|  |",
+            "--- | ---",
+            "-|-",
+            "|---|---|",
+            "---|",
+            "|---",
+            "|---|",
+            "| --- |",
+            ":-: | :-:",
+            "--- | --- |",
+            "--- | --- | ",
+            "   --- | ---",
+            "    --- | ---",
+            "\t--- | ---",
+            "--- | --- x",
+            "-||-",
+            "| - | - | - |",
+            "--- --- | ---",
+            ": | :",
+            "|-|",
+            "---",
+            ":--|",
+            "|:",
+            "| - |",
+            "- | - | -",
+            "|| --- | ---",
+            "--- || ---",
+            "--- | | ---",
+            "| | --- |",
+            "--- | --- ||",
+            ":|-",
+            "-:|:-",
+            " | --- | --- |",
+            "|-|-|-|",
+            "--- | :",
+            "--- | :-",
+            "-:- | ---",
+            ": --- | ---",
+            "--- : | ---",
+            "--- | --- :",
+            "::-- | ---",
+            "--::| -",
+            "- - | -",
+            "|  |",
         ];
         let mut mismatches = Vec::new();
         for h in headers {
@@ -1556,7 +1842,11 @@ headings
                 }
             }
         }
-        assert!(mismatches.is_empty(), "table predicate disagrees with pulldown:\n{}", mismatches.join("\n"));
+        assert!(
+            mismatches.is_empty(),
+            "table predicate disagrees with pulldown:\n{}",
+            mismatches.join("\n")
+        );
     }
 
     #[test]
@@ -1578,7 +1868,10 @@ headings
         let src = "| a | b | c | d |\n|:--|--:|:-:|---|\n| 1 | 2 | 3 | 4 |\n";
         let flat = crate::parser::parse_document(src).expect("parses");
         let saved = serialize_elements(&flat.elements);
-        assert_eq!(saved, "| a | b | c | d |\n| :--- | ---: | :---: | --- |\n| 1 | 2 | 3 | 4 |");
+        assert_eq!(
+            saved,
+            "| a | b | c | d |\n| :--- | ---: | :---: | --- |\n| 1 | 2 | 3 | 4 |"
+        );
         assert_eq!(reparse_one(&saved), flat.elements[0].node);
     }
 
@@ -1598,7 +1891,10 @@ headings
         let src = "| **h** | *i* |\n|---|---|\n| **b** and [l](/x) | `c` ![i](a.png) |\n";
         let flat = crate::parser::parse_document(src).expect("parses");
         let saved = serialize_elements(&flat.elements);
-        assert_eq!(saved, "| **h** | *i* |\n| --- | --- |\n| **b** and [l](/x) | `c` ![i](a.png) |");
+        assert_eq!(
+            saved,
+            "| **h** | *i* |\n| --- | --- |\n| **b** and [l](/x) | `c` ![i](a.png) |"
+        );
         assert_eq!(reparse_one(&saved), flat.elements[0].node);
     }
 
@@ -1611,7 +1907,10 @@ headings
         };
         assert!(rows.iter().all(|r| r.len() == columns.len()), "{rows:?}");
         let saved = serialize_elements(&flat.elements);
-        assert_eq!(saved, "| a | b | c |\n| --- | --- | --- |\n| 1 |  |  |\n| 2 | 3 | 4 |");
+        assert_eq!(
+            saved,
+            "| a | b | c |\n| --- | --- | --- |\n| 1 |  |  |\n| 2 | 3 | 4 |"
+        );
         assert_eq!(reparse_one(&saved), flat.elements[0].node);
     }
 
@@ -1623,7 +1922,10 @@ headings
     fn a_used_reference_definition_keeps_its_link_l24() {
         let src = "See [a][r].\n\n[r]: /x\n\nText.\n\n[u]: /unused\n";
         let flat = crate::parser::parse_document(src).expect("parses");
-        assert_eq!(blocks(src), vec![src_para("See [a](/x)."), src_para("Text.")]);
+        assert_eq!(
+            blocks(src),
+            vec![src_para("See [a](/x)."), src_para("Text.")]
+        );
         let saved = serialize_elements(&flat.elements);
         assert_eq!(saved, "See [a](/x).\n\nText.");
         // The paragraph links to /x before the save and after it.
@@ -1632,7 +1934,11 @@ headings
             let ContentElement::Paragraph { content, .. } = &doc.elements[0].node else {
                 panic!("a paragraph first");
             };
-            content.link_destinations().into_iter().map(str::to_string).collect()
+            content
+                .link_destinations()
+                .into_iter()
+                .map(str::to_string)
+                .collect()
         };
         assert_eq!(first_paragraph_links(src), vec!["/x".to_string()]);
         assert_eq!(
@@ -1643,7 +1949,10 @@ headings
         // A paragraph that is only `[a][r]` resolves to a lone link.
         let lone = blocks("[a][r]\n\n[r]: /x\n");
         assert_eq!(lone.len(), 1);
-        assert_eq!(lone[0].sole_link().map(|l| l.destination), Some("/x".to_string()));
+        assert_eq!(
+            lone[0].sole_link().map(|l| l.destination),
+            Some("/x".to_string())
+        );
     }
 
     #[test]
@@ -1677,17 +1986,25 @@ headings
         for (text, expected) in cases {
             let out = serialize_element(&para(text));
             if out != expected {
-                bad.push(format!("{text:?} was written {out:?}, expected {expected:?}"));
+                bad.push(format!(
+                    "{text:?} was written {out:?}, expected {expected:?}"
+                ));
             }
             if reparse_one(&out) != para(text) {
-                bad.push(format!("{text:?} written {out:?} read back as {:?}", reparse_one(&out)));
+                bad.push(format!(
+                    "{text:?} written {out:?} read back as {:?}",
+                    reparse_one(&out)
+                ));
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
         let quote = quote_of(vec![para("a | b\n--- | ---")]);
         let out = serialize_element(&quote);
         assert_eq!(out, "> a | b\n> \\--- | ---");
-        assert!(matches!(reparse_one(&out), ContentElement::Blockquote { .. }));
+        assert!(matches!(
+            reparse_one(&out),
+            ContentElement::Blockquote { .. }
+        ));
     }
 
     #[test]
@@ -1713,10 +2030,15 @@ headings
         for (text, expected) in cases {
             let out = serialize_element(&para(text));
             if out != expected {
-                bad.push(format!("{text:?} was written {out:?}, expected {expected:?}"));
+                bad.push(format!(
+                    "{text:?} was written {out:?}, expected {expected:?}"
+                ));
             }
             if reparse_one(&out) != para(text.trim()) {
-                bad.push(format!("{text:?} written {out:?} read back as {:?}", reparse_one(&out)));
+                bad.push(format!(
+                    "{text:?} written {out:?} read back as {:?}",
+                    reparse_one(&out)
+                ));
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
@@ -1726,7 +2048,11 @@ headings
     fn html_block_tags_interrupt_a_paragraph() {
         for tag in HTML_BLOCK_TAGS {
             let md = format!("a\n<{tag}>");
-            assert_ne!(blocks(&md), vec![src_para(&md)], "<{tag}> should interrupt a paragraph");
+            assert_ne!(
+                blocks(&md),
+                vec![src_para(&md)],
+                "<{tag}> should interrupt a paragraph"
+            );
             let out = serialize_element(&para(&md));
             assert_eq!(out, format!("a\n\\<{tag}>"));
             assert_eq!(reparse_one(&out), para(&md), "<{tag}> escaped");
@@ -1741,15 +2067,26 @@ headings
         assert!(HTML_BLOCK_TAGS.contains(&"search"));
         assert_eq!(
             blocks("a\n<search>"),
-            vec![para("a"), ContentElement::HtmlBlock { source: "<search>".to_string() }]
+            vec![
+                para("a"),
+                ContentElement::HtmlBlock {
+                    source: "<search>".to_string()
+                }
+            ]
         );
         assert!(!HTML_BLOCK_TAGS.contains(&"source"));
         assert_eq!(blocks("a\n<source>"), vec![src_para("a\n<source>")]);
-        for tag in ["span", "a", "em", "img", "input", "button", "select", "source", "picture", "video"] {
+        for tag in [
+            "span", "a", "em", "img", "input", "button", "select", "source", "picture", "video",
+        ] {
             let md = format!("a\n<{tag}>");
             assert!(!HTML_BLOCK_TAGS.contains(&tag), "{tag}");
             // One paragraph holding the tag as inline HTML.
-            assert_eq!(blocks(&md), vec![src_para(&md)], "<{tag}> should not interrupt a paragraph");
+            assert_eq!(
+                blocks(&md),
+                vec![src_para(&md)],
+                "<{tag}> should not interrupt a paragraph"
+            );
         }
     }
 
@@ -1771,25 +2108,42 @@ headings
                 Some(href.to_string()),
                 "href {href:?}"
             );
-            assert_eq!(serialize_element(&lone_link_paragraph("t", href)), expected, "href {href:?}");
+            assert_eq!(
+                serialize_element(&lone_link_paragraph("t", href)),
+                expected,
+                "href {href:?}"
+            );
         }
 
         let img = ContentElement::lone_image("A cat", "my (cat).png");
         let out = serialize_element(&img);
         assert_eq!(out, "![A cat](<my (cat).png>)");
         let image = reparse_one(&out).sole_image().expect("a lone image");
-        assert_eq!((image.source.as_str(), crate::inline::AsPlainText::plain_text(&image.alt).as_str()),
-            ("my (cat).png", "A cat"));
+        assert_eq!(
+            (
+                image.source.as_str(),
+                crate::inline::AsPlainText::plain_text(&image.alt).as_str()
+            ),
+            ("my (cat).png", "A cat")
+        );
     }
 
     // ── Link expressions (C1-link) ───────────────────────────────────────────
 
     fn link_expr(text: LinkText, target: LinkTarget) -> ContentElement {
-        ContentElement::LinkExpression { text, target, slot: None }
+        ContentElement::LinkExpression {
+            text,
+            target,
+            slot: None,
+        }
     }
 
     fn marked_expr(text: LinkText, target: LinkTarget, slot: &str) -> ContentElement {
-        ContentElement::LinkExpression { text, target, slot: Some(kw(slot)) }
+        ContentElement::LinkExpression {
+            text,
+            target,
+            slot: Some(kw(slot)),
+        }
     }
 
     fn kw(s: &str) -> crate::document::Keyword {
@@ -1797,7 +2151,10 @@ headings
     }
 
     fn thread(source: &str, operations: Vec<LinkOp>) -> LinkTarget {
-        LinkTarget::ThreadExpr { source: kw(source), operations }
+        LinkTarget::ThreadExpr {
+            source: kw(source),
+            operations,
+        }
     }
 
     fn label(b: &str) -> LinkText {
@@ -1805,13 +2162,22 @@ headings
     }
 
     fn sort_by(field: &str, descending: bool) -> LinkOp {
-        let direction =
-            if descending { SortDirection::Descending } else { SortDirection::Ascending };
-        LinkOp::SortBy { field: kw(field), direction }
+        let direction = if descending {
+            SortDirection::Descending
+        } else {
+            SortDirection::Ascending
+        };
+        LinkOp::SortBy {
+            field: kw(field),
+            direction,
+        }
     }
 
     fn filter(field: &str, value: &str) -> LinkOp {
-        LinkOp::Filter { field: kw(field), value: value.to_string() }
+        LinkOp::Filter {
+            field: kw(field),
+            value: value.to_string(),
+        }
     }
 
     /// Assert `el` serializes to exactly `expected` and reads back as `el`.
@@ -1824,10 +2190,19 @@ headings
     fn link_expression_path_ref_round_trips() {
         let path = |p: &str| LinkTarget::PathRef(p.to_string());
         let cases = [
-            (link_expr(LinkText::Empty, path("fragments/header")), "[](:fragments/header)"),
-            (link_expr(label("hdr"), path("fragments/header")), "[hdr](:fragments/header)"),
             (
-                link_expr(LinkText::Static("(str title)".to_string()), path("fragments/header")),
+                link_expr(LinkText::Empty, path("fragments/header")),
+                "[](:fragments/header)",
+            ),
+            (
+                link_expr(label("hdr"), path("fragments/header")),
+                "[hdr](:fragments/header)",
+            ),
+            (
+                link_expr(
+                    LinkText::Static("(str title)".to_string()),
+                    path("fragments/header"),
+                ),
                 "[(str title)](:fragments/header)",
             ),
             (link_expr(label("x"), path("a b")), "[x](<:a b>)"),
@@ -1862,19 +2237,37 @@ headings
                 posts(vec![LinkOp::RefsTo(RefsToTarget::SelfRef)]),
                 "[posts](->> :post (refs-to self))",
             ),
-            (posts(vec![url("/a/b")]), "[posts](->> :post (refs-to \"/a/b\"))"),
+            (
+                posts(vec![url("/a/b")]),
+                "[posts](->> :post (refs-to \"/a/b\"))",
+            ),
             // A quoted "self" is a URL, not the page itself.
-            (posts(vec![url("self")]), "[posts](->> :post (refs-to \"self\"))"),
+            (
+                posts(vec![url("self")]),
+                "[posts](->> :post (refs-to \"self\"))",
+            ),
             // Strings: spaces, quotes, backslashes, parentheses, `%20`.
-            (posts(vec![filter("f", "a b")]), "[posts](->> :post (filter :f \"a b\"))"),
+            (
+                posts(vec![filter("f", "a b")]),
+                "[posts](->> :post (filter :f \"a b\"))",
+            ),
             (
                 posts(vec![filter("f", "say \"hi\"")]),
                 "[posts](->> :post (filter :f \"say \\\"hi\\\"\"))",
             ),
-            (posts(vec![filter("f", "a\\b")]), "[posts](->> :post (filter :f \"a\\\\b\"))"),
-            (posts(vec![url("(x)")]), "[posts](->> :post (refs-to \"(x)\"))"),
+            (
+                posts(vec![filter("f", "a\\b")]),
+                "[posts](->> :post (filter :f \"a\\\\b\"))",
+            ),
+            (
+                posts(vec![url("(x)")]),
+                "[posts](->> :post (refs-to \"(x)\"))",
+            ),
             (posts(vec![url(")")]), "[posts](->> :post (refs-to \")\"))"),
-            (posts(vec![url("a%20b")]), "[posts](->> :post (refs-to \"a%20b\"))"),
+            (
+                posts(vec![url("a%20b")]),
+                "[posts](->> :post (refs-to \"a%20b\"))",
+            ),
             // Order is preserved.
             (
                 posts(vec![
@@ -1895,12 +2288,18 @@ headings
     fn link_expression_text_variants_round_trip_with_thread_expr() {
         let ops = || vec![sort_by("published", true), LinkOp::Take(3)];
         let cases = [
-            (LinkText::Empty, "[](->> :post (sort-by :published :desc) (take 3))"),
+            (
+                LinkText::Empty,
+                "[](->> :post (sort-by :published :desc) (take 3))",
+            ),
             (
                 LinkText::Static("(str title)".to_string()),
                 "[(str title)](->> :post (sort-by :published :desc) (take 3))",
             ),
-            (label("posts"), "[posts](->> :post (sort-by :published :desc) (take 3))"),
+            (
+                label("posts"),
+                "[posts](->> :post (sort-by :published :desc) (take 3))",
+            ),
         ];
         for (text, expected) in cases {
             assert_link_round_trip(&link_expr(text, thread("post", ops())), expected);
@@ -1911,12 +2310,23 @@ headings
     fn slot_marker_round_trips() {
         let cases = [
             (
-                marked_expr(label("Latest posts"), thread("post", vec![LinkOp::Take(4)]), "latest"),
+                marked_expr(
+                    label("Latest posts"),
+                    thread("post", vec![LinkOp::Take(4)]),
+                    "latest",
+                ),
                 "[Latest posts](->> :post (take 4)) {#latest}",
             ),
-            (marked_expr(LinkText::Empty, thread("post", vec![]), "news"), "[](->> :post) {#news}"),
             (
-                marked_expr(LinkText::Static("(str title)".to_string()), thread("post", vec![]), "a-b_1"),
+                marked_expr(LinkText::Empty, thread("post", vec![]), "news"),
+                "[](->> :post) {#news}",
+            ),
+            (
+                marked_expr(
+                    LinkText::Static("(str title)".to_string()),
+                    thread("post", vec![]),
+                    "a-b_1",
+                ),
                 "[(str title)](->> :post) {#a-b_1}",
             ),
         ];
@@ -1925,16 +2335,28 @@ headings
         }
         // Tabs and runs of spaces before the marker canonicalise to one space.
         let write_back = |md: &str| serialize_element(&reparse_one(md));
-        assert_eq!(write_back("[x](->> :post)\t \t{#news}"), "[x](->> :post) {#news}");
+        assert_eq!(
+            write_back("[x](->> :post)\t \t{#news}"),
+            "[x](->> :post) {#news}"
+        );
     }
 
     #[test]
     fn marked_path_ref_round_trips() {
         let path = |p: &str| LinkTarget::PathRef(p.to_string());
         let cases = [
-            (marked_expr(label("x"), path("p"), "news"), "[x](:p) {#news}"),
-            (marked_expr(label("x"), path("a b"), "news"), "[x](<:a b>) {#news}"),
-            (marked_expr(label("x"), path("a&amp;b"), "news"), "[x](:a\\&amp;b) {#news}"),
+            (
+                marked_expr(label("x"), path("p"), "news"),
+                "[x](:p) {#news}",
+            ),
+            (
+                marked_expr(label("x"), path("a b"), "news"),
+                "[x](<:a b>) {#news}",
+            ),
+            (
+                marked_expr(label("x"), path("a&amp;b"), "news"),
+                "[x](:a\\&amp;b) {#news}",
+            ),
         ];
         for (el, expected) in cases {
             assert_link_round_trip(&el, expected);
@@ -1980,7 +2402,11 @@ headings
             "[p](<(-\\>\\> :post (take 4))>) {#news}",
             "[p]((->>%20:post%20(take%204))) {#news}",
         ] {
-            assert_eq!(write_back(legacy), "[p](->> :post (take 4)) {#news}", "{legacy:?}");
+            assert_eq!(
+                write_back(legacy),
+                "[p](->> :post (take 4)) {#news}",
+                "{legacy:?}"
+            );
         }
     }
 
@@ -2009,7 +2435,10 @@ headings
         );
         assert_eq!(
             blocks("[posts](<(-\\>\\> :post (take 4))>)"),
-            vec![link_expr(label("posts"), thread("post", vec![LinkOp::Take(4)]))]
+            vec![link_expr(
+                label("posts"),
+                thread("post", vec![LinkOp::Take(4)])
+            )]
         );
     }
 
@@ -2019,7 +2448,9 @@ headings
 
         // L1 is gone: `->` is rejected, so it stays a plain link.
         assert_eq!(
-            reparse_one("[p](<(-\\> :post (take 1))>)").sole_link().map(|l| l.destination),
+            reparse_one("[p](<(-\\> :post (take 1))>)")
+                .sole_link()
+                .map(|l| l.destination),
             Some("(-> :post (take 1))".to_string())
         );
 
@@ -2031,7 +2462,10 @@ headings
         assert_eq!(reparse_one(&serialize_element(&el)), el);
 
         // L5: `Static` text not starting with `(` reads back as `Label`.
-        let el = link_expr(LinkText::Static("x".to_string()), LinkTarget::PathRef("p".to_string()));
+        let el = link_expr(
+            LinkText::Static("x".to_string()),
+            LinkTarget::PathRef("p".to_string()),
+        );
         assert_eq!(
             reparse_one(&serialize_element(&el)),
             link_expr(label("x"), LinkTarget::PathRef("p".to_string()))
@@ -2039,7 +2473,10 @@ headings
 
         // L8: only a whole paragraph (top level or in a quote) is a link
         // expression.
-        assert_eq!(reparse_one("a [p](->> :post) b"), para("a [p](->> :post) b"));
+        assert_eq!(
+            reparse_one("a [p](->> :post) b"),
+            para("a [p](->> :post) b")
+        );
 
         // L7: a plain link whose href starts with `:` reads back as a link expression.
         let el = ContentElement::lone_link("t", ":x");
@@ -2095,9 +2532,16 @@ headings
         // They read back as two lists: `- a` in `tags`, `- b` unassigned.
         assert!(second.comments.is_empty(), "{:?}", second.comments);
         assert_eq!(second.unassigned.len(), 1);
-        let tags = second.preamble.iter().find(|s| s.name.as_str() == "tags").expect("tags");
+        let tags = second
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == "tags")
+            .expect("tags");
         assert_eq!(
-            tags.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            tags.elements
+                .iter()
+                .map(|e| e.node.clone())
+                .collect::<Vec<_>>(),
             top_level("- a")
         );
         // Text is a fixed point from then on.
@@ -2112,8 +2556,16 @@ headings
     fn inline_comment_at_the_start_of_a_line_survives_a_save() {
         use crate::inline::Inline;
         let para = src_para("a\n    <!-- c --> b");
-        let ContentElement::Paragraph { content, .. } = &para else { panic!("{para:?}") };
-        assert!(content.as_slice().iter().any(|i| matches!(i, Inline::Comment(_))), "{content:?}");
+        let ContentElement::Paragraph { content, .. } = &para else {
+            panic!("{para:?}")
+        };
+        assert!(
+            content
+                .as_slice()
+                .iter()
+                .any(|i| matches!(i, Inline::Comment(_))),
+            "{content:?}"
+        );
 
         let saved = serialize_element(&para);
         assert_eq!(saved, "a\n    <!-- c --> b");
@@ -2133,10 +2585,12 @@ headings
             list: List {
                 kind: ListKind::Bullet,
                 spacing: Spacing::Tight,
-                items: vec![crate::document::Blocks::from_elements(im::vector![Spanned {
-                    node: para.clone(),
-                    span: Span { start: 0, end: 0 },
-                }])],
+                items: vec![crate::document::Blocks::from_elements(im::vector![
+                    Spanned {
+                        node: para.clone(),
+                        span: Span { start: 0, end: 0 },
+                    }
+                ])],
             },
         };
         let saved = serialize_element(&item);
@@ -2159,14 +2613,22 @@ headings
     /// quote, in an item, and across the slot/unassigned/body boundaries.
     #[test]
     fn adjacent_same_kind_lists_stay_apart_l10() {
-        for (a, b) in [("- a", "- b"), ("1. a", "1. b"), ("1. a", "3. b"), ("- a\n- x", "* b")] {
+        for (a, b) in [
+            ("- a", "- b"),
+            ("1. a", "1. b"),
+            ("1. a", "3. b"),
+            ("- a\n- x", "* b"),
+        ] {
             let (first, second) = two_lists(a, b);
 
             // Top level (a flat sequence).
             let flat = crate::document::Blocks::from_elements(
                 im::vector![first.clone(), second.clone()]
                     .into_iter()
-                    .map(|node| Spanned { node, span: Span { start: 0, end: 0 } })
+                    .map(|node| Spanned {
+                        node,
+                        span: Span { start: 0, end: 0 },
+                    })
                     .collect(),
             );
             let saved = serialize_blocks(&flat);
@@ -2177,18 +2639,26 @@ headings
             assert_eq!(serialize_blocks(&back), saved);
 
             // In a quote.
-            let quote = ContentElement::Blockquote { blocks: flat.clone() };
+            let quote = ContentElement::Blockquote {
+                blocks: flat.clone(),
+            };
             let saved = serialize_element(&quote);
             assert!(saved.contains("> <!-- -->"), "{saved:?}");
             let back = reparse_one(&saved);
             assert_eq!(serialize_element(&back), saved);
-            assert!(matches!(&back, ContentElement::Blockquote { blocks }
-                if blocks.elements.len() == 2 && blocks.comments.is_empty()), "{saved:?}");
+            assert!(
+                matches!(&back, ContentElement::Blockquote { blocks }
+                if blocks.elements.len() == 2 && blocks.comments.is_empty()),
+                "{saved:?}"
+            );
 
             // In an item (a loose one with a paragraph, so that the blank
             // lines show).
             let mut in_item = flat.clone();
-            in_item.elements.push_front(Spanned { node: para("p"), span: Span { start: 0, end: 0 } });
+            in_item.elements.push_front(Spanned {
+                node: para("p"),
+                span: Span { start: 0, end: 0 },
+            });
             let item = ContentElement::List {
                 list: List {
                     kind: ListKind::Bullet,
@@ -2200,8 +2670,11 @@ headings
             assert!(saved.contains("  <!-- -->"), "{saved:?}");
             let back = reparse_one(&saved);
             assert_eq!(serialize_element(&back), saved);
-            assert!(matches!(&back, ContentElement::List { list }
-                if list.items[0].elements.len() == 3 && list.items[0].comments.is_empty()), "{saved:?}");
+            assert!(
+                matches!(&back, ContentElement::List { list }
+                if list.items[0].elements.len() == 3 && list.items[0].comments.is_empty()),
+                "{saved:?}"
+            );
         }
     }
 
@@ -2214,9 +2687,15 @@ headings
         )
         .expect("schema parses");
         // Slot to unassigned: `- a` fills `tags`, `- b` is unassigned.
-        let doc = parse_and_assign("# T\n\n- a\n\n1. x\n\n- b\n\n----\n\nBody.\n", &grammar).expect("parses");
+        let doc = parse_and_assign("# T\n\n- a\n\n1. x\n\n- b\n\n----\n\nBody.\n", &grammar)
+            .expect("parses");
         let mut doc = doc;
-        doc.unassigned = doc.unassigned.iter().filter(|e| e.node != top_level("1. x")[0]).cloned().collect();
+        doc.unassigned = doc
+            .unassigned
+            .iter()
+            .filter(|e| e.node != top_level("1. x")[0])
+            .cloned()
+            .collect();
         let saved = serialize_document(&doc);
         assert!(saved.contains("- a\n\n<!-- -->\n\n- b"), "{saved}");
         let again = parse_and_assign(&saved, &grammar).expect("parses");
@@ -2225,13 +2704,25 @@ headings
         assert_eq!(serialize_document(&again), saved);
 
         // Unassigned to body, with no `----` between them.
-        let mut doc = parse_and_assign("# T\n\n1. x\n\n- b\n\n----\n\nBody.\n", &grammar).expect("parses");
-        doc.unassigned = doc.unassigned.iter().filter(|e| e.node != top_level("1. x")[0]).cloned().collect();
+        let mut doc =
+            parse_and_assign("# T\n\n1. x\n\n- b\n\n----\n\nBody.\n", &grammar).expect("parses");
+        doc.unassigned = doc
+            .unassigned
+            .iter()
+            .filter(|e| e.node != top_level("1. x")[0])
+            .cloned()
+            .collect();
         doc.has_separator = false;
-        doc.body = im::vector![Spanned { node: top_level("- c")[0].clone(), span: Span { start: 0, end: 0 } }];
+        doc.body = im::vector![Spanned {
+            node: top_level("- c")[0].clone(),
+            span: Span { start: 0, end: 0 }
+        }];
         let saved = serialize_document(&doc);
         assert!(saved.contains("- b\n\n<!-- -->\n\n- c"), "{saved}");
-        assert_eq!(serialize_document(&parse_and_assign(&saved, &grammar).expect("parses")), saved);
+        assert_eq!(
+            serialize_document(&parse_and_assign(&saved, &grammar).expect("parses")),
+            saved
+        );
     }
 
     /// The separator is not a comment: it is read as the separator it is, and
@@ -2249,7 +2740,12 @@ headings
     /// comment.
     #[test]
     fn empty_comment_elsewhere_is_a_comment() {
-        for src in ["a\n\n<!-- -->\n\nb", "- a\n\n<!-- -->\n\nb", "<!-- -->\n\n- a", "- a\n\n<!-- -->"] {
+        for src in [
+            "a\n\n<!-- -->\n\nb",
+            "- a\n\n<!-- -->\n\nb",
+            "<!-- -->\n\n- a",
+            "- a\n\n<!-- -->",
+        ] {
             let flat = crate::parser::parse_document(src).expect("parses");
             assert_eq!(flat.comments.len(), 1, "{src:?}");
             assert_eq!(serialize_blocks(&flat), src);
@@ -2279,7 +2775,13 @@ headings
     fn lists_of_different_kinds_need_no_separator() {
         let (first, second) = two_lists("- a", "1. b");
         let flat = crate::document::Blocks::from_elements(
-            [first, second].into_iter().map(|node| Spanned { node, span: Span { start: 0, end: 0 } }).collect(),
+            [first, second]
+                .into_iter()
+                .map(|node| Spanned {
+                    node,
+                    span: Span { start: 0, end: 0 },
+                })
+                .collect(),
         );
         let saved = serialize_blocks(&flat);
         assert_eq!(saved, "- a\n\n1. b");
@@ -2302,8 +2804,7 @@ headings
     #[test]
     fn store_paragraph_ending_in_a_marker_stays_in_its_slot_l11() {
         let grammar = simple_grammar();
-        let mut doc = parse_and_assign("# T\n\nOne.\n\n----\n\nBody.\n", &grammar)
-            .expect("parses");
+        let mut doc = parse_and_assign("# T\n\nOne.\n\n----\n\nBody.\n", &grammar).expect("parses");
         let summary = doc
             .preamble
             .iter_mut()
@@ -2323,7 +2824,11 @@ headings
             .find(|s| s.name.as_str() == "summary")
             .expect("summary slot");
         assert_eq!(
-            summary.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            summary
+                .elements
+                .iter()
+                .map(|e| e.node.clone())
+                .collect::<Vec<_>>(),
             vec![para("text {#summary}")],
             "saved:\n{saved}"
         );
@@ -2344,8 +2849,10 @@ headings
     /// anchors, and that it is written back byte for byte.
     fn check_comments(src: &str, expected: &[(CommentAnchor, &str)]) {
         let doc = parse_and_assign(src, &simple_grammar()).expect("parses");
-        let expected: Vec<(CommentAnchor, String)> =
-            expected.iter().map(|(a, s)| (a.clone(), s.to_string())).collect();
+        let expected: Vec<(CommentAnchor, String)> = expected
+            .iter()
+            .map(|(a, s)| (a.clone(), s.to_string()))
+            .collect();
         assert_eq!(comment_anchors(&doc), expected, "{src:?}");
         assert_eq!(serialize_document(&doc), src, "{src:?}");
     }
@@ -2360,7 +2867,10 @@ headings
         // In the preamble, before a slotted element.
         check_comments(
             "<!-- a -->\n\n# Title\n\n<!-- b -->\n\nSummary.\n\n----\n\nBody.\n",
-            &[(Before(slot("title"), 0), "<!-- a -->"), (Before(slot("summary"), 0), "<!-- b -->")],
+            &[
+                (Before(slot("title"), 0), "<!-- a -->"),
+                (Before(slot("summary"), 0), "<!-- b -->"),
+            ],
         );
         // Before `----`.
         check_comments(
@@ -2384,12 +2894,18 @@ headings
         // Consecutive comments keep their order and both go with the host.
         check_comments(
             "# Title\n\nSummary.\n\n----\n\n<!-- 1 -->\n\n<!-- 2 -->\n\nBody.\n",
-            &[(Before(Container::Body, 0), "<!-- 1 -->"), (Before(Container::Body, 0), "<!-- 2 -->")],
+            &[
+                (Before(Container::Body, 0), "<!-- 1 -->"),
+                (Before(Container::Body, 0), "<!-- 2 -->"),
+            ],
         );
         // Multi-line and empty comments.
         check_comments(
             "# Title\n\n<!--\nx\n-->\n\nSummary.\n\n----\n\n<!---->\n\nBody.\n",
-            &[(Before(slot("summary"), 0), "<!--\nx\n-->"), (Before(Container::Body, 0), "<!---->")],
+            &[
+                (Before(slot("summary"), 0), "<!--\nx\n-->"),
+                (Before(Container::Body, 0), "<!---->"),
+            ],
         );
         // Before an unassigned element, which moves after the slots.
         check_comments(
@@ -2405,7 +2921,10 @@ headings
         let src = "# Title\n\n<!-- u -->\n\n{#x}\n\nSummary.\n\n----\n\nBody.\n";
         let doc = parse_and_assign(src, &simple_grammar()).expect("parses");
         let saved = serialize_document(&doc);
-        assert_eq!(saved, "# Title\n\nSummary.\n\n<!-- u -->\n\n{#x}\n\n----\n\nBody.\n");
+        assert_eq!(
+            saved,
+            "# Title\n\nSummary.\n\n<!-- u -->\n\n{#x}\n\n----\n\nBody.\n"
+        );
         let again = parse_and_assign(&saved, &simple_grammar()).expect("parses");
         assert_eq!(comment_anchors(&again), comment_anchors(&doc));
         assert_eq!(serialize_document(&again), saved);
@@ -2434,7 +2953,13 @@ headings
         assert_eq!(doc.unassigned.len(), 2, "{doc:#?}");
         let saved = serialize_document(&doc);
         assert_eq!(saved, section0);
-        assert_eq!(parse_and_assign(&saved, &simple_grammar()).unwrap().unassigned.len(), 2);
+        assert_eq!(
+            parse_and_assign(&saved, &simple_grammar())
+                .unwrap()
+                .unassigned
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -2442,15 +2967,24 @@ headings
         use CommentAnchor::{Before, End};
         let mut doc = doc_with_slot(
             "title",
-            vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "T")],
+            vec![ContentElement::heading_from_markdown(
+                HeadingLevel::new(1).unwrap(),
+                "T",
+            )],
         );
         let comment = |anchor: CommentAnchor, text: &str| crate::document::AnchoredComment {
             anchor,
-            comment: Spanned { node: crate::document::Comment::new(text).unwrap(), span: Span { start: 0, end: 0 } },
+            comment: Spanned {
+                node: crate::document::Comment::new(text).unwrap(),
+                span: Span { start: 0, end: 0 },
+            },
         };
-        doc.comments.push_back(comment(Before(slot("title"), 7), "<!-- past -->"));
-        doc.comments.push_back(comment(End(slot("title")), "<!-- end -->"));
-        doc.comments.push_back(comment(Before(slot("missing"), 0), "<!-- orphan -->"));
+        doc.comments
+            .push_back(comment(Before(slot("title"), 7), "<!-- past -->"));
+        doc.comments
+            .push_back(comment(End(slot("title")), "<!-- end -->"));
+        doc.comments
+            .push_back(comment(Before(slot("missing"), 0), "<!-- orphan -->"));
         assert_eq!(
             serialize_document(&doc),
             "# T\n\n<!-- past -->\n\n<!-- end -->\n\n<!-- orphan -->\n"
@@ -2467,7 +3001,9 @@ headings
                 .map(|e| e.node.clone())
                 .collect()
         };
-        let html = |s: &str| ContentElement::HtmlBlock { source: s.to_string() };
+        let html = |s: &str| ContentElement::HtmlBlock {
+            source: s.to_string(),
+        };
         // Types 1 and 2 with no end condition swallow the rest of the file.
         assert_eq!(
             blocks("Para.\n\n<script>\nx\n\nMore text.\n"),
@@ -2481,8 +3017,14 @@ headings
         // the next load; the bytes are kept.
         let saved = serialize_elements(
             &vec![
-                Spanned { node: html("<script>"), span: Span { start: 0, end: 0 } },
-                Spanned { node: para("After."), span: Span { start: 0, end: 0 } },
+                Spanned {
+                    node: html("<script>"),
+                    span: Span { start: 0, end: 0 },
+                },
+                Spanned {
+                    node: para("After."),
+                    span: Span { start: 0, end: 0 },
+                },
             ]
             .into_iter()
             .collect(),
@@ -2529,8 +3071,14 @@ headings
         let src = "# Title\n\nPara.\n\n----\n\n### Body\n";
         let d = parse_and_assign(src, &grammar).expect("should parse");
         let serialized = serialize_document(&d);
-        assert!(serialized.contains("# Title"), "expected '# Title' in: {serialized:?}");
-        assert!(serialized.contains("Para."), "expected 'Para.' in: {serialized:?}");
+        assert!(
+            serialized.contains("# Title"),
+            "expected '# Title' in: {serialized:?}"
+        );
+        assert!(
+            serialized.contains("Para."),
+            "expected 'Para.' in: {serialized:?}"
+        );
     }
 
     #[test]
@@ -2541,16 +3089,22 @@ headings
         let serialized = serialize_document(&original);
         let reparsed = parse_and_assign(&serialized, &grammar).expect("reparse failed");
         // Count total elements across preamble and body
-        let orig_count: usize = original.preamble.iter().map(|s| s.elements.len()).sum::<usize>()
+        let orig_count: usize = original
+            .preamble
+            .iter()
+            .map(|s| s.elements.len())
+            .sum::<usize>()
             + original.body.len();
-        let repr_count: usize = reparsed.preamble.iter().map(|s| s.elements.len()).sum::<usize>()
+        let repr_count: usize = reparsed
+            .preamble
+            .iter()
+            .map(|s| s.elements.len())
+            .sum::<usize>()
             + reparsed.body.len();
         assert_eq!(
-            orig_count,
-            repr_count,
+            orig_count, repr_count,
             "roundtrip element count mismatch: original={}, reparsed={}",
-            orig_count,
-            repr_count
+            orig_count, repr_count
         );
     }
 }

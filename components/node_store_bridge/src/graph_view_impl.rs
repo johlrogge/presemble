@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 
 use node_store::{NodeId, NodeStore};
+use template::DataGraph;
 use template::data::Value;
 use template::graph_view::{DataRef, GraphView, ResolvedNode};
-use template::DataGraph;
 
 use crate::content_bridge::presemble_file_for_root;
 use crate::node_helpers::FieldRef;
@@ -51,9 +51,9 @@ impl<'a> GraphView for NodeStoreView<'a> {
         // The transformer's fallback always ends up calling resolve(&[key_file])
         // so we only need to handle the single-segment case here.
         if path == [template::constants::KEY_PRESEMBLE_FILE] {
-            return Some(DataRef::Owned(Value::Text(
-                presemble_file_for_root(self.store, self.root),
-            )));
+            return Some(DataRef::Owned(Value::Text(presemble_file_for_root(
+                self.store, self.root,
+            ))));
         }
 
         let mut current = self.root;
@@ -137,7 +137,10 @@ impl<'a> GraphView for NodeStoreView<'a> {
             }
             // Then Reference
             let refs = self.store.references(current);
-            if let Some((_, id)) = refs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+            if let Some((_, id)) = refs
+                .iter()
+                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
+            {
                 current = *id;
                 continue;
             }
@@ -152,7 +155,10 @@ impl<'a> GraphView for NodeStoreView<'a> {
     }
 
     fn root_node(&self) -> Option<ResolvedNode<'_>> {
-        Some(ResolvedNode { id: self.root, store: self.store })
+        Some(ResolvedNode {
+            id: self.root,
+            store: self.store,
+        })
     }
 
     fn resolve_node(&self, path: &[&str]) -> Option<ResolvedNode<'_>> {
@@ -162,9 +168,15 @@ impl<'a> GraphView for NodeStoreView<'a> {
 
             // Try ConsistsOf edges first
             let parts = self.store.consists_of(current);
-            if let Some((_, id)) = parts.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+            if let Some((_, id)) = parts
+                .iter()
+                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
+            {
                 if is_last {
-                    return Some(ResolvedNode { id: *id, store: self.store });
+                    return Some(ResolvedNode {
+                        id: *id,
+                        store: self.store,
+                    });
                 }
                 current = *id;
                 continue;
@@ -172,9 +184,15 @@ impl<'a> GraphView for NodeStoreView<'a> {
 
             // Try Reference edges
             let refs = self.store.references(current);
-            if let Some((_, id)) = refs.iter().find(|(name, _)| self.store.resolve_name(*name) == *segment) {
+            if let Some((_, id)) = refs
+                .iter()
+                .find(|(name, _)| self.store.resolve_name(*name) == *segment)
+            {
                 if is_last {
-                    return Some(ResolvedNode { id: *id, store: self.store });
+                    return Some(ResolvedNode {
+                        id: *id,
+                        store: self.store,
+                    });
                 }
                 current = *id;
                 continue;
@@ -183,7 +201,10 @@ impl<'a> GraphView for NodeStoreView<'a> {
             // Try Attribute edges
             if let Some(id) = crate::node_helpers::record_field_node(self.store, current, segment) {
                 if is_last {
-                    return Some(ResolvedNode { id, store: self.store });
+                    return Some(ResolvedNode {
+                        id,
+                        store: self.store,
+                    });
                 }
                 current = id;
                 continue;
@@ -240,9 +261,9 @@ impl GraphView for LayeredGraphView {
                         // Navigate into the bound value — must return Owned because
                         // the sub-value has no lifetime tied to &self directly.
                         match value {
-                            Value::Record(sub) => sub
-                                .resolve(rest)
-                                .map(|v| DataRef::Owned(v.clone())),
+                            Value::Record(sub) => {
+                                sub.resolve(rest).map(|v| DataRef::Owned(v.clone()))
+                            }
                             _ => None,
                         }
                     }
@@ -364,7 +385,10 @@ impl GraphView for PrefixedGraphView<'_> {
             [first, rest @ ..] if *first == self.prefix => {
                 if rest.is_empty() {
                     // The prefix itself — return the root node
-                    Some(ResolvedNode { id: self.inner.root(), store: self.inner.store() })
+                    Some(ResolvedNode {
+                        id: self.inner.root(),
+                        store: self.inner.store(),
+                    })
                 } else {
                     self.inner.resolve_node(rest)
                 }
@@ -410,13 +434,19 @@ fn walk_store(store: &NodeStore, root: NodeId, path: &[&str]) -> Option<NodeId> 
     for segment in path {
         // ConsistsOf edges first
         let parts = store.consists_of(current);
-        if let Some((_, id)) = parts.iter().find(|(n, _)| store.resolve_name(*n) == *segment) {
+        if let Some((_, id)) = parts
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == *segment)
+        {
             current = *id;
             continue;
         }
         // Reference edges
         let refs = store.references(current);
-        if let Some((_, id)) = refs.iter().find(|(n, _)| store.resolve_name(*n) == *segment) {
+        if let Some((_, id)) = refs
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == *segment)
+        {
             current = *id;
             continue;
         }
@@ -465,9 +495,9 @@ impl<'a> GraphView for MultiRootView<'a> {
                 // iterated items (data-each) also emit a non-empty
                 // data-presemble-file attribute.
                 if *rest == [template::constants::KEY_PRESEMBLE_FILE] {
-                    return Some(DataRef::Owned(Value::Text(
-                        presemble_file_for_root(self.store, root),
-                    )));
+                    return Some(DataRef::Owned(Value::Text(presemble_file_for_root(
+                        self.store, root,
+                    ))));
                 }
                 // Walk the subpath inline — avoid temporary NodeStoreView borrow issues.
                 let resolved_id = walk_store(self.store, root, rest)?;
@@ -482,10 +512,16 @@ impl<'a> GraphView for MultiRootView<'a> {
             [key, rest @ ..] => {
                 let root = self.find_root(key)?;
                 if rest.is_empty() {
-                    Some(ResolvedNode { id: root, store: self.store })
+                    Some(ResolvedNode {
+                        id: root,
+                        store: self.store,
+                    })
                 } else {
                     let id = walk_store(self.store, root, rest)?;
-                    Some(ResolvedNode { id, store: self.store })
+                    Some(ResolvedNode {
+                        id,
+                        store: self.store,
+                    })
                 }
             }
         }
@@ -545,9 +581,9 @@ impl<'a> GraphView for MultiRootView<'a> {
 mod tests {
     use super::*;
     use node_store::{Edge, Node, NodeStore};
+    use template;
     use template::data::Value;
     use template::graph_view::GraphView;
-    use template;
 
     fn make_test_store() -> (NodeStore, NodeId) {
         let mut store = NodeStore::new();
@@ -616,7 +652,13 @@ mod tests {
             &mut store,
         );
         let cover = store.intern("cover");
-        store.add_edge(root, Edge::ConsistsOf { name: cover, part: image });
+        store.add_edge(
+            root,
+            Edge::ConsistsOf {
+                name: cover,
+                part: image,
+            },
+        );
 
         let view = NodeStoreView::new(&store, root);
         let text = |path: &[&str]| match view.resolve(path).map(|r| r.as_value().clone()) {
@@ -677,10 +719,16 @@ mod tests {
         assert_eq!(text(&["cover", "alt"]).as_deref(), Some("A cat"));
         assert_eq!(text(&["bare", "src"]).as_deref(), Some("images/bare.jpg"));
         assert_eq!(text(&["bare", "alt"]), None, "an empty alt is absent");
-        assert!(view.resolve(&["prose", "href"]).is_none(), "text is not a link record");
+        assert!(
+            view.resolve(&["prose", "href"]).is_none(),
+            "text is not a link record"
+        );
         // The whole paragraph, materialised, is that record.
         for (name, field) in [("plain", "href"), ("cover", "src")] {
-            let part = store.consists_of(root).into_iter().find(|(n, _)| store.resolve_name(*n) == name);
+            let part = store
+                .consists_of(root)
+                .into_iter()
+                .find(|(n, _)| store.resolve_name(*n) == name);
             let Value::Record(record) = crate::value_bridge::node_to_value(&store, part.unwrap().1)
             else {
                 panic!("{name} is a record")
@@ -805,7 +853,13 @@ mod tests {
 
         let title_name = store.intern("title");
         let title_val = store.add_node(Node::Text("Via ConsistsOf".into()));
-        store.add_edge(root, Edge::ConsistsOf { name: title_name, part: title_val });
+        store.add_edge(
+            root,
+            Edge::ConsistsOf {
+                name: title_name,
+                part: title_val,
+            },
+        );
 
         let view = NodeStoreView::new(&store, root);
         let result = view.resolve(&["title"]).unwrap();
@@ -827,7 +881,13 @@ mod tests {
             &mut store,
         );
         let title_name = store.intern("title");
-        store.add_edge(root, Edge::ConsistsOf { name: title_name, part: heading });
+        store.add_edge(
+            root,
+            Edge::ConsistsOf {
+                name: title_name,
+                part: heading,
+            },
+        );
 
         let view = NodeStoreView::new(&store, root);
         let prefixed = PrefixedGraphView::new("input".to_string(), view);
@@ -849,11 +909,23 @@ mod tests {
 
         let title_name = store.intern("title");
         let title_val = store.add_node(Node::Text("Hello".into()));
-        store.add_edge(root, Edge::ConsistsOf { name: title_name, part: title_val });
+        store.add_edge(
+            root,
+            Edge::ConsistsOf {
+                name: title_name,
+                part: title_val,
+            },
+        );
 
         let author_name = store.intern("author");
         let author_val = store.add_node(Node::Text("Alice".into()));
-        store.add_edge(root, Edge::Reference { name: author_name, target: author_val });
+        store.add_edge(
+            root,
+            Edge::Reference {
+                name: author_name,
+                target: author_val,
+            },
+        );
 
         let view = NodeStoreView::new(&store, root);
         let keys = view.iter_keys();
@@ -911,13 +983,25 @@ mod tests {
         let title_name = store.intern("title");
         let t1 = store.add_node(Node::Text("Page One".into()));
         let t2 = store.add_node(Node::Text("Item Title".into()));
-        store.add_edge(root1, Edge::Reference { name: title_name, target: t1 });
-        store.add_edge(root2, Edge::Reference { name: title_name, target: t2 });
+        store.add_edge(
+            root1,
+            Edge::Reference {
+                name: title_name,
+                target: t1,
+            },
+        );
+        store.add_edge(
+            root2,
+            Edge::Reference {
+                name: title_name,
+                target: t2,
+            },
+        );
 
-        let view = MultiRootView::new(&store, vec![
-            ("input".to_string(), root1),
-            ("item".to_string(), root2),
-        ]);
+        let view = MultiRootView::new(
+            &store,
+            vec![("input".to_string(), root1), ("item".to_string(), root2)],
+        );
 
         // Resolve input.title
         let r1 = view.resolve_node(&["input", "title"]).unwrap();
@@ -935,7 +1019,13 @@ mod tests {
         let root = store.add_node(Node::Element(page_name));
         let title_name = store.intern("title");
         let title_val = store.add_node(Node::Text("Hello".into()));
-        store.add_edge(root, Edge::Reference { name: title_name, target: title_val });
+        store.add_edge(
+            root,
+            Edge::Reference {
+                name: title_name,
+                target: title_val,
+            },
+        );
 
         let view = MultiRootView::new(&store, vec![("input".to_string(), root)]);
         let result = view.resolve(&["input", "title"]).unwrap();
@@ -951,11 +1041,25 @@ mod tests {
         let title_name = store.intern("title");
         let t1 = store.add_node(Node::Text("Original".into()));
         let t2 = store.add_node(Node::Text("Bound".into()));
-        store.add_edge(root1, Edge::Reference { name: title_name, target: t1 });
-        store.add_edge(root2, Edge::Reference { name: title_name, target: t2 });
+        store.add_edge(
+            root1,
+            Edge::Reference {
+                name: title_name,
+                target: t1,
+            },
+        );
+        store.add_edge(
+            root2,
+            Edge::Reference {
+                name: title_name,
+                target: t2,
+            },
+        );
 
         let view = MultiRootView::new(&store, vec![("input".to_string(), root1)]);
-        let bound = view.with_node_binding("item".to_string(), root2, &store).unwrap();
+        let bound = view
+            .with_node_binding("item".to_string(), root2, &store)
+            .unwrap();
 
         // Bound key resolves to new root
         let r1 = bound.resolve_node(&["item", "title"]).unwrap();
@@ -975,13 +1079,27 @@ mod tests {
         let title_name = store.intern("title");
         let t1 = store.add_node(Node::Text("Page".into()));
         let t2 = store.add_node(Node::Text("Item".into()));
-        store.add_edge(root1, Edge::Reference { name: title_name, target: t1 });
-        store.add_edge(root2, Edge::Reference { name: title_name, target: t2 });
+        store.add_edge(
+            root1,
+            Edge::Reference {
+                name: title_name,
+                target: t1,
+            },
+        );
+        store.add_edge(
+            root2,
+            Edge::Reference {
+                name: title_name,
+                target: t2,
+            },
+        );
 
         let inner = NodeStoreView::new(&store, root1);
         let prefixed = PrefixedGraphView::new("input".to_string(), inner);
 
-        let bound = prefixed.with_node_binding("item".to_string(), root2, &store).unwrap();
+        let bound = prefixed
+            .with_node_binding("item".to_string(), root2, &store)
+            .unwrap();
 
         // Both paths resolve
         let r1 = bound.resolve_node(&["input", "title"]).unwrap();
@@ -995,10 +1113,10 @@ mod tests {
         let mut store = NodeStore::new();
         let page_name = store.intern("page");
         let root = store.add_node(Node::Element(page_name));
-        let view = MultiRootView::new(&store, vec![
-            ("input".to_string(), root),
-            ("item".to_string(), root),
-        ]);
+        let view = MultiRootView::new(
+            &store,
+            vec![("input".to_string(), root), ("item".to_string(), root)],
+        );
         let keys = view.iter_keys();
         assert!(keys.contains(&"input".to_string()));
         assert!(keys.contains(&"item".to_string()));
@@ -1018,11 +1136,23 @@ mod tests {
         // Always write file attr (may be empty string for legacy roots)
         let file_name = store.intern("file");
         let file_val = store.add_node(Node::Text(file.to_string()));
-        store.add_edge(root, Edge::Attribute { name: file_name, value: file_val });
+        store.add_edge(
+            root,
+            Edge::Attribute {
+                name: file_name,
+                value: file_val,
+            },
+        );
         if !stem.is_empty() {
             let stem_name = store.intern("stem");
             let stem_val = store.add_node(Node::Text(stem.to_string()));
-            store.add_edge(root, Edge::Attribute { name: stem_name, value: stem_val });
+            store.add_edge(
+                root,
+                Edge::Attribute {
+                    name: stem_name,
+                    value: stem_val,
+                },
+            );
         }
         (store, root)
     }
@@ -1031,7 +1161,9 @@ mod tests {
     fn node_store_view_synthesizes_presemble_file_from_file_attr() {
         let (store, root) = make_store_with_file_attr("content/post/hello.md", "post");
         let view = NodeStoreView::new(&store, root);
-        let result = view.resolve(&["_presemble_file"]).expect("should resolve _presemble_file");
+        let result = view
+            .resolve(&["_presemble_file"])
+            .expect("should resolve _presemble_file");
         assert!(
             matches!(result.as_value(), Value::Text(t) if t == "content/post/hello.md"),
             "expected 'content/post/hello.md', got {:?}",
@@ -1044,7 +1176,9 @@ mod tests {
         // Legacy root has file="" and no stem → should yield "content/index.md"
         let (store, root) = make_store_with_file_attr("", "");
         let view = NodeStoreView::new(&store, root);
-        let result = view.resolve(&["_presemble_file"]).expect("should resolve _presemble_file");
+        let result = view
+            .resolve(&["_presemble_file"])
+            .expect("should resolve _presemble_file");
         assert!(
             matches!(result.as_value(), Value::Text(t) if t == "content/index.md"),
             "expected 'content/index.md' for empty file+stem, got {:?}",
@@ -1062,11 +1196,19 @@ mod tests {
             // Only add stem, no file attr
             let stem_name = store.intern("stem");
             let stem_val = store.add_node(node_store::Node::Text("blog".to_string()));
-            store.add_edge(root, node_store::Edge::Attribute { name: stem_name, value: stem_val });
+            store.add_edge(
+                root,
+                node_store::Edge::Attribute {
+                    name: stem_name,
+                    value: stem_val,
+                },
+            );
             (store, root)
         };
         let view = NodeStoreView::new(&store, root);
-        let result = view.resolve(&["_presemble_file"]).expect("should resolve _presemble_file");
+        let result = view
+            .resolve(&["_presemble_file"])
+            .expect("should resolve _presemble_file");
         assert!(
             matches!(result.as_value(), Value::Text(t) if t == "content/blog/index.md"),
             "expected 'content/blog/index.md' for stem fallback, got {:?}",
@@ -1088,7 +1230,10 @@ mod tests {
 
         // Case 3: empty file, stem present → stem-derived fallback
         let (store3, root3) = make_store_with_file_attr("", "post");
-        assert_eq!(presemble_file_for_root(&store3, root3), "content/post/index.md");
+        assert_eq!(
+            presemble_file_for_root(&store3, root3),
+            "content/post/index.md"
+        );
     }
 
     #[test]
@@ -1101,22 +1246,35 @@ mod tests {
             let root = store.add_node(node_store::Node::Element(doc_name));
             let file_name = store.intern("file");
             let file_val = store.add_node(node_store::Node::Text("content/index.md".to_string()));
-            store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+            store.add_edge(
+                root,
+                node_store::Edge::Attribute {
+                    name: file_name,
+                    value: file_val,
+                },
+            );
             root
         };
-        let view = MultiRootView::new(&store, vec![
-            ("input".to_string(), index_root),
-            ("item".to_string(), post_root),
-        ]);
+        let view = MultiRootView::new(
+            &store,
+            vec![
+                ("input".to_string(), index_root),
+                ("item".to_string(), post_root),
+            ],
+        );
         // input._presemble_file → content/index.md
-        let r = view.resolve(&["input", "_presemble_file"]).expect("input._presemble_file resolves");
+        let r = view
+            .resolve(&["input", "_presemble_file"])
+            .expect("input._presemble_file resolves");
         assert!(
             matches!(r.as_value(), Value::Text(t) if t == "content/index.md"),
             "expected 'content/index.md', got {:?}",
             r.as_value()
         );
         // item._presemble_file → content/post/hello.md
-        let r = view.resolve(&["item", "_presemble_file"]).expect("item._presemble_file resolves");
+        let r = view
+            .resolve(&["item", "_presemble_file"])
+            .expect("item._presemble_file resolves");
         assert!(
             matches!(r.as_value(), Value::Text(t) if t == "content/post/hello.md"),
             "expected 'content/post/hello.md', got {:?}",

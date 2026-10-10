@@ -79,8 +79,10 @@ pub fn apply_link_ops<T: ThreadItem>(
         match op {
             content::LinkOp::SortBy { field, direction } => {
                 let field = field.as_str();
-                let mut keyed: Vec<(SortKey, T)> =
-                    items.into_iter().map(|item| (sort_key_for(&item, field), item)).collect();
+                let mut keyed: Vec<(SortKey, T)> = items
+                    .into_iter()
+                    .map(|item| (sort_key_for(&item, field), item))
+                    .collect();
                 keyed.sort_by(|(a, _), (b, _)| match direction {
                     content::SortDirection::Ascending => a.cmp(b),
                     content::SortDirection::Descending => b.cmp(a),
@@ -146,7 +148,11 @@ impl ThreadItem for GraphItem {
 /// The text of field `field` in `data`, as the thread operations read it.
 /// Exposed so other adapters can be checked for parity.
 pub fn graph_field_text(data: &template::DataGraph, field: &str) -> Option<String> {
-    GraphItem { url: String::new(), data: data.clone() }.field_text(field)
+    GraphItem {
+        url: String::new(),
+        data: data.clone(),
+    }
+    .field_text(field)
 }
 
 // ── Extracted evaluator (moved from publisher_cli) ───────────────────────────
@@ -174,9 +180,7 @@ pub fn evaluate_link_expression(
                 }
                 template::Value::Record(record)
             } else {
-                eprintln!(
-                    "[presemble] warning: link expression references unknown path '{path}'"
-                );
+                eprintln!("[presemble] warning: link expression references unknown path '{path}'");
                 template::Value::Absent
             }
         }
@@ -218,10 +222,7 @@ pub fn evaluate_link_expression(
 /// `Value::List` of all item data graphs under that stem key — unless
 /// the page's own data already has a value for that key (avoids
 /// overwriting resolved links like "author" with the full author collection).
-pub fn inject_collections(
-    page_data: &mut template::DataGraph,
-    site_graph: &site_index::SiteGraph,
-) {
+pub fn inject_collections(page_data: &mut template::DataGraph, site_graph: &site_index::SiteGraph) {
     let mut stems: Vec<site_index::SchemaStem> = site_graph
         .iter_pages_by_kind(site_index::PageKind::Item)
         .filter_map(|n| n.page_data().map(|pd| pd.schema_stem.clone()))
@@ -236,7 +237,10 @@ pub fn inject_collections(
         let items: Vec<template::Value> = site_graph
             .items_for_stem(&stem)
             .into_iter()
-            .filter_map(|n| n.page_data().map(|pd| template::Value::Record(pd.data.clone())))
+            .filter_map(|n| {
+                n.page_data()
+                    .map(|pd| template::Value::Record(pd.data.clone()))
+            })
             .collect();
         page_data.insert(stem.as_str(), template::Value::List(items));
     }
@@ -262,12 +266,18 @@ mod tests {
             &self.url
         }
         fn field_text(&self, field: &str) -> Option<String> {
-            self.fields.iter().find(|(k, _)| *k == field).map(|(_, v)| v.to_string())
+            self.fields
+                .iter()
+                .find(|(k, _)| *k == field)
+                .map(|(_, v)| v.to_string())
         }
     }
 
     fn item(url: &str, fields: &[(&'static str, &'static str)]) -> Item {
-        Item { url: url.to_string(), fields: fields.to_vec() }
+        Item {
+            url: url.to_string(),
+            fields: fields.to_vec(),
+        }
     }
 
     fn kw(s: &str) -> Keyword {
@@ -275,7 +285,10 @@ mod tests {
     }
 
     fn sort(field: &str, direction: SortDirection) -> LinkOp {
-        LinkOp::SortBy { field: kw(field), direction }
+        LinkOp::SortBy {
+            field: kw(field),
+            direction,
+        }
     }
 
     fn urls(items: &[Item]) -> Vec<&str> {
@@ -284,16 +297,36 @@ mod tests {
 
     fn posts() -> Vec<Item> {
         vec![
-            item("/post/p1", &[("published", "2026-01-10"), ("category", "notes"), ("n", "10")]),
-            item("/post/p2", &[("published", "2026-02-10"), ("category", "news"), ("n", "9")]),
-            item("/post/p3", &[("published", "2026-03-10"), ("category", "news")]),
+            item(
+                "/post/p1",
+                &[
+                    ("published", "2026-01-10"),
+                    ("category", "notes"),
+                    ("n", "10"),
+                ],
+            ),
+            item(
+                "/post/p2",
+                &[
+                    ("published", "2026-02-10"),
+                    ("category", "news"),
+                    ("n", "9"),
+                ],
+            ),
+            item(
+                "/post/p3",
+                &[("published", "2026-03-10"), ("category", "news")],
+            ),
         ]
     }
 
     fn links_to(edges: &[(&str, &str)]) -> LinksToIndex {
         let mut index = LinksToIndex::new();
         for (source, target) in edges {
-            index.entry(target.to_string()).or_default().insert(source.to_string());
+            index
+                .entry(target.to_string())
+                .or_default()
+                .insert(source.to_string());
         }
         index
     }
@@ -306,23 +339,48 @@ mod tests {
 
     #[test]
     fn sort_by_ascending_and_descending() {
-        let desc = apply_link_ops(posts(), &[sort("published", SortDirection::Descending)], "/", &LinksToIndex::new());
+        let desc = apply_link_ops(
+            posts(),
+            &[sort("published", SortDirection::Descending)],
+            "/",
+            &LinksToIndex::new(),
+        );
         assert_eq!(urls(&desc), vec!["/post/p3", "/post/p2", "/post/p1"]);
-        let asc = apply_link_ops(desc, &[sort("published", SortDirection::Ascending)], "/", &LinksToIndex::new());
+        let asc = apply_link_ops(
+            desc,
+            &[sort("published", SortDirection::Ascending)],
+            "/",
+            &LinksToIndex::new(),
+        );
         assert_eq!(urls(&asc), vec!["/post/p1", "/post/p2", "/post/p3"]);
     }
 
     #[test]
     fn sort_by_is_stable_on_equal_keys() {
-        let out = apply_link_ops(posts(), &[sort("category", SortDirection::Ascending)], "/", &LinksToIndex::new());
+        let out = apply_link_ops(
+            posts(),
+            &[sort("category", SortDirection::Ascending)],
+            "/",
+            &LinksToIndex::new(),
+        );
         assert_eq!(urls(&out), vec!["/post/p2", "/post/p3", "/post/p1"]);
-        let out = apply_link_ops(posts(), &[sort("category", SortDirection::Descending)], "/", &LinksToIndex::new());
+        let out = apply_link_ops(
+            posts(),
+            &[sort("category", SortDirection::Descending)],
+            "/",
+            &LinksToIndex::new(),
+        );
         assert_eq!(urls(&out), vec!["/post/p1", "/post/p2", "/post/p3"]);
     }
 
     #[test]
     fn sort_by_compares_integers_numerically_and_puts_missing_last() {
-        let out = apply_link_ops(posts(), &[sort("n", SortDirection::Ascending)], "/", &LinksToIndex::new());
+        let out = apply_link_ops(
+            posts(),
+            &[sort("n", SortDirection::Ascending)],
+            "/",
+            &LinksToIndex::new(),
+        );
         assert_eq!(urls(&out), vec!["/post/p2", "/post/p1", "/post/p3"]);
     }
 
@@ -336,16 +394,26 @@ mod tests {
 
     #[test]
     fn filter_keeps_equal_field_text() {
-        let op = LinkOp::Filter { field: kw("category"), value: "news".to_string() };
+        let op = LinkOp::Filter {
+            field: kw("category"),
+            value: "news".to_string(),
+        };
         let out = apply_link_ops(posts(), &[op], "/", &LinksToIndex::new());
         assert_eq!(urls(&out), vec!["/post/p2", "/post/p3"]);
-        let op = LinkOp::Filter { field: kw("missing"), value: String::new() };
+        let op = LinkOp::Filter {
+            field: kw("missing"),
+            value: String::new(),
+        };
         assert!(apply_link_ops(posts(), &[op], "/", &LinksToIndex::new()).is_empty());
     }
 
     #[test]
     fn refs_to_self_uses_current_url() {
-        let index = links_to(&[("/post/p1", "/author/a"), ("/post/p3", "/author/a"), ("/post/p2", "/author/b")]);
+        let index = links_to(&[
+            ("/post/p1", "/author/a"),
+            ("/post/p3", "/author/a"),
+            ("/post/p2", "/author/b"),
+        ]);
         let op = LinkOp::RefsTo(RefsToTarget::SelfRef);
         let out = apply_link_ops(posts(), std::slice::from_ref(&op), "/author/a", &index);
         assert_eq!(urls(&out), vec!["/post/p1", "/post/p3"]);
@@ -363,17 +431,33 @@ mod tests {
 
     #[test]
     fn ops_apply_in_order() {
-        let filter = LinkOp::Filter { field: kw("category"), value: "news".to_string() };
+        let filter = LinkOp::Filter {
+            field: kw("category"),
+            value: "news".to_string(),
+        };
         // take then filter: p1, p2 → p2
-        let out = apply_link_ops(posts(), &[LinkOp::Take(2), filter.clone()], "/", &LinksToIndex::new());
+        let out = apply_link_ops(
+            posts(),
+            &[LinkOp::Take(2), filter.clone()],
+            "/",
+            &LinksToIndex::new(),
+        );
         assert_eq!(urls(&out), vec!["/post/p2"]);
         // filter then take: p2, p3 → p2, p3
-        let out = apply_link_ops(posts(), &[filter, LinkOp::Take(2)], "/", &LinksToIndex::new());
+        let out = apply_link_ops(
+            posts(),
+            &[filter, LinkOp::Take(2)],
+            "/",
+            &LinksToIndex::new(),
+        );
         assert_eq!(urls(&out), vec!["/post/p2", "/post/p3"]);
         // sort desc then take 2
         let out = apply_link_ops(
             posts(),
-            &[sort("published", SortDirection::Descending), LinkOp::Take(2)],
+            &[
+                sort("published", SortDirection::Descending),
+                LinkOp::Take(2),
+            ],
             "/",
             &LinksToIndex::new(),
         );
@@ -381,7 +465,10 @@ mod tests {
         // take 2 then sort desc
         let out = apply_link_ops(
             posts(),
-            &[LinkOp::Take(2), sort("published", SortDirection::Descending)],
+            &[
+                LinkOp::Take(2),
+                sort("published", SortDirection::Descending),
+            ],
             "/",
             &LinksToIndex::new(),
         );
@@ -495,7 +582,9 @@ mod tests {
             template::Value::List(items) => items
                 .iter()
                 .filter_map(|item| match item {
-                    template::Value::Record(r) => r.resolve(&["href"]).and_then(|v| v.display_text()),
+                    template::Value::Record(r) => {
+                        r.resolve(&["href"]).and_then(|v| v.display_text())
+                    }
                     _ => None,
                 })
                 .collect(),
@@ -504,7 +593,10 @@ mod tests {
     }
 
     fn thread(ops: Vec<LinkOp>) -> content::LinkTarget {
-        content::LinkTarget::ThreadExpr { source: kw("post"), operations: ops }
+        content::LinkTarget::ThreadExpr {
+            source: kw("post"),
+            operations: ops,
+        }
     }
 
     #[test]
@@ -524,7 +616,10 @@ mod tests {
     fn evaluate_link_expression_applies_sort_and_take() {
         let result = evaluate_link_expression(
             &content::LinkText::Empty,
-            &thread(vec![sort("published", SortDirection::Descending), LinkOp::Take(2)]),
+            &thread(vec![
+                sort("published", SortDirection::Descending),
+                LinkOp::Take(2),
+            ]),
             &UrlIndex::new(),
             &make_post_stem_index(),
             &UrlPath::new("/"),
@@ -537,7 +632,10 @@ mod tests {
     fn evaluate_link_expression_applies_filter() {
         let result = evaluate_link_expression(
             &content::LinkText::Empty,
-            &thread(vec![LinkOp::Filter { field: kw("title"), value: "Post C".to_string() }]),
+            &thread(vec![LinkOp::Filter {
+                field: kw("title"),
+                value: "Post C".to_string(),
+            }]),
             &UrlIndex::new(),
             &make_post_stem_index(),
             &UrlPath::new("/"),
@@ -565,7 +663,9 @@ mod tests {
 
         let result = evaluate_link_expression(
             &content::LinkText::Empty,
-            &thread(vec![LinkOp::RefsTo(RefsToTarget::Url("/author/bob".to_string()))]),
+            &thread(vec![LinkOp::RefsTo(RefsToTarget::Url(
+                "/author/bob".to_string(),
+            ))]),
             &UrlIndex::new(),
             &make_post_stem_index(),
             &UrlPath::new("/author/alice"),
@@ -594,7 +694,11 @@ mod tests {
 
     // ── inject_collections ───────────────────────────────────────────────────
 
-    fn make_item_site_node(stem: &str, url: &str, data: template::DataGraph) -> site_index::SiteNode {
+    fn make_item_site_node(
+        stem: &str,
+        url: &str,
+        data: template::DataGraph,
+    ) -> site_index::SiteNode {
         use std::collections::HashSet;
         use std::path::PathBuf;
         site_index::SiteNode {
@@ -664,7 +768,10 @@ mod tests {
 
         // The "post" key should still be a Record, not a List
         assert!(
-            matches!(page_data.resolve(&["post"]), Some(template::Value::Record(_))),
+            matches!(
+                page_data.resolve(&["post"]),
+                Some(template::Value::Record(_))
+            ),
             "inject_collections should not overwrite existing 'post' key"
         );
     }

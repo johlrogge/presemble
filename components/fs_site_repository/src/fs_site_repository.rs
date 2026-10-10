@@ -71,8 +71,7 @@ impl SiteRepository {
                 }
             }
         }
-        let mut result: Vec<SchemaStem> =
-            stems.into_iter().map(SchemaStem::new).collect();
+        let mut result: Vec<SchemaStem> = stems.into_iter().map(SchemaStem::new).collect();
         result.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         result
     }
@@ -155,7 +154,10 @@ impl SiteRepository {
         let base = if stem.as_str().is_empty() {
             self.site_dir.join("templates").join("item")
         } else {
-            self.site_dir.join("templates").join(stem.as_str()).join("item")
+            self.site_dir
+                .join("templates")
+                .join(stem.as_str())
+                .join("item")
         };
         read_template_source(&base)
     }
@@ -167,7 +169,10 @@ impl SiteRepository {
         let base = if stem.as_str().is_empty() {
             self.site_dir.join("templates").join("index")
         } else {
-            self.site_dir.join("templates").join(stem.as_str()).join("index")
+            self.site_dir
+                .join("templates")
+                .join(stem.as_str())
+                .join("index")
         };
         read_template_source(&base)
     }
@@ -348,7 +353,10 @@ mod tests {
         let slugs = r.content_slugs(&stem);
         assert!(slugs.contains(&"hello".to_string()));
         assert!(slugs.contains(&"world".to_string()));
-        assert!(!slugs.contains(&"index".to_string()), "index.md should be excluded");
+        assert!(
+            !slugs.contains(&"index".to_string()),
+            "index.md should be excluded"
+        );
     }
 
     #[test]

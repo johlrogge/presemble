@@ -50,8 +50,8 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
                         if let Some(content) = content_store::paragraph_inlines(store, id) {
                             // A lone link or image is the record a template
                             // sees for it (ADR-059 §12), as on the other path.
-                            let marked = crate::node_helpers::node_attr_text(store, id, "marker")
-                                .is_some();
+                            let marked =
+                                crate::node_helpers::node_attr_text(store, id, "marker").is_some();
                             return match content::BlockShape::of(&content) {
                                 content::BlockShape::SoleLink(parts) if !marked => {
                                     template::Value::Record(template::data::link_record(
@@ -118,7 +118,8 @@ pub fn node_to_value(store: &NodeStore, id: NodeId) -> template::Value {
             }
             Node::Opaque(any) => {
                 // Try to downcast to a Callable for Value::Fn
-                if let Some(callable) = any.downcast_ref::<std::sync::Arc<dyn template::Callable>>() {
+                if let Some(callable) = any.downcast_ref::<std::sync::Arc<dyn template::Callable>>()
+                {
                     template::Value::Fn(callable.clone())
                 } else {
                     template::Value::Opaque(any.clone())
@@ -178,8 +179,7 @@ fn materialize_reference_shallow(store: &NodeStore, id: NodeId) -> template::Val
                 template::Value::Record(graph)
             }
             Node::Opaque(any) => {
-                if let Some(callable) =
-                    any.downcast_ref::<std::sync::Arc<dyn template::Callable>>()
+                if let Some(callable) = any.downcast_ref::<std::sync::Arc<dyn template::Callable>>()
                 {
                     template::Value::Fn(callable.clone())
                 } else {
@@ -208,7 +208,13 @@ fn dom_node_to_store(store: &mut NodeStore, node: &template::dom::Node) -> NodeI
                     Form::Str(s) => store.add_node(Node::Text(s.clone())),
                     other => store.add_node(Node::Text(other.to_html_value())),
                 };
-                store.add_edge(element, Edge::Attribute { name: attr_name, value });
+                store.add_edge(
+                    element,
+                    Edge::Attribute {
+                        name: attr_name,
+                        value,
+                    },
+                );
             }
             for child in &el.children {
                 let child_id = dom_node_to_store(store, child);
@@ -245,7 +251,13 @@ pub fn value_to_node(store: &mut NodeStore, value: &template::Value) -> NodeId {
             for (key, val) in graph.iter() {
                 let attr_name = store.intern(key);
                 let attr_value = value_to_node(store, val);
-                store.add_edge(element, Edge::Attribute { name: attr_name, value: attr_value });
+                store.add_edge(
+                    element,
+                    Edge::Attribute {
+                        name: attr_name,
+                        value: attr_value,
+                    },
+                );
             }
             element
         }
@@ -263,25 +275,37 @@ pub fn value_to_node(store: &mut NodeStore, value: &template::Value) -> NodeId {
                 std::sync::Arc::new(callable.clone());
             store.add_node(Node::Opaque(arc))
         }
-        template::Value::Suggestion { hint, slot_name, .. } => {
+        template::Value::Suggestion {
+            hint, slot_name, ..
+        } => {
             // Suggestion → Element with attributes
             let name = store.intern("suggestion");
             let node = store.add_node(Node::Element(name));
             let hint_name = store.intern("hint");
             let hint_val = store.add_node(Node::Text(hint.clone()));
-            store.add_edge(node, Edge::Attribute { name: hint_name, value: hint_val });
+            store.add_edge(
+                node,
+                Edge::Attribute {
+                    name: hint_name,
+                    value: hint_val,
+                },
+            );
             let slot = store.intern("slot-name");
             let slot_val = store.add_node(Node::Text(slot_name.clone()));
-            store.add_edge(node, Edge::Attribute { name: slot, value: slot_val });
+            store.add_edge(
+                node,
+                Edge::Attribute {
+                    name: slot,
+                    value: slot_val,
+                },
+            );
             node
         }
         template::Value::LinkExpression { .. } => {
             // Link expressions should be resolved before reaching here
             store.add_node(Node::Nil)
         }
-        template::Value::Opaque(any) => {
-            store.add_node(Node::Opaque(any.clone()))
-        }
+        template::Value::Opaque(any) => store.add_node(Node::Opaque(any.clone())),
     }
 }
 
@@ -335,8 +359,13 @@ mod tests {
         let id = value_to_node(&mut store, &val);
         let result = node_to_value(&store, id);
         if let template::Value::Record(g) = result {
-            assert!(matches!(g.resolve(&["title"]), Some(template::Value::Text(s)) if s == "Hello"));
-            assert!(matches!(g.resolve(&["count"]), Some(template::Value::Integer(5))));
+            assert!(
+                matches!(g.resolve(&["title"]), Some(template::Value::Text(s)) if s == "Hello")
+            );
+            assert!(matches!(
+                g.resolve(&["count"]),
+                Some(template::Value::Integer(5))
+            ));
         } else {
             panic!("expected Record");
         }
@@ -344,10 +373,9 @@ mod tests {
 
     #[test]
     fn nodes_value_maps_to_element_tree() {
-        let nodes = template::parse_template_hiccup(
-            r#"[:ol {:start 3 :class "x"} [:li "a " [:em "b"]]]"#,
-        )
-        .expect("hiccup parses");
+        let nodes =
+            template::parse_template_hiccup(r#"[:ol {:start 3 :class "x"} [:li "a " [:em "b"]]]"#)
+                .expect("hiccup parses");
         let mut store = NodeStore::new();
         let id = value_to_node(&mut store, &template::Value::Nodes(nodes.into()));
 
@@ -362,10 +390,25 @@ mod tests {
         let attrs: Vec<(String, &Node)> = store
             .attributes(ol)
             .iter()
-            .map(|(n, v)| (store.resolve_name(*n).to_string(), store.get(*v).expect("value")))
+            .map(|(n, v)| {
+                (
+                    store.resolve_name(*n).to_string(),
+                    store.get(*v).expect("value"),
+                )
+            })
             .collect();
-        assert!(attrs.iter().any(|(n, v)| n == "start" && matches!(v, Node::Integer(3))), "{attrs:?}");
-        assert!(attrs.iter().any(|(n, v)| n == "class" && matches!(v, Node::Text(t) if t == "x")), "{attrs:?}");
+        assert!(
+            attrs
+                .iter()
+                .any(|(n, v)| n == "start" && matches!(v, Node::Integer(3))),
+            "{attrs:?}"
+        );
+        assert!(
+            attrs
+                .iter()
+                .any(|(n, v)| n == "class" && matches!(v, Node::Text(t) if t == "x")),
+            "{attrs:?}"
+        );
 
         // Children: li > ["a ", em > "b"]
         let li = store.children(ol)[0];
@@ -429,7 +472,9 @@ mod tests {
         let heading = content_store::block_to_store(&el, &mut store);
 
         let val = node_to_value(&store, heading);
-        let template::Value::Inlines(nodes) = &val else { panic!("{val:?}") };
+        let template::Value::Inlines(nodes) = &val else {
+            panic!("{val:?}")
+        };
         assert_eq!(
             template::serialize_nodes(nodes),
             "The <code>&lt;div&gt;</code> <em>element</em>"
@@ -448,10 +493,18 @@ mod tests {
         let para = content_store::block_to_store(&el, &mut store);
 
         let val = node_to_value(&store, para);
-        let template::Value::Inlines(nodes) = &val else { panic!("{val:?}") };
+        let template::Value::Inlines(nodes) = &val else {
+            panic!("{val:?}")
+        };
         let html = template::serialize_nodes(nodes);
-        assert!(html.starts_with("Body <em>text</em> with <code>&lt;div&gt;</code> and <img "), "{html}");
-        assert_eq!(val.display_text().as_deref(), Some("Body text with <div> and ."));
+        assert!(
+            html.starts_with("Body <em>text</em> with <code>&lt;div&gt;</code> and <img "),
+            "{html}"
+        );
+        assert_eq!(
+            val.display_text().as_deref(),
+            Some("Body text with <div> and .")
+        );
     }
 
     /// A stored list is its items, each the item's blocks as nodes (ADR-059
@@ -467,13 +520,20 @@ mod tests {
         let id = content_store::block_to_store(&list, &mut store);
 
         let val = node_to_value(&store, id);
-        let template::Value::List(items) = &val else { panic!("{val:?}") };
+        let template::Value::List(items) = &val else {
+            panic!("{val:?}")
+        };
         assert_eq!(items.len(), 2);
         let text = |v: &template::Value| v.display_text();
         assert_eq!(text(&items[0]).as_deref(), Some("one"));
         assert_eq!(text(&items[1]).as_deref(), Some("twonested"));
-        let template::Value::Nodes(nodes) = &items[1] else { panic!("{:?}", items[1]) };
-        assert_eq!(template::serialize_nodes(nodes), "<strong>two</strong><ul><li>nested</li></ul>");
+        let template::Value::Nodes(nodes) = &items[1] else {
+            panic!("{:?}", items[1])
+        };
+        assert_eq!(
+            template::serialize_nodes(nodes),
+            "<strong>two</strong><ul><li>nested</li></ul>"
+        );
     }
 
     #[test]
@@ -484,7 +544,10 @@ mod tests {
         // No inline nodes: an empty heading, whose plain text is empty.
 
         let val = node_to_value(&store, heading);
-        assert!(matches!(&val, template::Value::Inlines(n) if n.is_empty()), "{val:?}");
+        assert!(
+            matches!(&val, template::Value::Inlines(n) if n.is_empty()),
+            "{val:?}"
+        );
         assert_eq!(val.display_text().as_deref(), Some(""));
     }
 
@@ -497,8 +560,20 @@ mod tests {
         let b = store.add_node(Node::Element(b_name));
         // Circular Reference edges: a → b → a
         let ref_name = store.intern("related");
-        store.add_edge(a, Edge::Reference { name: ref_name, target: b });
-        store.add_edge(b, Edge::Reference { name: ref_name, target: a });
+        store.add_edge(
+            a,
+            Edge::Reference {
+                name: ref_name,
+                target: b,
+            },
+        );
+        store.add_edge(
+            b,
+            Edge::Reference {
+                name: ref_name,
+                target: a,
+            },
+        );
         // This must not stack overflow
         let val = node_to_value(&store, a);
         assert!(matches!(val, template::Value::Record(_)));

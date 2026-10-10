@@ -5,10 +5,8 @@ use crate::block::{
     BlockDecodeError, block_from_node, block_to_store, link_op_from_node, link_op_to_store,
     link_target_from_node, tree_to_block, try_child_by_name,
 };
+use content::{ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SortDirection};
 use ned::NodeTree;
-use content::{
-    ContentElement, Keyword, LinkOp, LinkTarget, LinkText, RefsToTarget, SortDirection,
-};
 use node_store::{Edge, Node, NodeId, NodeStore};
 use schema::HeadingLevel;
 
@@ -21,9 +19,15 @@ fn link_expression_store_encoding_has_slot_attr_and_label_kind() {
     };
     let mut store = NodeStore::new();
     let node = block_to_store(&marked, &mut store);
-    assert_eq!(find_attr_text(&store, node, "slot").as_deref(), Some("latest"));
+    assert_eq!(
+        find_attr_text(&store, node, "slot").as_deref(),
+        Some("latest")
+    );
     let text_node = try_child_by_name(&store, node, "link-expression", "link-text").unwrap();
-    assert_eq!(find_attr_text(&store, text_node, "kind").as_deref(), Some("label"));
+    assert_eq!(
+        find_attr_text(&store, text_node, "kind").as_deref(),
+        Some("label")
+    );
     assert_eq!(block_from_node(&store, node).unwrap(), marked);
 
     let unmarked = ContentElement::LinkExpression {
@@ -73,8 +77,15 @@ fn heading_stores_inline_nodes() {
     // A marker is an attribute, not text.
     let marked = h(2, "Intro {#intro}");
     let id = block_to_store(&marked, &mut store);
-    assert_eq!(find_attr_text(&store, id, "marker").as_deref(), Some("intro"));
-    let texts: Vec<_> = store.children(id).iter().map(|c| store.get(*c).cloned()).collect();
+    assert_eq!(
+        find_attr_text(&store, id, "marker").as_deref(),
+        Some("intro")
+    );
+    let texts: Vec<_> = store
+        .children(id)
+        .iter()
+        .map(|c| store.get(*c).cloned())
+        .collect();
     assert_eq!(texts, vec![Some(Node::Text("Intro".to_string()))]);
     assert_eq!(block_from_node(&store, id), Ok(marked));
 }
@@ -87,7 +98,9 @@ fn heading_payload_text_is_literal() {
         .with_attr("level", "2")
         .with_child(NodeTree::text("A *b*"));
     let el = tree_to_block(&tree).expect("decodes");
-    let ContentElement::Heading { content, .. } = &el else { panic!("{el:?}") };
+    let ContentElement::Heading { content, .. } = &el else {
+        panic!("{el:?}")
+    };
     assert_eq!(
         content.as_slice(),
         &[content::inline::Inline::Text("A *b*".to_string())],
@@ -100,8 +113,13 @@ fn heading_payload_text_is_literal() {
         .with_child(NodeTree::element("emph").with_child(NodeTree::text("b")));
     assert_eq!(tree_to_block(&tree), Ok(h(2, "A *b*")));
     // A payload with another attribute is still refused.
-    let tree = NodeTree::element("heading").with_attr("level", "2").with_attr("id", "x");
-    assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedAttribute { .. })));
+    let tree = NodeTree::element("heading")
+        .with_attr("level", "2")
+        .with_attr("id", "x");
+    assert!(matches!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::UnexpectedAttribute { .. })
+    ));
 }
 
 fn p(md: &str) -> ContentElement {
@@ -132,8 +150,15 @@ fn paragraph_stores_inline_nodes() {
     // A marker is an attribute, not text.
     let marked = p("Intro {#intro}");
     let id = block_to_store(&marked, &mut store);
-    assert_eq!(find_attr_text(&store, id, "marker").as_deref(), Some("intro"));
-    let texts: Vec<_> = store.children(id).iter().map(|c| store.get(*c).cloned()).collect();
+    assert_eq!(
+        find_attr_text(&store, id, "marker").as_deref(),
+        Some("intro")
+    );
+    let texts: Vec<_> = store
+        .children(id)
+        .iter()
+        .map(|c| store.get(*c).cloned())
+        .collect();
     assert_eq!(texts, vec![Some(Node::Text("Intro".to_string()))]);
     assert_eq!(block_from_node(&store, id), Ok(marked));
 }
@@ -144,7 +169,9 @@ fn paragraph_stores_inline_nodes() {
 fn paragraph_payload_text_is_literal() {
     let tree = NodeTree::element("paragraph").with_child(NodeTree::text("a *b*"));
     let el = tree_to_block(&tree).expect("decodes");
-    let ContentElement::Paragraph { content, marker } = &el else { panic!("{el:?}") };
+    let ContentElement::Paragraph { content, marker } = &el else {
+        panic!("{el:?}")
+    };
     assert_eq!(
         content.as_slice(),
         &[content::inline::Inline::Text("a *b*".to_string())],
@@ -157,7 +184,10 @@ fn paragraph_payload_text_is_literal() {
     else {
         panic!()
     };
-    assert_eq!(content.as_slice(), &[content::inline::Inline::Text("x {#y}".to_string())]);
+    assert_eq!(
+        content.as_slice(),
+        &[content::inline::Inline::Text("x {#y}".to_string())]
+    );
     assert_eq!(marker, None);
     // A formatted payload is built from inline trees.
     let tree = NodeTree::element("paragraph")
@@ -165,10 +195,17 @@ fn paragraph_payload_text_is_literal() {
         .with_child(NodeTree::element("emph").with_child(NodeTree::text("b")));
     assert_eq!(tree_to_block(&tree), Ok(p("a *b*")));
     // The marker is the one attribute a paragraph payload takes.
-    let tree = NodeTree::element("paragraph").with_attr("marker", "m").with_child(NodeTree::text("a"));
+    let tree = NodeTree::element("paragraph")
+        .with_attr("marker", "m")
+        .with_child(NodeTree::text("a"));
     assert_eq!(tree_to_block(&tree), Ok(p("a {#m}")));
-    let tree = NodeTree::element("paragraph").with_attr("id", "x").with_child(NodeTree::text("a"));
-    assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedAttribute { .. })));
+    let tree = NodeTree::element("paragraph")
+        .with_attr("id", "x")
+        .with_child(NodeTree::text("a"));
+    assert!(matches!(
+        tree_to_block(&tree),
+        Err(BlockDecodeError::UnexpectedAttribute { .. })
+    ));
 }
 
 #[test]
@@ -244,7 +281,10 @@ fn unknown_kind_is_error() {
 fn non_element_is_error() {
     let mut store = NodeStore::new();
     let id = store.add_node(Node::Text("loose".to_string()));
-    assert_eq!(block_from_node(&store, id), Err(BlockDecodeError::NotAnElement));
+    assert_eq!(
+        block_from_node(&store, id),
+        Err(BlockDecodeError::NotAnElement)
+    );
 }
 
 #[test]
@@ -262,7 +302,9 @@ fn missing_text_child_is_error() {
 // ── Blockquotes hold blocks (ADR-059 §13, stage 8.1) ─────────────────────────
 
 fn quote(md: &str) -> ContentElement {
-    content::parse_document(md).unwrap().elements[0].node.clone()
+    content::parse_document(md).unwrap().elements[0]
+        .node
+        .clone()
 }
 
 #[test]
@@ -272,7 +314,10 @@ fn blockquote_holds_blocks_in_the_store() {
     let mut store = NodeStore::new();
     let id = block_to_store(&el, &mut store);
     let children = store.children(id);
-    let names: Vec<_> = children.iter().map(|c| element_name_of(&store, *c).unwrap()).collect();
+    let names: Vec<_> = children
+        .iter()
+        .map(|c| element_name_of(&store, *c).unwrap())
+        .collect();
     assert_eq!(names, vec!["paragraph", "heading"]);
     // The comment before the heading is the heading's trivia; the one after
     // the last block is the quote's.
@@ -285,9 +330,18 @@ fn blockquote_holds_blocks_in_the_store() {
             })
             .collect()
     };
-    assert_eq!(texts(children[1], ned::trivia::ATTR_TRIVIA_BEFORE), vec!["<!-- c -->"]);
-    assert_eq!(texts(children[0], ned::trivia::ATTR_TRIVIA_BEFORE), Vec::<String>::new());
-    assert_eq!(texts(id, ned::trivia::ATTR_TRIVIA_END), vec!["<!-- end -->"]);
+    assert_eq!(
+        texts(children[1], ned::trivia::ATTR_TRIVIA_BEFORE),
+        vec!["<!-- c -->"]
+    );
+    assert_eq!(
+        texts(children[0], ned::trivia::ATTR_TRIVIA_BEFORE),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        texts(id, ned::trivia::ATTR_TRIVIA_END),
+        vec!["<!-- end -->"]
+    );
     assert_eq!(block_from_node(&store, id), Ok(el));
 }
 
@@ -319,12 +373,18 @@ fn old_text_blockquote_is_refused() {
     add_child_text(&mut store, id, "q");
     assert_eq!(
         block_from_node(&store, id),
-        Err(BlockDecodeError::UnexpectedChild { kind: "blockquote".to_string(), child: "text".to_string() })
+        Err(BlockDecodeError::UnexpectedChild {
+            kind: "blockquote".to_string(),
+            child: "text".to_string()
+        })
     );
     let tree = NodeTree::element("blockquote").with_child(NodeTree::text("q"));
     assert_eq!(
         tree_to_block(&tree),
-        Err(BlockDecodeError::UnexpectedChild { kind: "blockquote".to_string(), child: "text".to_string() })
+        Err(BlockDecodeError::UnexpectedChild {
+            kind: "blockquote".to_string(),
+            child: "text".to_string()
+        })
     );
 }
 
@@ -355,9 +415,17 @@ fn nested_non_payload_kinds_are_refused() {
 /// whose edit would fail late and stay Stale.
 #[test]
 fn block_to_tree_refuses_a_quote_holding_a_non_payload_block() {
-    let spanned = |node| schema::Spanned { node, span: (0..0).into() };
+    let spanned = |node| schema::Spanned {
+        node,
+        span: (0..0).into(),
+    };
     let nested = [
-        ("html-block", ContentElement::HtmlBlock { source: "<div>x</div>".to_string() }),
+        (
+            "html-block",
+            ContentElement::HtmlBlock {
+                source: "<div>x</div>".to_string(),
+            },
+        ),
         ("separator", ContentElement::Separator),
         (
             "link-expression",
@@ -385,7 +453,10 @@ fn blockquote_payload_attribute_is_refused() {
     let tree = NodeTree::element("blockquote").with_attr("x", "y");
     assert_eq!(
         tree_to_block(&tree),
-        Err(BlockDecodeError::UnexpectedAttribute { kind: "blockquote".to_string(), attr: "x".to_string() })
+        Err(BlockDecodeError::UnexpectedAttribute {
+            kind: "blockquote".to_string(),
+            attr: "x".to_string()
+        })
     );
 }
 
@@ -398,7 +469,9 @@ fn blockquote_payload_decodes_its_blocks() {
             false,
             true,
             None,
-            vec![vec![NodeTree::element("paragraph").with_child(NodeTree::text("l"))]],
+            vec![vec![
+                NodeTree::element("paragraph").with_child(NodeTree::text("l")),
+            ]],
         ));
     assert_eq!(tree_to_block(&tree), Ok(quote("> a\n>\n> - l\n")));
 }
@@ -407,14 +480,21 @@ fn blockquote_payload_decodes_its_blocks() {
 
 /// The list `md` reads as.
 fn list_el(md: &str) -> ContentElement {
-    let el = content::parse_document(md).unwrap().elements[0].node.clone();
+    let el = content::parse_document(md).unwrap().elements[0]
+        .node
+        .clone();
     assert!(matches!(el, ContentElement::List { .. }), "{md:?}: {el:?}");
     el
 }
 
 /// A list payload: `ordered`, optionally `start`, `tight`, and one `item` per
 /// entry of `items`, holding those blocks.
-fn list_tree(ordered: bool, tight: bool, start: Option<u64>, items: Vec<Vec<NodeTree>>) -> NodeTree {
+fn list_tree(
+    ordered: bool,
+    tight: bool,
+    start: Option<u64>,
+    items: Vec<Vec<NodeTree>>,
+) -> NodeTree {
     let mut list = NodeTree::element("list")
         .with_attr("ordered", ordered.to_string())
         .with_attr("tight", tight.to_string());
@@ -422,7 +502,9 @@ fn list_tree(ordered: bool, tight: bool, start: Option<u64>, items: Vec<Vec<Node
         list = list.with_attr("start", start.to_string());
     }
     for blocks in items {
-        let item = blocks.into_iter().fold(NodeTree::element("item"), |item, b| item.with_child(b));
+        let item = blocks
+            .into_iter()
+            .fold(NodeTree::element("item"), |item, b| item.with_child(b));
         list = list.with_child(item);
     }
     list
@@ -447,9 +529,19 @@ fn list_holds_items_in_the_store() {
     assert_eq!(find_attr_bool(&store, id, "tight"), Some(false));
     let items = store.children(id);
     let names = |parent| -> Vec<String> {
-        store.children(parent).iter().map(|c| element_name_of(&store, *c).unwrap()).collect()
+        store
+            .children(parent)
+            .iter()
+            .map(|c| element_name_of(&store, *c).unwrap())
+            .collect()
     };
-    assert_eq!(items.iter().map(|i| element_name_of(&store, *i).unwrap()).collect::<Vec<_>>(), vec!["item", "item"]);
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| element_name_of(&store, *i).unwrap())
+            .collect::<Vec<_>>(),
+        vec!["item", "item"]
+    );
     assert_eq!(names(items[0]), vec!["paragraph", "paragraph"]);
     assert_eq!(names(items[1]), vec!["paragraph"]);
     let texts = |host, attr| -> Vec<String> {
@@ -462,8 +554,14 @@ fn list_holds_items_in_the_store() {
             .collect()
     };
     let first_item = store.children(items[0]);
-    assert_eq!(texts(first_item[1], ned::trivia::ATTR_TRIVIA_BEFORE), vec!["<!-- c -->"]);
-    assert_eq!(texts(items[0], ned::trivia::ATTR_TRIVIA_END), vec!["<!-- end -->"]);
+    assert_eq!(
+        texts(first_item[1], ned::trivia::ATTR_TRIVIA_BEFORE),
+        vec!["<!-- c -->"]
+    );
+    assert_eq!(
+        texts(items[0], ned::trivia::ATTR_TRIVIA_END),
+        vec!["<!-- end -->"]
+    );
     assert!(texts(items[0], ned::trivia::ATTR_TRIVIA_BEFORE).is_empty());
     assert_eq!(block_from_node(&store, id), Ok(el));
 
@@ -482,7 +580,10 @@ fn list_holds_items_in_the_store() {
 /// element, as a store node with the new attributes, and as a payload.
 #[test]
 fn old_text_list_is_refused() {
-    let old = BlockDecodeError::UnexpectedChild { kind: "list".to_string(), child: "text".to_string() };
+    let old = BlockDecodeError::UnexpectedChild {
+        kind: "list".to_string(),
+        child: "text".to_string(),
+    };
     let mut store = NodeStore::new();
     let id = make_element(&mut store, "list");
     add_child_text(&mut store, id, "- a");
@@ -504,7 +605,10 @@ fn start_on_a_bullet_list_is_refused() {
     let tree = list_tree(false, true, Some(2), vec![vec![paragraph_tree("a")]]);
     assert_eq!(
         tree_to_block(&tree),
-        Err(BlockDecodeError::UnexpectedAttribute { kind: "list".to_string(), attr: "start".to_string() })
+        Err(BlockDecodeError::UnexpectedAttribute {
+            kind: "list".to_string(),
+            attr: "start".to_string()
+        })
     );
     // An ordered list takes it, and a missing `ordered` or `tight` is refused.
     let ok = list_tree(true, true, Some(2), vec![vec![paragraph_tree("a")]]);
@@ -514,7 +618,10 @@ fn start_on_a_bullet_list_is_refused() {
         .with_child(NodeTree::element("item"));
     assert_eq!(
         tree_to_block(&no_tight),
-        Err(BlockDecodeError::MissingAttribute { kind: "list".to_string(), attr: "tight".to_string() })
+        Err(BlockDecodeError::MissingAttribute {
+            kind: "list".to_string(),
+            attr: "tight".to_string()
+        })
     );
 }
 
@@ -530,14 +637,20 @@ fn tight_list_that_cannot_be_written_tight_is_refused_as_payload() {
     });
     let code = NodeTree::element("code-block").with_child(NodeTree::text("x"));
     let two_blocks = vec![vec![paragraph_tree("a"), code]];
-    assert_eq!(tree_to_block(&list_tree(false, true, None, two_blocks.clone())), tight_refused);
+    assert_eq!(
+        tree_to_block(&list_tree(false, true, None, two_blocks.clone())),
+        tight_refused
+    );
     // The same items, loose, are fine.
     assert!(tree_to_block(&list_tree(false, false, None, two_blocks)).is_ok());
 
     // A list straight after a paragraph that cannot interrupt it.
     let nested = list_tree(true, true, Some(2), vec![vec![paragraph_tree("b")]]);
     let after_paragraph = vec![vec![paragraph_tree("a"), nested.clone()]];
-    assert_eq!(tree_to_block(&list_tree(false, true, None, after_paragraph.clone())), tight_refused);
+    assert_eq!(
+        tree_to_block(&list_tree(false, true, None, after_paragraph.clone())),
+        tight_refused
+    );
     assert!(tree_to_block(&list_tree(false, false, None, after_paragraph)).is_ok());
     // As the first block of an item it is fine, tight.
     assert!(tree_to_block(&list_tree(false, true, None, vec![vec![nested]])).is_ok());
@@ -545,7 +658,12 @@ fn tight_list_that_cannot_be_written_tight_is_refused_as_payload() {
     // The same gate on the store.
     let mut store = NodeStore::new();
     let id = block_to_store(&list_el("- a\n\n  ```\n  x\n  ```\n"), &mut store);
-    let tight = store.attributes(id).into_iter().find(|(n, _)| store.resolve_name(*n) == "tight").unwrap().1;
+    let tight = store
+        .attributes(id)
+        .into_iter()
+        .find(|(n, _)| store.resolve_name(*n) == "tight")
+        .unwrap()
+        .1;
     store.replace_node(tight, Node::Boolean(true));
     assert_eq!(block_from_node(&store, id), tight_refused);
 }
@@ -565,7 +683,10 @@ fn nested_non_payload_kinds_in_a_list_are_refused() {
     let text_in_item = list_tree(false, false, None, vec![vec![NodeTree::text("x")]]);
     assert_eq!(
         tree_to_block(&text_in_item),
-        Err(BlockDecodeError::UnexpectedChild { kind: "item".to_string(), child: "text".to_string() })
+        Err(BlockDecodeError::UnexpectedChild {
+            kind: "item".to_string(),
+            child: "text".to_string()
+        })
     );
     let not_an_item = NodeTree::element("list")
         .with_attr("ordered", "false")
@@ -573,7 +694,10 @@ fn nested_non_payload_kinds_in_a_list_are_refused() {
         .with_child(paragraph_tree("a"));
     assert_eq!(
         tree_to_block(&not_an_item),
-        Err(BlockDecodeError::UnexpectedChild { kind: "list".to_string(), child: "paragraph".to_string() })
+        Err(BlockDecodeError::UnexpectedChild {
+            kind: "list".to_string(),
+            child: "paragraph".to_string()
+        })
     );
     let item_with_attr = NodeTree::element("list")
         .with_attr("ordered", "false")
@@ -581,7 +705,10 @@ fn nested_non_payload_kinds_in_a_list_are_refused() {
         .with_child(NodeTree::element("item").with_attr("x", "y"));
     assert_eq!(
         tree_to_block(&item_with_attr),
-        Err(BlockDecodeError::UnexpectedAttribute { kind: "item".to_string(), attr: "x".to_string() })
+        Err(BlockDecodeError::UnexpectedAttribute {
+            kind: "item".to_string(),
+            attr: "x".to_string()
+        })
     );
 }
 
@@ -592,21 +719,23 @@ fn paragraph_without_children_decodes_as_empty() {
     let mut store = NodeStore::new();
     let id = make_element(&mut store, "paragraph");
     let el = block_from_node(&store, id).expect("decodes");
-    assert!(matches!(&el, ContentElement::Paragraph { content, marker: None } if content.is_empty()));
+    assert!(
+        matches!(&el, ContentElement::Paragraph { content, marker: None } if content.is_empty())
+    );
 }
 
 /// A link is `[:paragraph [:inline-link …]]` (ADR-059 §12), not a block kind
 /// of its own: a payload with a `link` root is refused.
 #[test]
 fn link_payload_root_is_refused() {
-    let tree = NodeTree::element("link").with_attr("href", "/x").with_child(NodeTree::text("t"));
+    let tree = NodeTree::element("link")
+        .with_attr("href", "/x")
+        .with_child(NodeTree::text("t"));
     assert_eq!(
         tree_to_block(&tree),
         Err(BlockDecodeError::NotPayloadKind("link".to_string()))
     );
-    assert!(
-        !crate::PAYLOAD_BLOCK_KINDS.contains(&"link") && !crate::BLOCK_KINDS.contains(&"link")
-    );
+    assert!(!crate::PAYLOAD_BLOCK_KINDS.contains(&"link") && !crate::BLOCK_KINDS.contains(&"link"));
 }
 
 /// The same for an image.
@@ -649,11 +778,21 @@ fn table_cell_is_inline_container() {
     let head = try_child_by_name(&store, table, "table", "head").expect("a head");
     let head_cells = children_by_name(&store, head, "cell");
     assert_eq!(head_cells.len(), 2);
-    assert_eq!(find_attr_text(&store, head_cells[0], "align").as_deref(), Some("left"));
-    assert_eq!(find_attr_text(&store, head_cells[1], "align"), None, "default: no attribute");
+    assert_eq!(
+        find_attr_text(&store, head_cells[0], "align").as_deref(),
+        Some("left")
+    );
+    assert_eq!(
+        find_attr_text(&store, head_cells[1], "align"),
+        None,
+        "default: no attribute"
+    );
     let strong = store.children(head_cells[1]);
     assert_eq!(strong.len(), 1);
-    assert_eq!(element_name_of(&store, strong[0]).as_deref(), Some("strong"));
+    assert_eq!(
+        element_name_of(&store, strong[0]).as_deref(),
+        Some("strong")
+    );
     assert!(matches!(store.get(store.children(strong[0])[0]), Some(Node::Text(t)) if t == "b"));
 
     let rows = try_child_by_name(&store, table, "table", "rows").expect("rows");
@@ -661,9 +800,16 @@ fn table_cell_is_inline_container() {
     assert_eq!(row.len(), 1);
     let cells = children_by_name(&store, row[0], "cell");
     assert_eq!(cells.len(), 2);
-    assert_eq!(find_attr_text(&store, cells[0], "align"), None, "only head cells carry align");
+    assert_eq!(
+        find_attr_text(&store, cells[0], "align"),
+        None,
+        "only head cells carry align"
+    );
     assert!(matches!(store.get(store.children(cells[1])[0]), Some(Node::Text(t)) if t == "2"));
-    assert!(find_attr_text(&store, table, "align").is_none(), "no table-level align");
+    assert!(
+        find_attr_text(&store, table, "align").is_none(),
+        "no table-level align"
+    );
 
     assert_eq!(block_from_node(&store, table), Ok(el));
 }
@@ -677,8 +823,7 @@ fn old_table_payload_shape_is_refused() {
     let good = NodeTree::element("table")
         .with_child(NodeTree::element("head").with_child(cell("h")))
         .with_child(
-            NodeTree::element("rows")
-                .with_child(NodeTree::element("row").with_child(cell("a"))),
+            NodeTree::element("rows").with_child(NodeTree::element("row").with_child(cell("a"))),
         );
     assert!(tree_to_block(&good).is_ok(), "{:?}", tree_to_block(&good));
 
@@ -694,14 +839,18 @@ fn old_table_payload_shape_is_refused() {
             NodeTree::element("rows")
                 .with_child(NodeTree::element("row").with_child(NodeTree::text("a"))),
         );
-    let align_on_body_cell = NodeTree::element("table")
-        .with_child(NodeTree::element("head").with_child(cell("h")))
-        .with_child(NodeTree::element("rows").with_child(
-            NodeTree::element("row").with_child(cell("a").with_attr("align", "left")),
-        ));
+    let align_on_body_cell =
+        NodeTree::element("table")
+            .with_child(NodeTree::element("head").with_child(cell("h")))
+            .with_child(NodeTree::element("rows").with_child(
+                NodeTree::element("row").with_child(cell("a").with_attr("align", "left")),
+            ));
     for (label, tree) in [("headers", old), ("text in a row", text_in_row)] {
         assert!(
-            matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedChild { .. })),
+            matches!(
+                tree_to_block(&tree),
+                Err(BlockDecodeError::UnexpectedChild { .. })
+            ),
             "{label}: {:?}",
             tree_to_block(&tree)
         );
@@ -727,16 +876,26 @@ fn a_row_of_the_wrong_width_is_a_row_width_error() {
             r = r.with_child(c);
         }
         NodeTree::element("table")
-            .with_child(NodeTree::element("head").with_child(cell("a")).with_child(cell("b")))
+            .with_child(
+                NodeTree::element("head")
+                    .with_child(cell("a"))
+                    .with_child(cell("b")),
+            )
             .with_child(NodeTree::element("rows").with_child(r))
     };
     assert_eq!(
         tree_to_block(&table(vec![cell("1")])),
-        Err(BlockDecodeError::RowWidth { expected: 2, found: 1 })
+        Err(BlockDecodeError::RowWidth {
+            expected: 2,
+            found: 1
+        })
     );
     assert_eq!(
         tree_to_block(&table(vec![cell("1"), cell("2"), cell("3")])),
-        Err(BlockDecodeError::RowWidth { expected: 2, found: 3 })
+        Err(BlockDecodeError::RowWidth {
+            expected: 2,
+            found: 3
+        })
     );
     assert!(tree_to_block(&table(vec![cell("1"), cell("2")])).is_ok());
 
@@ -745,7 +904,10 @@ fn a_row_of_the_wrong_width_is_a_row_width_error() {
     let id = tree_to_store(&table(vec![cell("1")]), &mut store);
     assert_eq!(
         block_from_node(&store, id),
-        Err(BlockDecodeError::RowWidth { expected: 2, found: 1 })
+        Err(BlockDecodeError::RowWidth {
+            expected: 2,
+            found: 1
+        })
     );
 }
 
@@ -757,7 +919,9 @@ fn table() -> NodeTree {
     let cell = |t: &str| NodeTree::element("cell").with_child(NodeTree::text(t));
     NodeTree::element("table")
         .with_child(NodeTree::element("head").with_child(cell("h")))
-        .with_child(NodeTree::element("rows").with_child(NodeTree::element("row").with_child(cell("a"))))
+        .with_child(
+            NodeTree::element("rows").with_child(NodeTree::element("row").with_child(cell("a"))),
+        )
 }
 
 #[test]
@@ -783,14 +947,19 @@ fn tree_to_block_refuses_table_rows_that_are_not_rows() {
 #[test]
 fn tree_to_block_refuses_attributes_the_kind_does_not_take() {
     for tree in [
-        NodeTree::element("paragraph").with_attr("level", "2").with_child(NodeTree::text("a")),
+        NodeTree::element("paragraph")
+            .with_attr("level", "2")
+            .with_child(NodeTree::text("a")),
         NodeTree::element("code-block")
             .with_attr("path", "x")
             .with_child(NodeTree::text("c")),
         table().with_attr("path", "x"),
     ] {
         assert!(
-            matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedAttribute { .. })),
+            matches!(
+                tree_to_block(&tree),
+                Err(BlockDecodeError::UnexpectedAttribute { .. })
+            ),
             "{tree:?}"
         );
     }
@@ -799,16 +968,24 @@ fn tree_to_block_refuses_attributes_the_kind_does_not_take() {
 #[test]
 fn tree_to_block_still_accepts_the_canonical_shapes() {
     assert!(tree_to_block(&table()).is_ok());
-    assert!(tree_to_block(&NodeTree::element("paragraph").with_child(
-        NodeTree::element("inline-image").with_attr("src", "p").with_child(NodeTree::text("a"))
-    ))
-    .is_ok());
-    assert!(tree_to_block(
-        &NodeTree::element("code-block")
-            .with_attr("language", "rust")
-            .with_child(NodeTree::text("c"))
-    )
-    .is_ok());
+    assert!(
+        tree_to_block(
+            &NodeTree::element("paragraph").with_child(
+                NodeTree::element("inline-image")
+                    .with_attr("src", "p")
+                    .with_child(NodeTree::text("a"))
+            )
+        )
+        .is_ok()
+    );
+    assert!(
+        tree_to_block(
+            &NodeTree::element("code-block")
+                .with_attr("language", "rust")
+                .with_child(NodeTree::text("c"))
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -842,14 +1019,22 @@ fn link_target_with_invalid_keyword_is_a_decode_error() {
 
 #[test]
 fn sort_by_direction_is_encoded_as_text() {
-    for (direction, text) in [(SortDirection::Ascending, "asc"), (SortDirection::Descending, "desc")]
-    {
+    for (direction, text) in [
+        (SortDirection::Ascending, "asc"),
+        (SortDirection::Descending, "desc"),
+    ] {
         let mut store = NodeStore::new();
         let parent = make_element(&mut store, "link-target");
-        let op = LinkOp::SortBy { field: Keyword::new("title").unwrap(), direction };
+        let op = LinkOp::SortBy {
+            field: Keyword::new("title").unwrap(),
+            direction,
+        };
         link_op_to_store(&op, &mut store, parent);
         let node = store.children(parent)[0];
-        assert_eq!(find_attr_text(&store, node, "direction").as_deref(), Some(text));
+        assert_eq!(
+            find_attr_text(&store, node, "direction").as_deref(),
+            Some(text)
+        );
         assert_eq!(link_op_from_node(&store, node), Ok(Some(op)));
     }
 }
@@ -886,10 +1071,19 @@ fn refs_to_self_and_url_self_stay_distinct_in_the_store() {
     link_op_to_store(&self_ref, &mut store, parent);
     link_op_to_store(&url_self, &mut store, parent);
     let nodes = store.children(parent);
-    assert_eq!(find_attr_text(&store, nodes[0], "target-kind").as_deref(), Some("self"));
+    assert_eq!(
+        find_attr_text(&store, nodes[0], "target-kind").as_deref(),
+        Some("self")
+    );
     assert_eq!(find_attr_text(&store, nodes[0], "target"), None);
-    assert_eq!(find_attr_text(&store, nodes[1], "target-kind").as_deref(), Some("url"));
-    assert_eq!(find_attr_text(&store, nodes[1], "target").as_deref(), Some("self"));
+    assert_eq!(
+        find_attr_text(&store, nodes[1], "target-kind").as_deref(),
+        Some("url")
+    );
+    assert_eq!(
+        find_attr_text(&store, nodes[1], "target").as_deref(),
+        Some("self")
+    );
     assert_eq!(link_op_from_node(&store, nodes[0]), Ok(Some(self_ref)));
     assert_eq!(link_op_from_node(&store, nodes[1]), Ok(Some(url_self)));
 }

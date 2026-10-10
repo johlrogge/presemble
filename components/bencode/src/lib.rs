@@ -31,8 +31,7 @@ impl Value {
 
     /// Try to interpret inner bytes as a UTF-8 string.
     pub fn as_str(&self) -> Option<&str> {
-        self.as_bytes()
-            .and_then(|b| std::str::from_utf8(b).ok())
+        self.as_bytes().and_then(|b| std::str::from_utf8(b).ok())
     }
 
     /// Return inner integer if this is an `Integer` variant.
@@ -345,10 +344,7 @@ mod tests {
             decoded.get("code").and_then(|v| v.as_str()),
             Some("(->> :post)")
         );
-        assert_eq!(
-            decoded.get("session").and_then(|v| v.as_str()),
-            Some("abc")
-        );
+        assert_eq!(decoded.get("session").and_then(|v| v.as_str()), Some("abc"));
     }
 
     // --- known wire formats ---

@@ -35,7 +35,10 @@ pub fn parse_body_fragment(src: &str, grammar: &Grammar) -> Result<Vec<NodeTree>
             block_to_tree(&spanned.node).map_err(|e| {
                 ContentError::ParseError(match e {
                     BlockDecodeError::NotPayloadKind(kind) => {
-                        format!("{} cannot be written through a program", schema::with_article(&kind))
+                        format!(
+                            "{} cannot be written through a program",
+                            schema::with_article(&kind)
+                        )
                     }
                     other => other.to_string(),
                 })
@@ -52,7 +55,10 @@ mod tests {
     use content::parse_and_assign;
 
     fn empty_grammar() -> Grammar {
-        Grammar { preamble: vec![], body: None }
+        Grammar {
+            preamble: vec![],
+            body: None,
+        }
     }
 
     fn parse(src: &str) -> Vec<NodeTree> {
@@ -64,7 +70,9 @@ mod tests {
     }
 
     fn refusal(src: &str) -> String {
-        parse_body_fragment(src, &empty_grammar()).expect_err("refused").to_string()
+        parse_body_fragment(src, &empty_grammar())
+            .expect_err("refused")
+            .to_string()
     }
 
     #[test]
@@ -80,10 +88,16 @@ mod tests {
 
     #[test]
     fn kinds_a_payload_cannot_carry_are_refused() {
-        for (src, kind) in [("<div>x</div>\n", "html-block"), ("One.\n\n---\n\nTwo.\n", "separator")] {
+        for (src, kind) in [
+            ("<div>x</div>\n", "html-block"),
+            ("One.\n\n---\n\nTwo.\n", "separator"),
+        ] {
             let err = refusal(src);
             assert!(
-                err.contains(&format!("{} cannot be written through a program", schema::with_article(kind))),
+                err.contains(&format!(
+                    "{} cannot be written through a program",
+                    schema::with_article(kind)
+                )),
                 "{err}"
             );
         }
@@ -130,11 +144,16 @@ mod tests {
         let grammar = empty_grammar();
         let doc = parse_and_assign(src, &grammar).expect("full doc parse");
         assert_eq!(doc.body.len(), 3, "full doc should have 3 body elements");
-        let whole: Vec<NodeTree> =
-            doc.body.iter().map(|b| block_to_tree(&b.node).expect("payload")).collect();
-        let fragment =
-            parse_body_fragment("# Introduction\n\nFirst paragraph.\n\nSecond paragraph.\n", &grammar)
-                .expect("fragment parse");
+        let whole: Vec<NodeTree> = doc
+            .body
+            .iter()
+            .map(|b| block_to_tree(&b.node).expect("payload"))
+            .collect();
+        let fragment = parse_body_fragment(
+            "# Introduction\n\nFirst paragraph.\n\nSecond paragraph.\n",
+            &grammar,
+        )
+        .expect("fragment parse");
         assert_eq!(fragment, whole);
     }
 }

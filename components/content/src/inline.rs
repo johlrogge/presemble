@@ -17,9 +17,9 @@ mod serialize;
 mod text;
 
 pub use model::{AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination};
-pub use parse::{inlines_from_events, parse_inlines, NotInlineContent};
+pub use parse::{NotInlineContent, inlines_from_events, parse_inlines};
 pub use search_replace::SearchReplaceError;
-pub use serialize::{serialize_inlines, NotWritable};
+pub use serialize::{NotWritable, serialize_inlines};
 pub use text::{EditKind, EditSegment, EditText, InlinePath};
 
 /// The text a reader sees: what remains of a value once markup is removed,
@@ -85,7 +85,9 @@ pub(crate) fn paragraph_diagnosis_source(content: &Inlines, marker: Option<&Slot
                     out.push('`');
                 }
                 Inline::LineBreak => out.push('\n'),
-                Inline::Link { destination, text, .. } => {
+                Inline::Link {
+                    destination, text, ..
+                } => {
                     out.push('[');
                     push(text.as_slice(), out);
                     out.push_str("](");
@@ -132,7 +134,13 @@ pub(crate) fn read_paragraph_source(source: &str) -> Option<(Inlines, Option<Slo
 /// The fallback for a source that does not read as one paragraph's content:
 /// the whole source as one text value, no marker. Nothing is lost.
 pub(crate) fn literal_paragraph_content(source: &str) -> (Inlines, Option<SlotMarker>) {
-    (Inlines::new(vec![Inline::Text(source.to_string())], InlineContext::Paragraph), None)
+    (
+        Inlines::new(
+            vec![Inline::Text(source.to_string())],
+            InlineContext::Paragraph,
+        ),
+        None,
+    )
 }
 
 /// Read the markdown source of a heading line's content (no `#` markers) as
@@ -156,7 +164,13 @@ pub(crate) fn read_heading_source(source: &str) -> Option<(Inlines, Option<SlotM
 /// whole source as one text value, no marker. Nothing is lost, and a later
 /// write-back shows that it does not round-trip.
 pub(crate) fn literal_heading_content(source: &str) -> (Inlines, Option<SlotMarker>) {
-    (Inlines::new(vec![Inline::Text(source.to_string())], InlineContext::Heading), None)
+    (
+        Inlines::new(
+            vec![Inline::Text(source.to_string())],
+            InlineContext::Heading,
+        ),
+        None,
+    )
 }
 
 fn split_heading_marker(source: &str) -> (&str, Option<SlotMarker>) {
@@ -239,13 +253,17 @@ mod tests {
     const VECTORS: &str = include_str!("../../../resources/serve/text-vectors.json");
 
     fn vectors(group: &str) -> Vec<(String, serde_json::Value)> {
-        let all: serde_json::Value = serde_json::from_str(VECTORS).expect("text-vectors.json parses");
+        let all: serde_json::Value =
+            serde_json::from_str(VECTORS).expect("text-vectors.json parses");
         all[group]
             .as_array()
             .unwrap_or_else(|| panic!("text-vectors.json has no `{group}` group"))
             .iter()
             .map(|pair| {
-                let input = pair[0].as_str().expect("vector input is a string").to_string();
+                let input = pair[0]
+                    .as_str()
+                    .expect("vector input is a string")
+                    .to_string();
                 (input, pair[1].clone())
             })
             .collect()
@@ -258,14 +276,22 @@ mod tests {
     #[test]
     fn normalize_plain_text_matches_shared_vectors() {
         for (input, expected) in vectors("normalize") {
-            assert_eq!(normalize_plain_text(&input), expected.as_str().unwrap(), "normalize {input:?}");
+            assert_eq!(
+                normalize_plain_text(&input),
+                expected.as_str().unwrap(),
+                "normalize {input:?}"
+            );
         }
     }
 
     #[test]
     fn atx_heading_content_matches_shared_vectors() {
         for (line, expected) in vectors("atx") {
-            assert_eq!(atx_heading_content(&line), expected.as_str(), "ATX content of {line:?}");
+            assert_eq!(
+                atx_heading_content(&line),
+                expected.as_str(),
+                "ATX content of {line:?}"
+            );
         }
     }
 
@@ -280,7 +306,10 @@ mod tests {
     #[test]
     fn heading_line_for_source_writes_one_canonical_line() {
         assert_eq!(heading_line_for_source(h(2), "Title"), "## Title");
-        assert_eq!(heading_line_for_source(h(1), " a\r\nb\rc\nd\t"), "# a b c d");
+        assert_eq!(
+            heading_line_for_source(h(1), " a\r\nb\rc\nd\t"),
+            "# a b c d"
+        );
         assert_eq!(heading_line_for_source(h(1), "Title #"), "# Title \\#");
         assert_eq!(heading_line_for_source(h(1), "C#"), "# C#");
     }
@@ -288,13 +317,28 @@ mod tests {
     #[test]
     fn heading_markdown_writes_content_and_marker() {
         let content = |s: &str| parse_inlines(s, InlineContext::Heading).unwrap();
-        assert_eq!(heading_markdown(h(2), &content("Title *x*"), None), "## Title *x*");
-        assert_eq!(heading_markdown(h(1), &content("Title \\#"), None), "# Title \\#");
+        assert_eq!(
+            heading_markdown(h(2), &content("Title *x*"), None),
+            "## Title *x*"
+        );
+        assert_eq!(
+            heading_markdown(h(1), &content("Title \\#"), None),
+            "# Title \\#"
+        );
         let marker = SlotMarker::new("intro").unwrap();
-        assert_eq!(heading_markdown(h(2), &content("Intro"), Some(&marker)), "## Intro {#intro}");
-        assert_eq!(heading_markdown(h(2), &content(""), Some(&marker)), "## {#intro}");
+        assert_eq!(
+            heading_markdown(h(2), &content("Intro"), Some(&marker)),
+            "## Intro {#intro}"
+        );
+        assert_eq!(
+            heading_markdown(h(2), &content(""), Some(&marker)),
+            "## {#intro}"
+        );
         // A literal trailing marker is written escaped.
-        assert_eq!(heading_markdown(h(2), &content("Intro \\{#x}"), None), "## Intro \\{#x}");
+        assert_eq!(
+            heading_markdown(h(2), &content("Intro \\{#x}"), None),
+            "## Intro \\{#x}"
+        );
     }
 
     #[test]
@@ -303,7 +347,10 @@ mod tests {
         assert_eq!(content.as_slice(), &[Inline::Text("Intro".to_string())]);
         assert_eq!(marker.as_ref().map(SlotMarker::as_str), Some("intro"));
         let (content, marker) = read_heading_source("Intro \\{#x}").unwrap();
-        assert_eq!(content.as_slice(), &[Inline::Text("Intro {#x}".to_string())]);
+        assert_eq!(
+            content.as_slice(),
+            &[Inline::Text("Intro {#x}".to_string())]
+        );
         assert_eq!(marker, None);
         let (content, marker) = read_heading_source("{#only}").unwrap();
         assert!(content.is_empty());
@@ -316,7 +363,10 @@ mod tests {
     #[test]
     fn unreadable_heading_source_falls_back_to_literal_text_in_release() {
         let source = "x {#m}\ny";
-        assert!(read_heading_source(source).is_none(), "the source does not read");
+        assert!(
+            read_heading_source(source).is_none(),
+            "the source does not read"
+        );
         let (content, marker) = literal_heading_content(source);
         // Everything is kept as one text value, the marker text included; a
         // line break is a space in a heading's nodes (ADR-059 N5).
@@ -326,7 +376,11 @@ mod tests {
         let el = crate::ContentElement::heading_from_markdown(h(2), source);
         assert_eq!(
             el,
-            crate::ContentElement::Heading { level: h(2), content, marker: None }
+            crate::ContentElement::Heading {
+                level: h(2),
+                content,
+                marker: None
+            }
         );
     }
 
@@ -342,7 +396,11 @@ mod tests {
         for (source, expected) in vectors("plain") {
             let content = parse_inlines(&source, InlineContext::Heading)
                 .unwrap_or_else(|_| panic!("{source:?} reads as a heading"));
-            assert_eq!(content.plain_text(), expected.as_str().unwrap(), "plain text of {source:?}");
+            assert_eq!(
+                content.plain_text(),
+                expected.as_str().unwrap(),
+                "plain text of {source:?}"
+            );
         }
     }
 

@@ -26,12 +26,20 @@ enum Token {
 
 /// Characters that can start a symbol (but not a digit, not ':' which starts a keyword).
 fn is_symbol_start(c: char) -> bool {
-    c.is_alphabetic() || matches!(c, '_' | '-' | '.' | '>' | '<' | '=' | '+' | '*' | '/' | '!' | '?')
+    c.is_alphabetic()
+        || matches!(
+            c,
+            '_' | '-' | '.' | '>' | '<' | '=' | '+' | '*' | '/' | '!' | '?'
+        )
 }
 
 /// Characters that can continue a symbol.
 fn is_symbol_continue(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '>' | '<' | '=' | '+' | '*' | '/' | '!' | '?')
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '_' | '-' | '.' | '>' | '<' | '=' | '+' | '*' | '/' | '!' | '?'
+        )
 }
 
 fn tokenize(input: &str) -> Result<Vec<Token>, TemplateError> {
@@ -107,9 +115,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, TemplateError> {
                     }
                 }
                 if i == start {
-                    return Err(TemplateError::ParseError(
-                        "empty keyword after ':'".into(),
-                    ));
+                    return Err(TemplateError::ParseError("empty keyword after ':'".into()));
                 }
                 let raw: String = chars[start..i].iter().collect();
                 // Split on '/' to handle namespace
@@ -156,7 +162,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, TemplateError> {
                             other => {
                                 return Err(TemplateError::ParseError(format!(
                                     "unknown escape sequence '\\{other}'"
-                                )))
+                                )));
                             }
                         }
                         i += 1;
@@ -270,7 +276,11 @@ struct Parser {
 
 impl Parser {
     fn new(tokens: Vec<Token>, nil: NilChildren) -> Self {
-        Parser { tokens, pos: 0, nil }
+        Parser {
+            tokens,
+            pos: 0,
+            nil,
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -297,7 +307,7 @@ impl Parser {
             Some(Token::Nil) => match self.nil {
                 NilChildren::Skip => {
                     self.next(); // consume
-                    Ok(None)     // nil → skip
+                    Ok(None) // nil → skip
                 }
                 NilChildren::Refuse => Err(TemplateError::ParseError(
                     "nil is not a node here: it would be dropped".into(),
@@ -321,12 +331,12 @@ impl Parser {
                     Some(other) => {
                         return Err(TemplateError::ParseError(format!(
                             "expected keyword as first element of vector, got {other:?}"
-                        )))
+                        )));
                     }
                     None => {
                         return Err(TemplateError::ParseError(
                             "unexpected end of input after '['".into(),
-                        ))
+                        ));
                     }
                 };
 
@@ -347,7 +357,7 @@ impl Parser {
                         None => {
                             return Err(TemplateError::ParseError(
                                 "unexpected end of input inside element, expected ']'".into(),
-                            ))
+                            ));
                         }
                         Some(Token::RBracket) => {
                             self.next(); // consume ']'
@@ -397,7 +407,7 @@ impl Parser {
                 None => {
                     return Err(TemplateError::ParseError(
                         "unexpected end of input inside attribute map".into(),
-                    ))
+                    ));
                 }
                 Some(Token::RBrace) => {
                     self.next(); // consume '}'
@@ -460,7 +470,7 @@ impl Parser {
                 None => {
                     return Err(TemplateError::ParseError(
                         "unexpected end of input inside list, expected ')'".into(),
-                    ))
+                    ));
                 }
                 Some(Token::RParen) => {
                     self.next(); // consume ')'
@@ -480,7 +490,7 @@ impl Parser {
                 None => {
                     return Err(TemplateError::ParseError(
                         "unexpected end of input inside set, expected '}'".into(),
-                    ))
+                    ));
                 }
                 Some(Token::RBrace) => {
                     self.next(); // consume '}'
@@ -500,7 +510,7 @@ impl Parser {
                 None => {
                     return Err(TemplateError::ParseError(
                         "unexpected end of input inside vector form, expected ']'".into(),
-                    ))
+                    ));
                 }
                 Some(Token::RBracket) => {
                     self.next(); // consume ']'
@@ -520,7 +530,7 @@ impl Parser {
                 None => {
                     return Err(TemplateError::ParseError(
                         "unexpected end of input inside map form, expected '}'".into(),
-                    ))
+                    ));
                 }
                 Some(Token::RBrace) => {
                     self.next(); // consume '}'
@@ -549,10 +559,7 @@ pub fn parse_template_hiccup(src: &str) -> Result<Vec<Node>, TemplateError> {
 }
 
 /// [`parse_template_hiccup`] with an explicit policy for `nil` nodes.
-pub(crate) fn parse_hiccup_with(
-    src: &str,
-    nil: NilChildren,
-) -> Result<Vec<Node>, TemplateError> {
+pub(crate) fn parse_hiccup_with(src: &str, nil: NilChildren) -> Result<Vec<Node>, TemplateError> {
     let tokens = tokenize(src)?;
     let mut parser = Parser::new(tokens, nil);
     let mut nodes = Vec::new();
@@ -606,7 +613,9 @@ mod tests {
     }
 
     fn parse_err(src: &str) -> String {
-        parse_template_hiccup(src).expect_err("should fail").to_string()
+        parse_template_hiccup(src)
+            .expect_err("should fail")
+            .to_string()
     }
 
     #[test]
@@ -818,7 +827,10 @@ mod tests {
         if let Node::Element(el) = &nodes[0] {
             assert_eq!(
                 el.attr_form("as"),
-                Some(&Form::Keyword { namespace: None, name: "h3".to_string() }),
+                Some(&Form::Keyword {
+                    namespace: None,
+                    name: "h3".to_string()
+                }),
                 "expected Form::Keyword"
             );
         } else {
@@ -939,10 +951,7 @@ mod tests {
         // The threading macro -> is a valid symbol
         let nodes = parse("[:div {:fn ->}]");
         if let Node::Element(el) = &nodes[0] {
-            assert_eq!(
-                el.attr_form("fn"),
-                Some(&Form::Symbol("->".to_string()))
-            );
+            assert_eq!(el.attr_form("fn"), Some(&Form::Symbol("->".to_string())));
         } else {
             panic!("expected element");
         }
@@ -953,10 +962,7 @@ mod tests {
         // -foo should be parsed as a symbol, not an integer
         let nodes = parse("[:div {:fn -foo}]");
         if let Node::Element(el) = &nodes[0] {
-            assert_eq!(
-                el.attr_form("fn"),
-                Some(&Form::Symbol("-foo".to_string()))
-            );
+            assert_eq!(el.attr_form("fn"), Some(&Form::Symbol("-foo".to_string())));
         } else {
             panic!("expected element");
         }
@@ -968,7 +974,9 @@ mod tests {
 
     /// The `data` form of a child-position list: an insert with no children.
     fn insert_data(node: &Node) -> &Form {
-        let Node::Element(insert) = node else { panic!("expected an element") };
+        let Node::Element(insert) = node else {
+            panic!("expected an element")
+        };
         assert_eq!(insert.name, "presemble:insert");
         assert!(insert.children.is_empty());
         insert.attr_form("data").expect("data attr")
@@ -1020,7 +1028,9 @@ mod tests {
     fn parse_juxt_inside_element() {
         let nodes = parse("[:body (juxt header self/content footer)]");
         assert_eq!(nodes.len(), 1);
-        let Node::Element(body) = &nodes[0] else { panic!("expected body element") };
+        let Node::Element(body) = &nodes[0] else {
+            panic!("expected body element")
+        };
         assert_eq!(body.name, "body");
         assert_eq!(body.children.len(), 1);
         assert_eq!(
@@ -1032,9 +1042,14 @@ mod tests {
     #[test]
     fn any_list_in_child_position_is_an_insert_of_the_call() {
         let nodes = parse("[:p (text input.title) (card item)]");
-        let Node::Element(p) = &nodes[0] else { panic!("expected p") };
+        let Node::Element(p) = &nodes[0] else {
+            panic!("expected p")
+        };
         assert_eq!(p.children.len(), 2);
-        assert_eq!(insert_data(&p.children[0]).to_edn_string(), "(text input.title)");
+        assert_eq!(
+            insert_data(&p.children[0]).to_edn_string(),
+            "(text input.title)"
+        );
         assert_eq!(insert_data(&p.children[1]).to_edn_string(), "(card item)");
     }
 

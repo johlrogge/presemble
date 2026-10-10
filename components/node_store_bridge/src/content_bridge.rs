@@ -37,22 +37,24 @@ pub struct DocumentMeta {
 
 // The block codec and the node helpers live in `content_store`; they are
 // re-exported here so callers keep their `content_bridge::` paths.
-pub use content_store::{
-    BLOCK_KINDS, BlockDecodeError, PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS, block_from_node,
-    block_to_store, block_to_tree, children_by_name, find_attr_bool, find_attr_int,
-    find_attr_text, find_child_by_name, tree_to_block,
-};
-pub(crate) use content_store::{add_text_attr, content_element_to_store, link_target_from_node};
-use content_store::{
-    add_bool_attr, add_child_element, add_trivia, decode_trivia, element_name_of,
-};
 #[cfg(test)]
 use content::{Keyword, SortDirection};
+pub use content_store::{
+    BLOCK_KINDS, BlockDecodeError, PAYLOAD_BLOCK_KINDS, TEXT_BLOCK_KINDS, block_from_node,
+    block_to_store, block_to_tree, children_by_name, find_attr_bool, find_attr_int, find_attr_text,
+    find_child_by_name, tree_to_block,
+};
+use content_store::{add_bool_attr, add_child_element, add_trivia, decode_trivia, element_name_of};
+pub(crate) use content_store::{add_text_attr, content_element_to_store, link_target_from_node};
 
 // ── document_to_store ─────────────────────────────────────────────────────────
 
 /// Convert a [`Document`] into the node store, returning the root node ID.
-pub fn document_to_store(doc: &Document, store: &mut NodeStore, meta: Option<&DocumentMeta>) -> NodeId {
+pub fn document_to_store(
+    doc: &Document,
+    store: &mut NodeStore,
+    meta: Option<&DocumentMeta>,
+) -> NodeId {
     let doc_name = store.intern("document");
     let root = store.add_node(Node::Element(doc_name));
 
@@ -109,7 +111,13 @@ pub fn document_to_store(doc: &Document, store: &mut NodeStore, meta: Option<&Do
     // body
     let body_node = add_child_element(store, root, "body");
     let body_comments = in_container(&Container::Body);
-    add_blocks_with_trivia(store, body_node, &Container::Body, &doc.body, &body_comments);
+    add_blocks_with_trivia(
+        store,
+        body_node,
+        &Container::Body,
+        &doc.body,
+        &body_comments,
+    );
 
     root
 }
@@ -138,7 +146,9 @@ fn add_blocks_with_trivia(
         store.add_edge(container_node, Edge::Child(id));
         let before: Vec<&str> = comments
             .iter()
-            .filter(|c| matches!(&c.anchor, CommentAnchor::Before(k, i) if k == container && *i == at))
+            .filter(
+                |c| matches!(&c.anchor, CommentAnchor::Before(k, i) if k == container && *i == at),
+            )
             .map(|c| c.comment.node.as_str())
             .collect();
         add_trivia(store, id, ned::trivia::ATTR_TRIVIA_BEFORE, &before);
@@ -157,7 +167,11 @@ fn add_blocks_with_trivia(
 // ── semantic content ─────────────────────────────────────────────────────────
 
 /// Find a slot node by name within the preamble.
-pub(crate) fn find_slot_by_name(store: &NodeStore, preamble: NodeId, slot_name: &str) -> Option<NodeId> {
+pub(crate) fn find_slot_by_name(
+    store: &NodeStore,
+    preamble: NodeId,
+    slot_name: &str,
+) -> Option<NodeId> {
     for child_id in store.children(preamble) {
         if let Some(Node::Element(name)) = store.get(child_id)
             && store.resolve_name(*name) == "slot"
@@ -197,7 +211,11 @@ pub(crate) enum SlotElementTarget {
     /// A lone-link paragraph or a `PathRef` link expression: one page, by its
     /// normalised URL. `raw` is the destination as written (an href, or a
     /// PathRef value). `plain_link` is true for a lone-link paragraph.
-    Url { url: String, raw: String, plain_link: bool },
+    Url {
+        url: String,
+        raw: String,
+        plain_link: bool,
+    },
     /// A thread expression over the items of `source`.
     Thread { source: String, ops: Vec<LinkOp> },
 }
@@ -259,7 +277,9 @@ pub(crate) fn element_link_targets(
     ctx: Option<&crate::store_pipeline::ThreadContext>,
 ) -> Vec<NodeId> {
     match target {
-        SlotElementTarget::Url { url, plain_link, .. } => {
+        SlotElementTarget::Url {
+            url, plain_link, ..
+        } => {
             if *plain_link && *url == crate::store_pipeline::normalise_url(page_url) {
                 return Vec::new();
             }
@@ -339,7 +359,10 @@ pub fn new_semantic_node(store: &mut NodeStore, meta: &DocumentMeta) -> NodeId {
 /// its metadata attributes stay, so whatever points at it keeps pointing at it.
 pub fn clear_semantic_content(store: &mut NodeStore, sem: NodeId) {
     store.remove_edges_where(sem, |e| {
-        matches!(e, Edge::Derived { .. } | Edge::Reference { .. } | Edge::ConsistsOf { .. })
+        matches!(
+            e,
+            Edge::Derived { .. } | Edge::Reference { .. } | Edge::ConsistsOf { .. }
+        )
     });
 }
 
@@ -363,7 +386,13 @@ pub fn fill_semantic_content(
     // underscore keeps the name out of slot names, and graph views read only
     // ConsistsOf, Reference and Attribute edges, so no template path reaches it.
     let document_edge = store.intern(template::constants::KEY_DOCUMENT_EDGE);
-    store.add_edge(sem, Edge::Derived { name: document_edge, target: doc_root });
+    store.add_edge(
+        sem,
+        Edge::Derived {
+            name: document_edge,
+            target: doc_root,
+        },
+    );
 
     // Find preamble node
     let preamble = find_child_by_name(store, doc_root, "preamble");
@@ -385,68 +414,98 @@ pub fn fill_semantic_content(
             add_text_attr(store, suggestion, "hint", &format!("Add {slot_name}"));
             add_text_attr(store, suggestion, "slot-name", &slot_name);
             let co_name = store.intern(&slot_name);
-            store.add_edge(sem, Edge::ConsistsOf { name: co_name, part: suggestion });
+            store.add_edge(
+                sem,
+                Edge::ConsistsOf {
+                    name: co_name,
+                    part: suggestion,
+                },
+            );
             continue;
         }
 
         if let Some(preamble_id) = preamble
             && let Some(slot_id) = find_slot_by_name(store, preamble_id, &slot_name)
         {
-                let children = store.children(slot_id);
+            let children = store.children(slot_id);
 
-                // Check if any child is a link-expression or resolved link
-                let mut link_targets: Vec<NodeId> = Vec::new();
-                let mut has_link_exprs = false;
-                for &child in &children {
-                    if is_link_expression(store, child)
-                        || sole_link_paragraph_href(store, child).is_some()
-                    {
-                        has_link_exprs = true;
-                        // Link blocks skip self-references; thread expressions
-                        // take every item here and are evaluated later
-                        // (`store_pipeline::resolve_page_link_expressions`).
-                        if let Some(target) = slot_element_target(store, child) {
-                            link_targets.extend(element_link_targets(
-                                store,
-                                &target,
-                                &meta.url,
-                                stem_to_roots,
-                                url_to_root,
-                                url_to_semantic,
-                                None,
-                            ));
-                        }
+            // Check if any child is a link-expression or resolved link
+            let mut link_targets: Vec<NodeId> = Vec::new();
+            let mut has_link_exprs = false;
+            for &child in &children {
+                if is_link_expression(store, child)
+                    || sole_link_paragraph_href(store, child).is_some()
+                {
+                    has_link_exprs = true;
+                    // Link blocks skip self-references; thread expressions
+                    // take every item here and are evaluated later
+                    // (`store_pipeline::resolve_page_link_expressions`).
+                    if let Some(target) = slot_element_target(store, child) {
+                        link_targets.extend(element_link_targets(
+                            store,
+                            &target,
+                            &meta.url,
+                            stem_to_roots,
+                            url_to_root,
+                            url_to_semantic,
+                            None,
+                        ));
                     }
                 }
+            }
 
-                if has_link_exprs {
+            if has_link_exprs {
+                let ref_name = store.intern(&slot_name);
+                if max == 1 {
+                    // Single-value link slot → Reference to first target
+                    if let Some(&target) = link_targets.first() {
+                        store.add_edge(
+                            sem,
+                            Edge::Reference {
+                                name: ref_name,
+                                target,
+                            },
+                        );
+                    }
+                } else if !link_targets.is_empty() {
+                    // Multi-value link slot → Collection of Reference targets
+                    let collection = store.add_node(Node::Collection);
+                    for target in &link_targets {
+                        store.add_edge(collection, Edge::Child(*target));
+                    }
+                    store.add_edge(
+                        sem,
+                        Edge::ConsistsOf {
+                            name: ref_name,
+                            part: collection,
+                        },
+                    );
+                }
+            } else if max == 1 {
+                if let Some(&first) = children.first() {
                     let ref_name = store.intern(&slot_name);
-                    if max == 1 {
-                        // Single-value link slot → Reference to first target
-                        if let Some(&target) = link_targets.first() {
-                            store.add_edge(sem, Edge::Reference { name: ref_name, target });
-                        }
-                    } else if !link_targets.is_empty() {
-                        // Multi-value link slot → Collection of Reference targets
-                        let collection = store.add_node(Node::Collection);
-                        for target in &link_targets {
-                            store.add_edge(collection, Edge::Child(*target));
-                        }
-                        store.add_edge(sem, Edge::ConsistsOf { name: ref_name, part: collection });
-                    }
-                } else if max == 1 {
-                    if let Some(&first) = children.first() {
-                        let ref_name = store.intern(&slot_name);
-                        store.add_edge(sem, Edge::ConsistsOf { name: ref_name, part: first });
-                    }
-                } else if !children.is_empty() {
-                    let list_name = store.intern(&slot_name);
-                    let list_node = store.add_node(Node::Collection);
-                    for &child in &children {
-                        store.add_edge(list_node, Edge::Child(child));
-                    }
-                    store.add_edge(sem, Edge::ConsistsOf { name: list_name, part: list_node });
+                    store.add_edge(
+                        sem,
+                        Edge::ConsistsOf {
+                            name: ref_name,
+                            part: first,
+                        },
+                    );
                 }
+            } else if !children.is_empty() {
+                let list_name = store.intern(&slot_name);
+                let list_node = store.add_node(Node::Collection);
+                for &child in &children {
+                    store.add_edge(list_node, Edge::Child(child));
+                }
+                store.add_edge(
+                    sem,
+                    Edge::ConsistsOf {
+                        name: list_name,
+                        part: list_node,
+                    },
+                );
+            }
         }
     }
 
@@ -455,14 +514,23 @@ pub fn fill_semantic_content(
         && let Some(body_id) = find_child_by_name(store, doc_root, "body")
     {
         let body_name = store.intern("body");
-        store.add_edge(sem, Edge::ConsistsOf { name: body_name, part: body_id });
+        store.add_edge(
+            sem,
+            Edge::ConsistsOf {
+                name: body_name,
+                part: body_id,
+            },
+        );
     }
 
     // Synthesize a link reference (url + title text)
     // Collect title text first before any mutable borrows
     let title_text = {
         let parts = store.consists_of(sem);
-        let title_entry = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title").copied();
+        let title_entry = parts
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "title")
+            .copied();
         title_entry.and_then(|(_, title_node)| {
             // A heading's link text is its plain text (ADR-059 §8); any other
             // content element gives its first child text.
@@ -490,7 +558,13 @@ pub fn fill_semantic_content(
     add_text_attr(store, link_node, "href", &href);
     add_text_attr(store, link_node, "text", &text);
     let link_name = store.intern("link");
-    store.add_edge(sem, Edge::ConsistsOf { name: link_name, part: link_node });
+    store.add_edge(
+        sem,
+        Edge::ConsistsOf {
+            name: link_name,
+            part: link_node,
+        },
+    );
 }
 
 // ── store_to_document ─────────────────────────────────────────────────────────
@@ -500,7 +574,10 @@ fn zero_span() -> Span {
 }
 
 fn spanned<T>(node: T) -> Spanned<T> {
-    Spanned { node, span: zero_span() }
+    Spanned {
+        node,
+        span: zero_span(),
+    }
 }
 
 /// Why a document subtree could not be reconstructed into a [`Document`].
@@ -549,7 +626,9 @@ fn decode_blocks(
         .map(|(at, id)| {
             let error = |error| DocumentDecodeError { block: id, error };
             let block = block_from_node(store, id).map_err(error)?;
-            for comment in decode_trivia(store, id, ned::trivia::ATTR_TRIVIA_BEFORE).map_err(error)? {
+            for comment in
+                decode_trivia(store, id, ned::trivia::ATTR_TRIVIA_BEFORE).map_err(error)?
+            {
                 comments.push_back(AnchoredComment {
                     anchor: CommentAnchor::Before(container.clone(), at),
                     comment: spanned(comment),
@@ -558,8 +637,13 @@ fn decode_blocks(
             Ok(spanned(block))
         })
         .collect::<Result<_, DocumentDecodeError>>()?;
-    let end = decode_trivia(store, container_node, ned::trivia::ATTR_TRIVIA_END)
-        .map_err(|error| DocumentDecodeError { block: container_node, error })?;
+    let end =
+        decode_trivia(store, container_node, ned::trivia::ATTR_TRIVIA_END).map_err(|error| {
+            DocumentDecodeError {
+                block: container_node,
+                error,
+            }
+        })?;
     for comment in end {
         comments.push_back(AnchoredComment {
             anchor: CommentAnchor::End(container.clone()),
@@ -587,7 +671,8 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, Do
         Some(preamble_node) => children_by_name(store, preamble_node, "slot")
             .into_iter()
             .map(|slot_id| {
-                let name = SlotName::new(find_attr_text(store, slot_id, "name").unwrap_or_default());
+                let name =
+                    SlotName::new(find_attr_text(store, slot_id, "name").unwrap_or_default());
                 let elements =
                     decode_blocks(store, slot_id, Container::Slot(name.clone()), &mut comments)?;
                 Ok(DocumentSlot { name, elements })
@@ -633,7 +718,10 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, Do
 /// Fixed-point under parse ∘ serialise — first save after edits may show a
 /// normalisation diff (whitespace/blank lines/comments), subsequent saves are
 /// stable.
-pub fn serialize_from_store(store: &NodeStore, root: NodeId) -> Result<String, DocumentDecodeError> {
+pub fn serialize_from_store(
+    store: &NodeStore,
+    root: NodeId,
+) -> Result<String, DocumentDecodeError> {
     store_to_document(store, root).map(|doc| content::serialize_document(&doc))
 }
 
@@ -696,12 +784,17 @@ pub fn owning_block(store: &NodeStore, id: NodeId) -> Option<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use content::{ContentElement, Document, DocumentSlot, LinkOp, LinkTarget, LinkText, RefsToTarget};
+    use content::{
+        ContentElement, Document, DocumentSlot, LinkOp, LinkTarget, LinkText, RefsToTarget,
+    };
     use node_store::NodeStore;
     use schema::{HeadingLevel, SlotName, Span, Spanned};
 
     fn zero_spanned(node: ContentElement) -> Spanned<ContentElement> {
-        Spanned { node, span: Span { start: 0, end: 0 } }
+        Spanned {
+            node,
+            span: Span { start: 0, end: 0 },
+        }
     }
 
     fn slot(name: &str, elements: Vec<ContentElement>) -> DocumentSlot {
@@ -728,10 +821,7 @@ mod tests {
             "{context}: element count mismatch"
         );
         for (i, (a, b)) in original.iter().zip(recovered.iter()).enumerate() {
-            assert_eq!(
-                a.node, b.node,
-                "{context}: element {i} mismatch"
-            );
+            assert_eq!(a.node, b.node, "{context}: element {i} mismatch");
         }
     }
 
@@ -745,13 +835,13 @@ mod tests {
             recovered.preamble.len(),
             "preamble slot count mismatch"
         );
-        for (i, (orig_slot, rec_slot)) in
-            original.preamble.iter().zip(recovered.preamble.iter()).enumerate()
+        for (i, (orig_slot, rec_slot)) in original
+            .preamble
+            .iter()
+            .zip(recovered.preamble.iter())
+            .enumerate()
         {
-            assert_eq!(
-                orig_slot.name, rec_slot.name,
-                "slot {i} name mismatch"
-            );
+            assert_eq!(orig_slot.name, rec_slot.name, "slot {i} name mismatch");
             compare_elements(
                 &orig_slot.elements,
                 &rec_slot.elements,
@@ -774,7 +864,9 @@ mod tests {
                     "Hello World",
                 )]
             )],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Some body text."))],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "Some body text."
+            ))],
             has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -804,7 +896,9 @@ mod tests {
                 language: None,
                 code: "plain code".to_string(),
             },
-            ContentElement::HtmlBlock { source: "<b>bold</b>".to_string() },
+            ContentElement::HtmlBlock {
+                source: "<b>bold</b>".to_string(),
+            },
             quote_of("A quote"),
             list_of("- item one\n- item two"),
             list_of("3. one\n\n   two\n4. three\n   - four"),
@@ -859,7 +953,9 @@ mod tests {
         let summary = store
             .children(preamble)
             .into_iter()
-            .find(|s| content_store::find_attr_text(&store, *s, "name").as_deref() == Some("summary"))
+            .find(|s| {
+                content_store::find_attr_text(&store, *s, "name").as_deref() == Some("summary")
+            })
             .expect("summary slot");
         let paragraph = store.children(summary)[0];
         let text = store.children(paragraph)[0];
@@ -869,9 +965,17 @@ mod tests {
         assert!(saved.contains("text \\{#summary}"), "saved:\n{saved}");
         let reloaded = content::parse_and_assign(&saved, &grammar).expect("parses");
         assert!(reloaded.unassigned.is_empty(), "saved:\n{saved}");
-        let summary = reloaded.preamble.iter().find(|s| s.name.as_str() == "summary").unwrap();
+        let summary = reloaded
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == "summary")
+            .unwrap();
         assert_eq!(
-            summary.elements.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            summary
+                .elements
+                .iter()
+                .map(|e| e.node.clone())
+                .collect::<Vec<_>>(),
             vec![ContentElement::paragraph_from_markdown("text \\{#summary}")],
             "saved:\n{saved}"
         );
@@ -890,13 +994,22 @@ mod tests {
         let body = find_child_by_name(&store, root, "body").unwrap();
         let blocks = store.children(body);
         assert_eq!(blocks.len(), 2);
-        assert_eq!(comment_texts(&store, blocks[0], ned::trivia::ATTR_TRIVIA_BEFORE), vec!["<!-- b0 -->"]);
-        assert_eq!(comment_texts(&store, body, ned::trivia::ATTR_TRIVIA_END), vec!["<!-- end -->"]);
+        assert_eq!(
+            comment_texts(&store, blocks[0], ned::trivia::ATTR_TRIVIA_BEFORE),
+            vec!["<!-- b0 -->"]
+        );
+        assert_eq!(
+            comment_texts(&store, body, ned::trivia::ATTR_TRIVIA_END),
+            vec!["<!-- end -->"]
+        );
         // `End(Unassigned)` alone creates the unassigned frame.
         let preamble = find_child_by_name(&store, root, "preamble").unwrap();
         let unassigned = find_child_by_name(&store, preamble, "unassigned").expect("frame");
         assert!(store.children(unassigned).is_empty());
-        assert_eq!(comment_texts(&store, unassigned, ned::trivia::ATTR_TRIVIA_END), vec!["<!-- u -->"]);
+        assert_eq!(
+            comment_texts(&store, unassigned, ned::trivia::ATTR_TRIVIA_END),
+            vec!["<!-- u -->"]
+        );
 
         // Decode and save: byte for byte.
         assert_eq!(serialize_from_store(&store, root).unwrap(), src);
@@ -935,10 +1048,14 @@ mod tests {
         .into_iter()
         .collect();
         execute(&mut store, plan).expect("applies");
-        let plan: Plan =
-            [set(body, CommentPlace::End, &["<!-- the end -->"], "ned/set-end-comments")]
-                .into_iter()
-                .collect();
+        let plan: Plan = [set(
+            body,
+            CommentPlace::End,
+            &["<!-- the end -->"],
+            "ned/set-end-comments",
+        )]
+        .into_iter()
+        .collect();
         execute(&mut store, plan).expect("applies");
 
         let saved = serialize_from_store(&store, root).expect("serialises");
@@ -978,7 +1095,10 @@ mod tests {
         store.remove_node(blocks[1]);
 
         let saved = serialize_from_store(&store, root).unwrap();
-        assert_eq!(saved, "# Title\n\nSummary.\n\n----\n\n- a\n\n<!-- -->\n\n- b\n");
+        assert_eq!(
+            saved,
+            "# Title\n\nSummary.\n\n----\n\n- a\n\n<!-- -->\n\n- b\n"
+        );
     }
 
     /// Guard: the separator is read and dropped, so it is never in the store.
@@ -1007,7 +1127,10 @@ mod tests {
         assert_eq!(serialize_from_store(&store, root).unwrap(), src);
         let back = store_to_document(&store, root).unwrap();
         assert_eq!(back.body.len(), 2);
-        assert!(back.comments.is_empty(), "the quote's comments are not the document's");
+        assert!(
+            back.comments.is_empty(),
+            "the quote's comments are not the document's"
+        );
         assert_eq!(content::serialize_document(&back), src);
     }
 
@@ -1024,8 +1147,9 @@ mod tests {
         let quote = store.children(body)[0];
         let second = store.children(quote)[1];
 
-        let replace = NedMutation::Replace(vec![ned::NodeTree::element("paragraph")
-            .with_child(ned::NodeTree::text("X"))]);
+        let replace = NedMutation::Replace(vec![
+            ned::NodeTree::element("paragraph").with_child(ned::NodeTree::text("X")),
+        ]);
         let target = resolve(&store, &ned::Selection::single(second), TargetKind::Block).unwrap();
         let edit = prepare(&store, &target, &replace).unwrap();
         commit(&mut store, vec![edit]);
@@ -1045,7 +1169,10 @@ mod tests {
         let block = store.children(body)[0];
         let text = ned::trivia::trivia_texts(&store, block, ned::trivia::ATTR_TRIVIA_BEFORE)[0];
         store.replace_node(text, Node::Text("<b>not a comment</b>".to_string()));
-        assert!(matches!(block_from_node(&store, block), Err(BlockDecodeError::InvalidComment(_))));
+        assert!(matches!(
+            block_from_node(&store, block),
+            Err(BlockDecodeError::InvalidComment(_))
+        ));
         let err = store_to_document(&store, root).unwrap_err();
         assert_eq!(err.block, block);
         assert!(matches!(err.error, BlockDecodeError::InvalidComment(_)));
@@ -1106,9 +1233,14 @@ mod tests {
             ContentElement::lone_image("", "/j.jpg"),
             ContentElement::lone_link("x", "/x"),
             ContentElement::Separator,
-            ContentElement::CodeBlock { language: Some("rust".to_string()), code: "fn f() {}".to_string() },
+            ContentElement::CodeBlock {
+                language: Some("rust".to_string()),
+                code: "fn f() {}".to_string(),
+            },
             table_of(&["a"], &[&["1"]]),
-            ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
+            ContentElement::HtmlBlock {
+                source: "<b>x</b>".to_string(),
+            },
             quote_of("q"),
             list_of("- a"),
             ContentElement::LinkExpression {
@@ -1123,7 +1255,10 @@ mod tests {
         let doc = Document {
             preamble: im::vector![slot(
                 "title",
-                vec![ContentElement::heading_from_markdown(HeadingLevel::new(1).unwrap(), "T")]
+                vec![ContentElement::heading_from_markdown(
+                    HeadingLevel::new(1).unwrap(),
+                    "T"
+                )]
             )],
             unassigned: unassigned.into_iter().map(zero_spanned).collect(),
             body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("b"))],
@@ -1145,7 +1280,10 @@ mod tests {
         compare_documents(&doc, &recovered);
         // Serialization from the store keeps them, before the separator.
         let md = serialize_from_store(&store, root).unwrap();
-        assert!(md.find("## Aside").unwrap() < md.find("\n----\n").unwrap(), "{md}");
+        assert!(
+            md.find("## Aside").unwrap() < md.find("\n----\n").unwrap(),
+            "{md}"
+        );
     }
 
     #[test]
@@ -1159,7 +1297,12 @@ mod tests {
         let root = document_to_store(&doc, &mut store, None);
         let preamble = find_child_by_name(&store, root, "preamble").unwrap();
         assert!(find_child_by_name(&store, preamble, "unassigned").is_none());
-        assert!(store_to_document(&store, root).unwrap().unassigned.is_empty());
+        assert!(
+            store_to_document(&store, root)
+                .unwrap()
+                .unassigned
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1339,7 +1482,9 @@ mod tests {
                 "intro",
                 vec![ContentElement::paragraph_from_markdown("Intro text")]
             )],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Body text"))],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "Body text"
+            ))],
             has_separator: true,
             separator_span: Some(Span { start: 10, end: 14 }),
             unassigned: im::Vector::new(),
@@ -1357,7 +1502,9 @@ mod tests {
     fn round_trip_has_separator_false() {
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("No separator"))],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "No separator"
+            ))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1373,7 +1520,9 @@ mod tests {
     fn document_meta_attributes() {
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Hello"))],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "Hello"
+            ))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1388,10 +1537,22 @@ mod tests {
         };
         let root = document_to_store(&doc, &mut store, Some(&meta));
 
-        assert_eq!(find_attr_text(&store, root, "url"), Some("/post/hello".to_string()));
-        assert_eq!(find_attr_text(&store, root, "stem"), Some("post".to_string()));
-        assert_eq!(find_attr_text(&store, root, "file"), Some("content/post/hello.md".to_string()));
-        assert_eq!(find_attr_text(&store, root, "page-kind"), Some("item".to_string()));
+        assert_eq!(
+            find_attr_text(&store, root, "url"),
+            Some("/post/hello".to_string())
+        );
+        assert_eq!(
+            find_attr_text(&store, root, "stem"),
+            Some("post".to_string())
+        );
+        assert_eq!(
+            find_attr_text(&store, root, "file"),
+            Some("content/post/hello.md".to_string())
+        );
+        assert_eq!(
+            find_attr_text(&store, root, "page-kind"),
+            Some("item".to_string())
+        );
 
         // Round-trip still works (meta attrs are ignored during reconstruction)
         let recovered = store_to_document(&store, root).unwrap();
@@ -1403,7 +1564,9 @@ mod tests {
         // Pinned so save routing in Phase B can rely on :file surviving any subtree mutation.
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Original body"))],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "Original body"
+            ))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1446,7 +1609,10 @@ mod tests {
     // ── semantic content tests ───────────────────────────────────────────────
 
     fn make_grammar_with_title_summary() -> schema::Grammar {
-        use schema::{BodyRules, Constraint, CountRange, Element, HeadingLevel, HeadingLevelRange, Slot, SlotName};
+        use schema::{
+            BodyRules, Constraint, CountRange, Element, HeadingLevel, HeadingLevelRange, Slot,
+            SlotName,
+        };
         schema::Grammar {
             preamble: vec![
                 Slot {
@@ -1469,7 +1635,9 @@ mod tests {
                     span: schema::Span { start: 0, end: 0 },
                 },
             ],
-            body: Some(BodyRules { heading_range: None }),
+            body: Some(BodyRules {
+                heading_range: None,
+            }),
         }
     }
 
@@ -1488,7 +1656,9 @@ mod tests {
                     vec![ContentElement::paragraph_from_markdown("A short summary.")]
                 ),
             ],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Body text goes here."))],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "Body text goes here."
+            ))],
             has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -1510,7 +1680,15 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        let sem = create_semantic_content(
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
+        );
 
         // semantic-content element exists
         assert!(
@@ -1519,10 +1697,22 @@ mod tests {
         );
 
         // metadata attributes are present
-        assert_eq!(find_attr_text(&store, sem, "url"), Some("/post/my-article".to_string()));
-        assert_eq!(find_attr_text(&store, sem, "stem"), Some("post".to_string()));
-        assert_eq!(find_attr_text(&store, sem, "file"), Some("content/post/my-article.md".to_string()));
-        assert_eq!(find_attr_text(&store, sem, "page-kind"), Some("item".to_string()));
+        assert_eq!(
+            find_attr_text(&store, sem, "url"),
+            Some("/post/my-article".to_string())
+        );
+        assert_eq!(
+            find_attr_text(&store, sem, "stem"),
+            Some("post".to_string())
+        );
+        assert_eq!(
+            find_attr_text(&store, sem, "file"),
+            Some("content/post/my-article.md".to_string())
+        );
+        assert_eq!(
+            find_attr_text(&store, sem, "page-kind"),
+            Some("item".to_string())
+        );
     }
 
     #[test]
@@ -1539,11 +1729,21 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        let sem = create_semantic_content(
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
+        );
 
         // Find ConsistsOf("title") on semantic content
         let parts = store.consists_of(sem);
-        let title_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title");
+        let title_part = parts
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "title");
         assert!(title_part.is_some(), "Expected a 'title' consists-of edge");
 
         let (_, heading_id) = title_part.unwrap();
@@ -1555,7 +1755,11 @@ mod tests {
 
         // The heading's child text should be "My Article"
         let text = store.children(*heading_id).iter().find_map(|&c| {
-            if let Some(Node::Text(s)) = store.get(c) { Some(s.clone()) } else { None }
+            if let Some(Node::Text(s)) = store.get(c) {
+                Some(s.clone())
+            } else {
+                None
+            }
         });
         assert_eq!(text, Some("My Article".to_string()));
     }
@@ -1574,11 +1778,24 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        let sem = create_semantic_content(
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
+        );
 
         let parts = store.consists_of(sem);
-        let summary_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "summary");
-        assert!(summary_part.is_some(), "Expected a 'summary' consists-of edge");
+        let summary_part = parts
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "summary");
+        assert!(
+            summary_part.is_some(),
+            "Expected a 'summary' consists-of edge"
+        );
 
         let (_, para_id) = summary_part.unwrap();
         assert!(
@@ -1587,7 +1804,11 @@ mod tests {
         );
 
         let text = store.children(*para_id).iter().find_map(|&c| {
-            if let Some(Node::Text(s)) = store.get(c) { Some(s.clone()) } else { None }
+            if let Some(Node::Text(s)) = store.get(c) {
+                Some(s.clone())
+            } else {
+                None
+            }
         });
         assert_eq!(text, Some("A short summary.".to_string()));
     }
@@ -1615,8 +1836,9 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let no_stems = std::collections::HashMap::new();
         let no_urls = std::collections::HashMap::new();
-        let sem =
-            create_semantic_content(&mut store, doc_root, &grammar, &meta, &no_stems, &no_urls, None);
+        let sem = create_semantic_content(
+            &mut store, doc_root, &grammar, &meta, &no_stems, &no_urls, None,
+        );
 
         let view = crate::graph_view_impl::NodeStoreView::new(&store, sem);
         let text = |path: &[&str]| match view.resolve(path).map(|r| r.as_value().clone()) {
@@ -1642,7 +1864,15 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        let sem = create_semantic_content(
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
+        );
 
         let parts = store.consists_of(sem);
         let body_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "body");
@@ -1669,16 +1899,30 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        let sem = create_semantic_content(
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
+        );
 
         let parts = store.consists_of(sem);
         let link_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "link");
         assert!(link_part.is_some(), "Expected a 'link' consists-of edge");
 
         let (_, link_id) = link_part.unwrap();
-        assert_eq!(find_attr_text(&store, *link_id, "href"), Some("/post/my-article".to_string()));
+        assert_eq!(
+            find_attr_text(&store, *link_id, "href"),
+            Some("/post/my-article".to_string())
+        );
         // title text is "My Article"
-        assert_eq!(find_attr_text(&store, *link_id, "text"), Some("My Article".to_string()));
+        assert_eq!(
+            find_attr_text(&store, *link_id, "text"),
+            Some("My Article".to_string())
+        );
     }
 
     /// The synthesized link's text is the title heading's plain text, not its
@@ -1701,10 +1945,24 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        let sem = create_semantic_content(
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
+        );
         let parts = store.consists_of(sem);
-        let (_, link_id) = parts.iter().find(|(n, _)| store.resolve_name(*n) == "link").unwrap();
-        assert_eq!(find_attr_text(&store, *link_id, "text"), Some("My <Article>".to_string()));
+        let (_, link_id) = parts
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "link")
+            .unwrap();
+        assert_eq!(
+            find_attr_text(&store, *link_id, "text"),
+            Some("My <Article>".to_string())
+        );
     }
 
     #[test]
@@ -1723,7 +1981,15 @@ mod tests {
         let doc_root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        let sem = create_semantic_content(&mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        let sem = create_semantic_content(
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
+        );
 
         // Find the heading in the document tree (preamble → slot("title") → heading)
         let preamble = find_child_by_name(&store, doc_root, "preamble").unwrap();
@@ -1733,11 +1999,17 @@ mod tests {
 
         // Find the heading via semantic content consists-of edge
         let parts = store.consists_of(sem);
-        let (_, sem_heading) = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title").unwrap();
+        let (_, sem_heading) = parts
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "title")
+            .unwrap();
         let sem_text_node = store.children(*sem_heading).into_iter().next().unwrap();
 
         // They should be the SAME node (no copy, just reference)
-        assert_eq!(doc_text_node, sem_text_node, "Expected title text to be the same NodeId in both doc and semantic-content");
+        assert_eq!(
+            doc_text_node, sem_text_node,
+            "Expected title text to be the same NodeId in both doc and semantic-content"
+        );
     }
 
     // ── store_to_document decode errors ──────────────────────────────────────
@@ -1801,7 +2073,10 @@ mod tests {
         store.replace_node(level_value, Node::Text("big".to_string()));
         let err = store_to_document(&store, root).unwrap_err();
         assert_eq!(err.block, heading);
-        assert!(matches!(err.error, BlockDecodeError::InvalidHeadingLevel(_)));
+        assert!(matches!(
+            err.error,
+            BlockDecodeError::InvalidHeadingLevel(_)
+        ));
     }
 
     #[test]
@@ -1909,7 +2184,9 @@ mod tests {
                     hint_text: None,
                     span: schema::Span { start: 0, end: 0 },
                 }],
-                body: Some(BodyRules { heading_range: None }),
+                body: Some(BodyRules {
+                    heading_range: None,
+                }),
             }
         };
         let meta = DocumentMeta {
@@ -1922,7 +2199,15 @@ mod tests {
         let root = document_to_store(&doc, &mut store, Some(&meta));
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
-        create_semantic_content(&mut store, root, &grammar, &meta, &empty_stems, &empty_urls, None);
+        create_semantic_content(
+            &mut store,
+            root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
+        );
 
         let preamble = find_child_by_name(&store, root, "preamble").unwrap();
         let slot_id = store.children(preamble)[0];
@@ -1948,24 +2233,38 @@ mod tests {
 
     /// A quote of one paragraph, as markdown `text` reads.
     fn quote_of(text: &str) -> ContentElement {
-        content::parse_document(&format!("> {text}\n")).unwrap().elements[0].node.clone()
+        content::parse_document(&format!("> {text}\n"))
+            .unwrap()
+            .elements[0]
+            .node
+            .clone()
     }
 
     /// The list `md` reads as.
     fn list_of(md: &str) -> ContentElement {
-        let el = content::parse_document(md).unwrap().elements[0].node.clone();
-        assert!(matches!(el, ContentElement::List { .. }), "{md:?} is not a list: {el:?}");
+        let el = content::parse_document(md).unwrap().elements[0]
+            .node
+            .clone();
+        assert!(
+            matches!(el, ContentElement::List { .. }),
+            "{md:?} is not a list: {el:?}"
+        );
         el
     }
 
     fn table_of(headers: &[&str], rows: &[&[&str]]) -> ContentElement {
         if headers.is_empty() {
-            return ContentElement::Table { columns: vec![], rows: vec![] };
+            return ContentElement::Table {
+                columns: vec![],
+                rows: vec![],
+            };
         }
         let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
         let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
         md.extend(rows.iter().map(|r| line(r)));
-        content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone()
+        content::parse_document(&md.join("\n")).unwrap().elements[0]
+            .node
+            .clone()
     }
 
     #[test]
@@ -1983,7 +2282,10 @@ mod tests {
                 .with_attr("src", "/img/a.jpg")
                 .with_child(ned::NodeTree::text("A")),
         );
-        assert_eq!(tree_to_block(&tree), Ok(ContentElement::lone_image("A", "/img/a.jpg")));
+        assert_eq!(
+            tree_to_block(&tree),
+            Ok(ContentElement::lone_image("A", "/img/a.jpg"))
+        );
     }
 
     #[test]
@@ -2012,10 +2314,7 @@ mod tests {
         let tree = ned::NodeTree::element("table")
             .with_child(ned::NodeTree::element("head"))
             .with_child(ned::NodeTree::element("rows"));
-        assert_eq!(
-            tree_to_block(&tree),
-            Ok(table_of(&[], &[]))
-        );
+        assert_eq!(tree_to_block(&tree), Ok(table_of(&[], &[])));
     }
 
     #[test]
@@ -2058,9 +2357,15 @@ mod tests {
         let tree = ned::NodeTree::element("blockquote")
             .with_child(ned::NodeTree::text("a"))
             .with_child(ned::NodeTree::text("b"));
-        assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::UnexpectedChild { .. })));
+        assert!(matches!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::UnexpectedChild { .. })
+        ));
         let tree = ned::NodeTree::element("blockquote").with_child(ned::NodeTree::element("span"));
-        assert_eq!(tree_to_block(&tree), Err(BlockDecodeError::NotPayloadKind("span".to_string())));
+        assert_eq!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotPayloadKind("span".to_string()))
+        );
     }
 
     /// A paragraph's children are inline nodes: two adjacent texts are not in
@@ -2070,11 +2375,16 @@ mod tests {
         let tree = ned::NodeTree::element("paragraph")
             .with_child(ned::NodeTree::text("a"))
             .with_child(ned::NodeTree::text("b"));
-        assert!(matches!(tree_to_block(&tree), Err(BlockDecodeError::NotNormalForm { .. })));
+        assert!(matches!(
+            tree_to_block(&tree),
+            Err(BlockDecodeError::NotNormalForm { .. })
+        ));
         let tree = ned::NodeTree::element("paragraph").with_child(ned::NodeTree::element("span"));
         assert_eq!(
             tree_to_block(&tree),
-            Err(BlockDecodeError::UnknownInline { kind: "span".to_string() })
+            Err(BlockDecodeError::UnknownInline {
+                kind: "span".to_string()
+            })
         );
     }
 
@@ -2086,9 +2396,14 @@ mod tests {
             ContentElement::lone_image("", "/i.jpg"),
             ContentElement::lone_link("L", "/l"),
             ContentElement::Separator,
-            ContentElement::CodeBlock { language: Some("rust".to_string()), code: "x()".to_string() },
+            ContentElement::CodeBlock {
+                language: Some("rust".to_string()),
+                code: "x()".to_string(),
+            },
             table_of(&["A"], &[&["1"]]),
-            ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
+            ContentElement::HtmlBlock {
+                source: "<b>x</b>".to_string(),
+            },
             quote_of("Q"),
             list_of("- a"),
             list_of("3. a\n\n   b\n4. c\n   > q"),
@@ -2124,7 +2439,8 @@ mod tests {
     /// A column's alignment is stored on its head cell.
     #[test]
     fn table_alignment_survives_the_store() {
-        let flat = content::parse_document("| a | b | c |\n|:--|--:|---|\n| 1 | 2 | 3 |\n").unwrap();
+        let flat =
+            content::parse_document("| a | b | c |\n|:--|--:|---|\n| 1 | 2 | 3 |\n").unwrap();
         let el = flat.elements[0].node.clone();
         let mut store = NodeStore::new();
         let id = block_to_store(&el, &mut store);
@@ -2137,9 +2453,14 @@ mod tests {
             h(1, "x"),
             ContentElement::paragraph_from_markdown("x"),
             ContentElement::Separator,
-            ContentElement::CodeBlock { language: None, code: "c".to_string() },
+            ContentElement::CodeBlock {
+                language: None,
+                code: "c".to_string(),
+            },
             table_of(&[], &[]),
-            ContentElement::HtmlBlock { source: "h".to_string() },
+            ContentElement::HtmlBlock {
+                source: "h".to_string(),
+            },
             quote_of("q"),
             list_of("- a"),
             ContentElement::LinkExpression {
@@ -2182,7 +2503,11 @@ mod tests {
         // (a block container; an item is not a block), the list, the
         // single-text kinds and the table.
         let mut payload = block_containers;
-        payload.extend(content_store::BLOCK_CONTAINER_KINDS.iter().filter(|kind| **kind != "item"));
+        payload.extend(
+            content_store::BLOCK_CONTAINER_KINDS
+                .iter()
+                .filter(|kind| **kind != "item"),
+        );
         payload.push("list");
         payload.extend_from_slice(TEXT_BLOCK_KINDS);
         payload.push("table");
@@ -2195,7 +2520,9 @@ mod tests {
     fn serialize_from_store_returns_non_empty_for_minimal_doc() {
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Hello"))],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "Hello"
+            ))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -2205,7 +2532,10 @@ mod tests {
         let root = document_to_store(&doc, &mut store, None);
         let result = serialize_from_store(&store, root).unwrap();
         assert!(!result.is_empty(), "expected non-empty output");
-        assert!(result.contains("Hello"), "expected 'Hello' in serialized output: {result:?}");
+        assert!(
+            result.contains("Hello"),
+            "expected 'Hello' in serialized output: {result:?}"
+        );
     }
 
     #[test]
@@ -2214,7 +2544,9 @@ mod tests {
         // the store and compare the reconstructed Document against the original.
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown("Hello"))],
+            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "Hello"
+            ))],
             has_separator: false,
             separator_span: None,
             unassigned: im::Vector::new(),
@@ -2225,7 +2557,10 @@ mod tests {
 
         // serialize_from_store produces the markdown
         let serialized = serialize_from_store(&store, root).unwrap();
-        assert!(serialized.contains("Hello"), "serialized output should contain 'Hello'");
+        assert!(
+            serialized.contains("Hello"),
+            "serialized output should contain 'Hello'"
+        );
 
         // Re-parse by going through store_to_document (which is what serialize_from_store calls)
         // and check the reconstructed Document matches the original.
@@ -2234,7 +2569,10 @@ mod tests {
 
         // Additionally confirm the serialized text equals direct serialize_document output
         let direct = content::serialize_document(&reconstructed);
-        assert_eq!(serialized, direct, "serialize_from_store should equal serialize_document ∘ store_to_document");
+        assert_eq!(
+            serialized, direct,
+            "serialize_from_store should equal serialize_document ∘ store_to_document"
+        );
     }
 
     #[test]
@@ -2267,7 +2605,10 @@ mod tests {
         let root2 = document_to_store(&doc2, &mut store2, None);
         let second = serialize_from_store(&store2, root2).unwrap();
 
-        assert_eq!(first, second, "serialize_from_store should be fixed-point: first={first:?}, second={second:?}");
+        assert_eq!(
+            first, second,
+            "serialize_from_store should be fixed-point: first={first:?}, second={second:?}"
+        );
     }
 
     // ── multi-value slot round-trip (regression 2) ──────────────────────────
@@ -2301,7 +2642,10 @@ mod tests {
     fn missing_preamble_slot_creates_suggestion_node() {
         // A document with only "title" but a grammar that also requires "summary"
         // should produce a "suggestion" ConsistsOf edge on the semantic content.
-        use schema::{BodyRules, Constraint, CountRange, Element as SchemaElement, HeadingLevel, HeadingLevelRange, Slot, SlotName};
+        use schema::{
+            BodyRules, Constraint, CountRange, Element as SchemaElement, HeadingLevel,
+            HeadingLevelRange, Slot, SlotName,
+        };
         let grammar = schema::Grammar {
             preamble: vec![
                 Slot {
@@ -2324,7 +2668,9 @@ mod tests {
                     span: schema::Span { start: 0, end: 0 },
                 },
             ],
-            body: Some(BodyRules { heading_range: None }),
+            body: Some(BodyRules {
+                heading_range: None,
+            }),
         };
 
         // Document has title but NO summary
@@ -2354,17 +2700,30 @@ mod tests {
         let empty_stems = std::collections::HashMap::new();
         let empty_urls = std::collections::HashMap::new();
         let sem = create_semantic_content(
-            &mut store, doc_root, &grammar, &meta, &empty_stems, &empty_urls, None,
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &empty_stems,
+            &empty_urls,
+            None,
         );
 
         // title should be present as a heading
         let parts = store.consists_of(sem);
-        let title_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "title");
+        let title_part = parts
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "title");
         assert!(title_part.is_some(), "Expected a 'title' consists-of edge");
 
         // summary should be a suggestion node (not absent)
-        let summary_part = parts.iter().find(|(n, _)| store.resolve_name(*n) == "summary");
-        assert!(summary_part.is_some(), "Expected a 'summary' consists-of edge for the missing slot");
+        let summary_part = parts
+            .iter()
+            .find(|(n, _)| store.resolve_name(*n) == "summary");
+        assert!(
+            summary_part.is_some(),
+            "Expected a 'summary' consists-of edge for the missing slot"
+        );
 
         let (_, suggestion_id) = summary_part.unwrap();
         assert!(
@@ -2374,7 +2733,10 @@ mod tests {
 
         // Suggestion should carry the hint and slot-name attributes
         let hint = find_attr_text(&store, *suggestion_id, "hint");
-        assert!(hint.is_some(), "Suggestion node should have a 'hint' attribute");
+        assert!(
+            hint.is_some(),
+            "Suggestion node should have a 'hint' attribute"
+        );
         let slot_name_attr = find_attr_text(&store, *suggestion_id, "slot-name");
         assert_eq!(slot_name_attr, Some("summary".to_string()));
     }

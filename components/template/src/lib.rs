@@ -1,3 +1,4 @@
+mod body_nodes;
 pub mod check;
 pub mod constants;
 pub mod constraints;
@@ -9,24 +10,36 @@ pub mod graph_view;
 pub mod hiccup;
 mod hiccup_serializer;
 mod hiccup_tree;
-mod body_nodes;
 mod inline_nodes;
 mod markdown_nodes;
 pub mod registry;
 pub mod transformer;
 
-pub use constraints::{constraint_attr_name, extract_slot_constraint_attrs, CONSTRAINT_ATTR_PREFIX};
-pub use data::{build_article_graph,build_schema_included_by_json, inject_schema_included_by, synthesize_link, title_editor, Callable, DataGraph, OutputMode, SuggestionKind, Value};
-pub use graph_view::{DataRef, GraphView, ResolvedNode};
+pub use constants::{
+    ATTR_SCHEMA_INCLUDED_BY, ATTR_SCHEMA_INSTANCE_COUNT, ATTR_SCHEMA_INSTANCE_SAMPLE_URL,
+    KEY_SCHEMA_INCLUDED_BY,
+};
+pub use constraints::{
+    CONSTRAINT_ATTR_PREFIX, constraint_attr_name, extract_slot_constraint_attrs,
+};
+pub use data::{
+    Callable, DataGraph, OutputMode, SuggestionKind, Value, build_article_graph,
+    build_schema_included_by_json, inject_schema_included_by, synthesize_link, title_editor,
+};
+pub use dom::{
+    Form, UrlRewriter, extract_asset_paths, html_escape_attr, html_escape_text, parse_template_xml,
+    rewrite_urls, serialize_nodes, serialize_template_to_html, strip_whitespace_text_nodes,
+};
 pub use error::TemplateError;
-pub use inline_nodes::inline_nodes;
-pub use transformer::{attach_schema_included_by_attr, attach_schema_instance_attrs, transform, RenderError};
-pub use constants::{ATTR_SCHEMA_INCLUDED_BY, ATTR_SCHEMA_INSTANCE_COUNT, ATTR_SCHEMA_INSTANCE_SAMPLE_URL, KEY_SCHEMA_INCLUDED_BY};
-pub use dom::{parse_template_xml, serialize_nodes, serialize_template_to_html, extract_asset_paths, rewrite_urls, UrlRewriter, strip_whitespace_text_nodes, Form, html_escape_text, html_escape_attr};
+pub use graph_view::{DataRef, GraphView, ResolvedNode};
 pub use hiccup::{parse_template_hiccup, read_form};
 pub use hiccup_serializer::serialize_to_hiccup;
 pub use hiccup_tree::{hiccup_to_trees, tree_to_hiccup};
-pub use registry::{extract_definitions, NullRegistry, RenderContext, TemplateRegistry};
+pub use inline_nodes::inline_nodes;
+pub use registry::{NullRegistry, RenderContext, TemplateRegistry, extract_definitions};
+pub use transformer::{
+    RenderError, attach_schema_included_by_attr, attach_schema_instance_attrs, transform,
+};
 
 /// Try to load and parse a template by name from a directory.
 ///
@@ -63,7 +76,10 @@ pub fn resolve_template_file(
         }
     }
 
-    let tried: Vec<String> = candidates.iter().map(|(p, _)| p.display().to_string()).collect();
+    let tried: Vec<String> = candidates
+        .iter()
+        .map(|(p, _)| p.display().to_string())
+        .collect();
     Err(format!("not found: [{}]", tried.join(", ")))
 }
 

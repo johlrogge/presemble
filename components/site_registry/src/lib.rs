@@ -32,10 +32,7 @@ pub enum RegistryError {
     NotFound(String),
 
     #[error("invalid status transition from {from:?} to {to:?}")]
-    InvalidTransition {
-        from: SiteStatus,
-        to: SiteStatus,
-    },
+    InvalidTransition { from: SiteStatus, to: SiteStatus },
 
     #[error("port range exhausted")]
     PortRangeExhausted,
@@ -261,8 +258,9 @@ impl SiteStore for FileSiteStore {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
-        let contents = std::fs::read_to_string(&self.path)
-            .map_err(|e| RegistryError::Persistence(format!("read {}: {e}", self.path.display())))?;
+        let contents = std::fs::read_to_string(&self.path).map_err(|e| {
+            RegistryError::Persistence(format!("read {}: {e}", self.path.display()))
+        })?;
         serde_json::from_str(&contents)
             .map_err(|e| RegistryError::Persistence(format!("parse {}: {e}", self.path.display())))
     }
@@ -325,11 +323,7 @@ impl SiteRegistry {
     ) -> Result<Site, RegistryError> {
         let mut inner = self.inner.lock().expect("site registry lock poisoned");
         // Reject duplicate subdomains
-        if inner
-            .sites
-            .values()
-            .any(|s| s.subdomain == subdomain)
-        {
+        if inner.sites.values().any(|s| s.subdomain == subdomain) {
             return Err(RegistryError::DuplicateSubdomain(
                 subdomain.as_str().to_string(),
             ));
@@ -501,7 +495,10 @@ mod tests {
     #[test]
     fn subdomain_rejects_too_long() {
         let long = "a".repeat(64);
-        assert!(matches!(Subdomain::new(&long), Err(SubdomainError::TooLong(_))));
+        assert!(matches!(
+            Subdomain::new(&long),
+            Err(SubdomainError::TooLong(_))
+        ));
     }
 
     #[test]
@@ -522,7 +519,10 @@ mod tests {
 
     #[test]
     fn subdomain_rejects_uppercase() {
-        assert_eq!(Subdomain::new("BadLabel"), Err(SubdomainError::InvalidChars));
+        assert_eq!(
+            Subdomain::new("BadLabel"),
+            Err(SubdomainError::InvalidChars)
+        );
     }
 
     #[test]
@@ -535,7 +535,10 @@ mod tests {
 
     #[test]
     fn subdomain_rejects_dots() {
-        assert_eq!(Subdomain::new("bad.label"), Err(SubdomainError::InvalidChars));
+        assert_eq!(
+            Subdomain::new("bad.label"),
+            Err(SubdomainError::InvalidChars)
+        );
     }
 
     // ── SiteId ───────────────────────────────────────────────────────────────

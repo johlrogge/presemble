@@ -2,10 +2,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use site_index::SchemaStem;
-use template::{
-    dom::Node,
-    registry::extract_definitions,
-};
+use template::{dom::Node, registry::extract_definitions};
 
 /// The parsed result of loading a template file.
 /// Contains the main node tree and any named callable definitions found within it.
@@ -95,7 +92,11 @@ mod tests {
     use tempfile::TempDir;
     use template::TemplateRegistry;
 
-    fn registry_with_partial(name: &str, content: &str, is_hiccup: bool) -> (TempDir, FileTemplateRegistry) {
+    fn registry_with_partial(
+        name: &str,
+        content: &str,
+        is_hiccup: bool,
+    ) -> (TempDir, FileTemplateRegistry) {
         let tmp = TempDir::new().unwrap();
         let ext = if is_hiccup { "hiccup" } else { "html" };
         let template_dir = tmp.path().join("templates");
@@ -109,7 +110,11 @@ mod tests {
         (tmp, FileTemplateRegistry::new(repo))
     }
 
-    fn registry_with_item(stem: &str, content: &str, is_hiccup: bool) -> (TempDir, FileTemplateRegistry) {
+    fn registry_with_item(
+        stem: &str,
+        content: &str,
+        is_hiccup: bool,
+    ) -> (TempDir, FileTemplateRegistry) {
         let tmp = TempDir::new().unwrap();
         let ext = if is_hiccup { "hiccup" } else { "html" };
         let template_dir = tmp.path().join("templates").join(stem);
@@ -139,7 +144,8 @@ mod tests {
 
     #[test]
     fn resolves_bare_name_from_html_partial() {
-        let (_tmp, registry) = registry_with_partial("header", "<header><h1>Title</h1></header>", false);
+        let (_tmp, registry) =
+            registry_with_partial("header", "<header><h1>Title</h1></header>", false);
         let nodes = registry.resolve("header");
         assert!(nodes.is_some());
         let nodes = nodes.unwrap();

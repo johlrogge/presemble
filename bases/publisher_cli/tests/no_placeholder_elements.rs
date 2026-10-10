@@ -67,7 +67,11 @@ fn check(name: &str, src: &Path, hiccup_templates: bool) {
     publisher_cli::build_for_publish(&site, &url).expect("publishes");
     assert_no_placeholders(name, "published", &publisher_cli::output_dir(&site));
     publisher_cli::build_for_serve(&site, &url).expect("builds editorial");
-    assert_no_placeholders(name, "editorial", &publisher_cli::editorial_output_dir(&site));
+    assert_no_placeholders(
+        name,
+        "editorial",
+        &publisher_cli::editorial_output_dir(&site),
+    );
 }
 
 #[test]

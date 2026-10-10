@@ -44,11 +44,24 @@ impl<'a> BlockShape<'a> {
             _ => true,
         });
         match (shown.next(), shown.next()) {
-            (Some(Inline::Link { destination, title, text }), None) => {
-                BlockShape::SoleLink(LinkParts { destination, title: title.as_deref(), text })
-            }
+            (
+                Some(Inline::Link {
+                    destination,
+                    title,
+                    text,
+                }),
+                None,
+            ) => BlockShape::SoleLink(LinkParts {
+                destination,
+                title: title.as_deref(),
+                text,
+            }),
             (Some(Inline::Image { source, title, alt }), None) => {
-                BlockShape::SoleImage(ImageParts { source, title: title.as_deref(), alt })
+                BlockShape::SoleImage(ImageParts {
+                    source,
+                    title: title.as_deref(),
+                    alt,
+                })
             }
             _ => BlockShape::Text,
         }
@@ -82,7 +95,10 @@ impl ContentElement {
                 vec![Inline::Link {
                     destination: LinkDestination::new(href),
                     title: None,
-                    text: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::LinkText),
+                    text: Inlines::new(
+                        vec![Inline::Text(text.to_string())],
+                        InlineContext::LinkText,
+                    ),
                 }],
                 InlineContext::Paragraph,
             ),
@@ -93,7 +109,11 @@ impl ContentElement {
     /// A paragraph that holds one image, whose alt is the literal `alt`, empty
     /// for none (shape `SoleImage`).
     pub fn lone_image(alt: &str, src: &str) -> ContentElement {
-        let alt = if alt.is_empty() { Vec::new() } else { vec![Inline::Text(alt.to_string())] };
+        let alt = if alt.is_empty() {
+            Vec::new()
+        } else {
+            vec![Inline::Text(alt.to_string())]
+        };
         ContentElement::Paragraph {
             content: Inlines::new(
                 vec![Inline::Image {
@@ -112,7 +132,10 @@ impl ContentElement {
     /// slot).
     fn shaped_content(&self) -> Option<&Inlines> {
         match self {
-            ContentElement::Paragraph { content, marker: None } => Some(content),
+            ContentElement::Paragraph {
+                content,
+                marker: None,
+            } => Some(content),
             _ => None,
         }
     }
@@ -212,7 +235,9 @@ mod tests {
     #[test]
     fn parts_carry_the_link_and_its_title() {
         let inlines = parse_inlines("[**a**](/x \"t\")", InlineContext::Paragraph).unwrap();
-        let BlockShape::SoleLink(parts) = BlockShape::of(&inlines) else { panic!() };
+        let BlockShape::SoleLink(parts) = BlockShape::of(&inlines) else {
+            panic!()
+        };
         assert_eq!(parts.destination.as_str(), "/x");
         assert_eq!(parts.title, Some("t"));
         assert!(matches!(parts.text.as_slice(), [Inline::Strong(_)]));
@@ -221,10 +246,16 @@ mod tests {
     #[test]
     fn elements_expose_the_link_and_image_they_are() {
         let link = ContentElement::paragraph_from_markdown("[a](/x)");
-        assert_eq!(link.sole_link().map(|l| l.destination), Some("/x".to_string()));
+        assert_eq!(
+            link.sole_link().map(|l| l.destination),
+            Some("/x".to_string())
+        );
         assert!(link.sole_image().is_none());
         let image = ContentElement::paragraph_from_markdown("![c](c.png)");
-        assert_eq!(image.sole_image().map(|i| i.source), Some("c.png".to_string()));
+        assert_eq!(
+            image.sole_image().map(|i| i.source),
+            Some("c.png".to_string())
+        );
         assert!(image.sole_link().is_none());
         let text = ContentElement::paragraph_from_markdown("[a](/x) and more");
         assert!(text.sole_link().is_none() && text.sole_image().is_none());
@@ -254,7 +285,10 @@ mod tests {
             assert_eq!(el.is_sole_link(), el.sole_link().is_some(), "{md:?}");
             assert_eq!(el.is_sole_image(), el.sole_image().is_some(), "{md:?}");
         }
-        for el in [ContentElement::Separator, ContentElement::lone_link("a", "/x")] {
+        for el in [
+            ContentElement::Separator,
+            ContentElement::lone_link("a", "/x"),
+        ] {
             assert_eq!(el.is_sole_link(), el.sole_link().is_some());
             assert_eq!(el.is_sole_image(), el.sole_image().is_some());
         }

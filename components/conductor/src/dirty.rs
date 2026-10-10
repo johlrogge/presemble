@@ -29,7 +29,10 @@ impl DiskStamp {
     /// cannot be read).
     pub fn of(path: &Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
-        Some(Self { mtime: meta.modified().ok()?, len: meta.len() })
+        Some(Self {
+            mtime: meta.modified().ok()?,
+            len: meta.len(),
+        })
     }
 }
 
@@ -205,7 +208,10 @@ mod tests {
         let first_count = dirty.iter().count();
         let second_count = dirty.iter().count();
         assert_eq!(first_count, 2);
-        assert_eq!(second_count, 2, "second iteration should still yield both paths");
+        assert_eq!(
+            second_count, 2,
+            "second iteration should still yield both paths"
+        );
     }
 
     #[test]
@@ -214,7 +220,10 @@ mod tests {
         assert!(dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH));
         assert!(dirty.contains(Path::new("content/a.md")));
         assert!(dirty.is_conflicted(Path::new("content/a.md")));
-        assert_eq!(dirty.conflicts().collect::<Vec<_>>(), vec![Path::new("content/a.md")]);
+        assert_eq!(
+            dirty.conflicts().collect::<Vec<_>>(),
+            vec![Path::new("content/a.md")]
+        );
         assert_eq!(dirty.iter().count(), 1);
     }
 
@@ -222,7 +231,10 @@ mod tests {
     fn a_conflict_is_reported_once() {
         let mut dirty = DirtyDocs::new();
         assert!(dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH));
-        assert!(!dirty.mark_conflict("content/a.md", SystemTime::now()), "already recorded");
+        assert!(
+            !dirty.mark_conflict("content/a.md", SystemTime::now()),
+            "already recorded"
+        );
     }
 
     #[test]

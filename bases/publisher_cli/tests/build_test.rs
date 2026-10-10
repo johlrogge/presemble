@@ -5,8 +5,7 @@ use tempfile::TempDir;
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn fixture_src() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../fixtures/blog-site")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/blog-site")
 }
 
 /// Copies the blog-site fixture into a fresh temp directory, excluding output/.
@@ -75,7 +74,11 @@ fn an_aligned_table_renders_its_alignment_when_built() {
     ] {
         assert!(html.contains(cell), "{cell} in {html}");
     }
-    assert_eq!(html.matches("style=").count(), 4, "only the aligned cells have a style: {html}");
+    assert_eq!(
+        html.matches("style=").count(),
+        4,
+        "only the aligned cells have a style: {html}"
+    );
 }
 
 // ── Read-only validation tests (never call build) ────────────────────────────
@@ -92,8 +95,7 @@ fn fixture_blog_site_has_required_inputs() {
 #[test]
 fn hello_world_is_valid_against_article_schema() {
     let schema_src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
-    let content_src =
-        include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+    let content_src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
 
     let grammar = schema::parse_schema(schema_src).expect("schema parses");
     let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
@@ -105,8 +107,7 @@ fn hello_world_is_valid_against_article_schema() {
 #[test]
 fn invalid_post_fails_validation_with_title_and_body_errors() {
     let schema_src = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
-    let content_src =
-        include_str!("../../../fixtures/blog-site/content/article/invalid-post.md");
+    let content_src = include_str!("../../../fixtures/blog-site/content/article/invalid-post.md");
 
     let grammar = schema::parse_schema(schema_src).expect("schema parses");
     let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
@@ -126,7 +127,8 @@ fn invalid_post_fails_validation_with_title_and_body_errors() {
 fn build_produces_index_html() {
     let (_tmp, site_dir) = copy_fixture_site();
 
-    let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
+    let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
 
     let index_path = publisher_cli::editorial_output_dir(&site_dir).join("index.html");
     assert!(index_path.exists(), "output/index.html should be created");
@@ -147,10 +149,12 @@ fn build_produces_index_html() {
 fn build_site_articles_collection_has_url_field() {
     let (_tmp, site_dir) = copy_fixture_site();
 
-    publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
+    publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
 
     // The article HTML should exist and contain a URL to itself
-    let article_html = publisher_cli::editorial_output_dir(&site_dir).join("article/hello-world/index.html");
+    let article_html =
+        publisher_cli::editorial_output_dir(&site_dir).join("article/hello-world/index.html");
     assert!(article_html.exists(), "article HTML should be built");
 }
 
@@ -158,7 +162,8 @@ fn build_site_articles_collection_has_url_field() {
 fn build_site_copies_assets_to_output() {
     let (_tmp, site_dir) = copy_fixture_site();
 
-    publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
+    publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
 
     let asset = publisher_cli::editorial_output_dir(&site_dir).join("assets/style.css");
     assert!(
@@ -189,11 +194,7 @@ fn template_call_inlines_header_and_footer_fragments() {
     .unwrap();
 
     // Content
-    fs::write(
-        site.join("content/article/test-post.md"),
-        "# Test Post\n",
-    )
-    .unwrap();
+    fs::write(site.join("content/article/test-post.md"), "# Test Post\n").unwrap();
 
     // Fragment templates
     fs::write(
@@ -240,12 +241,15 @@ fn template_call_inlines_header_and_footer_fragments() {
     // Minimal CSS asset so asset copy doesn't fail
     fs::write(site.join("assets/style.css"), "body {}").unwrap();
 
-    let outcome = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default()).expect("build should succeed");
+    let outcome = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
     assert_eq!(outcome.files_failed, 0, "no pages should fail");
 
     // Verify article output contains header and footer content
-    let article_html =
-        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("article/test-post/index.html")).unwrap();
+    let article_html = fs::read_to_string(
+        publisher_cli::editorial_output_dir(&site).join("article/test-post/index.html"),
+    )
+    .unwrap();
     assert!(
         article_html.contains("MySite"),
         "article output should contain header content from include: {article_html}"
@@ -260,7 +264,8 @@ fn template_call_inlines_header_and_footer_fragments() {
     );
 
     // Verify index output also inlines the fragments
-    let index_html = fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("index.html")).unwrap();
+    let index_html =
+        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("index.html")).unwrap();
     assert!(
         index_html.contains("MySite"),
         "index output should contain header content from include: {index_html}"
@@ -276,11 +281,13 @@ fn cross_content_reference_resolves_author_data() {
     let (_tmp, site_dir) = copy_fixture_site();
     let site_dir = std::fs::canonicalize(&site_dir).unwrap();
 
-    let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default()).expect("build should succeed");
+    let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
     assert_eq!(outcome.files_failed, 0, "build should have no failures");
 
     // The hello-world article HTML should be built and contain author info
-    let article_html = publisher_cli::editorial_output_dir(&site_dir).join("article/hello-world/index.html");
+    let article_html =
+        publisher_cli::editorial_output_dir(&site_dir).join("article/hello-world/index.html");
     assert!(article_html.exists(), "hello-world article should be built");
 }
 
@@ -292,8 +299,8 @@ fn invalid_post_is_rendered_with_html_output() {
         .expect("build should succeed");
 
     // The invalid-post should be rendered (conductor renders all content)
-    let invalid_post_output = publisher_cli::editorial_output_dir(&site_dir)
-        .join("article/invalid-post/index.html");
+    let invalid_post_output =
+        publisher_cli::editorial_output_dir(&site_dir).join("article/invalid-post/index.html");
     assert!(
         invalid_post_output.exists(),
         "invalid-post output HTML should exist at {}",
@@ -319,11 +326,7 @@ fn index_content_is_rendered_into_index_page() {
         "# Article title {#title}\noccurs\n: exactly once\n",
     )
     .unwrap();
-    fs::write(
-        site.join("content/article/sample.md"),
-        "# Sample Article\n",
-    )
-    .unwrap();
+    fs::write(site.join("content/article/sample.md"), "# Sample Article\n").unwrap();
 
     // Index schema: a page with a site title and tagline
     fs::write(
@@ -363,9 +366,8 @@ fn index_content_is_rendered_into_index_page() {
     // Minimal CSS so asset copy doesn't complain
     fs::write(site.join("assets/style.css"), "body {}").unwrap();
 
-    let outcome =
-        publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
-            .expect("build should succeed");
+    let outcome = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
     assert_eq!(outcome.files_failed, 0, "no pages should fail");
 
     let index_html =
@@ -400,11 +402,7 @@ fn collection_page_is_built_when_index_content_and_template_exist() {
         "# Article title {#title}\noccurs\n: exactly once\n",
     )
     .unwrap();
-    fs::write(
-        site.join("content/article/hello.md"),
-        "# Hello Article\n",
-    )
-    .unwrap();
+    fs::write(site.join("content/article/hello.md"), "# Hello Article\n").unwrap();
 
     // Collection schema (for content/article/index.md)
     fs::write(
@@ -414,11 +412,7 @@ fn collection_page_is_built_when_index_content_and_template_exist() {
     .unwrap();
 
     // Collection content
-    fs::write(
-        site.join("content/article/index.md"),
-        "# All Articles\n",
-    )
-    .unwrap();
+    fs::write(site.join("content/article/index.md"), "# All Articles\n").unwrap();
 
     // Item template
     fs::write(
@@ -451,9 +445,8 @@ fn collection_page_is_built_when_index_content_and_template_exist() {
 
     fs::write(site.join("assets/style.css"), "body {}").unwrap();
 
-    let outcome =
-        publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
-            .expect("build should succeed");
+    let outcome = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
     assert_eq!(
         outcome.files_failed, 0,
         "no pages should fail; errors: {:?}",
@@ -499,11 +492,7 @@ fn collection_page_without_collection_content_is_skipped() {
         "# Article title {#title}\noccurs\n: exactly once\n",
     )
     .unwrap();
-    fs::write(
-        site.join("content/article/hello.md"),
-        "# Hello Article\n",
-    )
-    .unwrap();
+    fs::write(site.join("content/article/hello.md"), "# Hello Article\n").unwrap();
     fs::write(
         site.join("templates/article/item.html"),
         r#"<!DOCTYPE html><html><body><presemble:insert data="(ref input.title)" as="h1" /></body></html>"#,
@@ -516,9 +505,8 @@ fn collection_page_without_collection_content_is_skipped() {
     .unwrap();
     fs::write(site.join("assets/style.css"), "body {}").unwrap();
 
-    let outcome =
-        publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
-            .expect("build should succeed");
+    let outcome = publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("build should succeed");
 
     assert_eq!(
         outcome.files_failed, 0,
@@ -563,7 +551,11 @@ fn serve_renders_site_with_validation_errors() {
     let outcome = publisher_cli::build_for_serve(&site_dir, &publisher_cli::UrlConfig::default())
         .expect("serve build should succeed despite validation errors");
 
-    assert!(publisher_cli::editorial_output_dir(&site_dir).join("index.html").exists());
+    assert!(
+        publisher_cli::editorial_output_dir(&site_dir)
+            .join("index.html")
+            .exists()
+    );
     assert!(
         outcome.validation.has_errors(),
         "the report should carry the fixture's validation errors"
@@ -599,17 +591,30 @@ fn tree_has_editor_attributes(files: &[(PathBuf, Vec<u8>)]) -> bool {
 fn editorial_build_never_writes_the_published_output_directory() {
     let tmp = TempDir::new().unwrap();
     let site = tmp.path().join("valid-site");
-    for dir in ["schemas/article", "content/article", "templates/article", "assets"] {
+    for dir in [
+        "schemas/article",
+        "content/article",
+        "templates/article",
+        "assets",
+    ] {
         fs::create_dir_all(site.join(dir)).unwrap();
     }
-    fs::write(site.join("schemas/article/item.md"), "# Article title {#title}\noccurs\n: exactly once\n").unwrap();
+    fs::write(
+        site.join("schemas/article/item.md"),
+        "# Article title {#title}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
     fs::write(site.join("content/article/sample.md"), "# Sample\n").unwrap();
     fs::write(
         site.join("templates/article/item.html"),
         r#"<!DOCTYPE html><html><body><presemble:insert data="(ref input.title)" as="h1" /></body></html>"#,
     )
     .unwrap();
-    fs::write(site.join("templates/index.html"), "<!DOCTYPE html><html><body><h1>Home</h1></body></html>").unwrap();
+    fs::write(
+        site.join("templates/index.html"),
+        "<!DOCTYPE html><html><body><h1>Home</h1></body></html>",
+    )
+    .unwrap();
     fs::write(site.join("assets/style.css"), "body {}").unwrap();
     // A template that references the stylesheet, so it is an asset of the site.
     fs::write(
@@ -622,21 +627,34 @@ fn editorial_build_never_writes_the_published_output_directory() {
     publisher_cli::build_for_publish(&site, &config).expect("a valid site should publish");
     let published = publisher_cli::output_dir(&site);
     let before = tree(&published);
-    assert!(!tree_has_editor_attributes(&before), "the published output has no editor attributes");
+    assert!(
+        !tree_has_editor_attributes(&before),
+        "the published output has no editor attributes"
+    );
 
     publisher_cli::build_for_editorial(&site, &config).expect("the editorial build succeeds");
 
     // The published directory is exactly as it was.
     let after = tree(&published);
-    assert!(!tree_has_editor_attributes(&after), "the editorial build wrote editor attributes into the published output");
-    assert_eq!(before, after, "the editorial build changed the published output");
+    assert!(
+        !tree_has_editor_attributes(&after),
+        "the editorial build wrote editor attributes into the published output"
+    );
+    assert_eq!(
+        before, after,
+        "the editorial build changed the published output"
+    );
 
     // The editorial output is elsewhere, with its attributes and its assets.
     let editorial = publisher_cli::editorial_output_dir(&site);
     assert_ne!(editorial, published);
-    let page = fs::read_to_string(editorial.join("article/sample/index.html")).expect("editorial page");
+    let page =
+        fs::read_to_string(editorial.join("article/sample/index.html")).expect("editorial page");
     assert!(page.contains("data-presemble-address"), "{page}");
-    assert!(editorial.join("assets/style.css").exists(), "assets are copied to the editorial output");
+    assert!(
+        editorial.join("assets/style.css").exists(),
+        "assets are copied to the editorial output"
+    );
 }
 
 #[test]
@@ -672,5 +690,9 @@ fn publish_succeeds_for_valid_site() {
 
     assert_eq!(outcome.files_failed, 0, "publish should have no failures");
     assert!(!outcome.validation.has_errors());
-    assert!(publisher_cli::output_dir(&site).join("article/sample/index.html").exists());
+    assert!(
+        publisher_cli::output_dir(&site)
+            .join("article/sample/index.html")
+            .exists()
+    );
 }

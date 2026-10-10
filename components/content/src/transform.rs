@@ -1,8 +1,8 @@
-use std::fmt::Debug;
-use std::sync::Arc;
-use schema::{Grammar, SlotName};
 use crate::document::Document;
 use crate::slot_editor;
+use schema::{Grammar, SlotName};
+use std::fmt::Debug;
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransformError {
@@ -32,12 +32,24 @@ pub struct InsertSlot {
 }
 
 impl InsertSlot {
-    pub fn new(grammar: Arc<Grammar>, slot_name: &str, value: String) -> Result<Self, TransformError> {
-        let slot_name_obj = grammar.preamble.iter()
+    pub fn new(
+        grammar: Arc<Grammar>,
+        slot_name: &str,
+        value: String,
+    ) -> Result<Self, TransformError> {
+        let slot_name_obj = grammar
+            .preamble
+            .iter()
             .find(|s| s.name.as_str() == slot_name)
             .map(|s| s.name.clone())
-            .ok_or_else(|| TransformError::SlotNotFound { slot_name: slot_name.to_string() })?;
-        Ok(Self { grammar, slot_name: slot_name_obj, value })
+            .ok_or_else(|| TransformError::SlotNotFound {
+                slot_name: slot_name.to_string(),
+            })?;
+        Ok(Self {
+            grammar,
+            slot_name: slot_name_obj,
+            value,
+        })
     }
 }
 
@@ -47,8 +59,13 @@ impl Transform for InsertSlot {
     }
 
     fn apply(&self, mut doc: Document) -> Result<Document, TransformError> {
-        slot_editor::modify_slot(&mut doc, self.slot_name.as_str(), &self.grammar, &self.value)
-            .map_err(|reason| TransformError::Failed { reason })?;
+        slot_editor::modify_slot(
+            &mut doc,
+            self.slot_name.as_str(),
+            &self.grammar,
+            &self.value,
+        )
+        .map_err(|reason| TransformError::Failed { reason })?;
         Ok(doc)
     }
 }
@@ -63,11 +80,18 @@ pub struct Capitalize {
 
 impl Capitalize {
     pub fn new(grammar: Arc<Grammar>, slot_name: &str) -> Result<Self, TransformError> {
-        let slot_name_obj = grammar.preamble.iter()
+        let slot_name_obj = grammar
+            .preamble
+            .iter()
             .find(|s| s.name.as_str() == slot_name)
             .map(|s| s.name.clone())
-            .ok_or_else(|| TransformError::SlotNotFound { slot_name: slot_name.to_string() })?;
-        Ok(Self { grammar, slot_name: slot_name_obj })
+            .ok_or_else(|| TransformError::SlotNotFound {
+                slot_name: slot_name.to_string(),
+            })?;
+        Ok(Self {
+            grammar,
+            slot_name: slot_name_obj,
+        })
     }
 }
 
@@ -130,9 +154,9 @@ impl Transform for CompositeTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use schema::parse_schema;
     use crate::parser::parse_and_assign;
     use crate::serializer::serialize_document;
+    use schema::parse_schema;
 
     fn post_grammar() -> Grammar {
         let schema_src = r#"# Post title {#title}
@@ -165,7 +189,8 @@ headings
         let grammar = Arc::new(post_grammar());
         let src = "Summary.\n\n[Author](/author/jo)\n\n----\n";
         let doc = parse_and_assign(src, &grammar).unwrap();
-        let transform = InsertSlot::new(Arc::clone(&grammar), "title", "My New Title".to_string()).unwrap();
+        let transform =
+            InsertSlot::new(Arc::clone(&grammar), "title", "My New Title".to_string()).unwrap();
         let result_doc = transform.apply(doc).unwrap();
         let result = serialize_document(&result_doc);
         assert!(
@@ -227,7 +252,10 @@ headings
         assert!(!doc.has_separator, "doc should not have separator yet");
         let transform = InsertSeparator;
         let result_doc = transform.apply(doc).unwrap();
-        assert!(result_doc.has_separator, "doc should have separator after transform");
+        assert!(
+            result_doc.has_separator,
+            "doc should have separator after transform"
+        );
         let result = serialize_document(&result_doc);
         assert!(result.contains("----"), "expected '----' in: {result:?}");
     }
@@ -251,7 +279,10 @@ headings
         let src = "Summary.\n\n[Author](/author/jo)\n\n----\n";
         let doc = parse_and_assign(src, &grammar).unwrap();
         let composite = CompositeTransform::new(vec![
-            Box::new(InsertSlot::new(Arc::clone(&grammar), "title", "lowercase title".to_string()).unwrap()),
+            Box::new(
+                InsertSlot::new(Arc::clone(&grammar), "title", "lowercase title".to_string())
+                    .unwrap(),
+            ),
             Box::new(Capitalize::new(Arc::clone(&grammar), "title").unwrap()),
         ]);
         let result_doc = composite.apply(doc).unwrap();
@@ -271,6 +302,9 @@ headings
         let composite = CompositeTransform::new(vec![]);
         let result_doc = composite.apply(doc).unwrap();
         let result = serialize_document(&result_doc);
-        assert_eq!(result, original_result, "empty composite should not change document");
+        assert_eq!(
+            result, original_result,
+            "empty composite should not change document"
+        );
     }
 }

@@ -79,10 +79,7 @@ fn json_rpc_ok(id: Value, result: Value) -> JsonRpcResponse {
 
 /// The `file` argument of a tool as a content path, or the error to answer
 /// with. The tools never pass an unchecked path on to the conductor.
-fn parse_file_arg(
-    id: &Value,
-    file: &str,
-) -> Result<editorial_types::ContentPath, JsonRpcResponse> {
+fn parse_file_arg(id: &Value, file: &str) -> Result<editorial_types::ContentPath, JsonRpcResponse> {
     editorial_types::ContentPath::parse(file).map_err(|e| {
         json_rpc_ok(
             id.clone(),
@@ -193,10 +190,7 @@ fn handle_list_content(req: &JsonRpcRequest, cond: &conductor::ConductorClient) 
     }
 }
 
-fn handle_request(
-    req: &JsonRpcRequest,
-    site_dir: &Path,
-) -> JsonRpcResponse {
+fn handle_request(req: &JsonRpcRequest, site_dir: &Path) -> JsonRpcResponse {
     match req.method.as_str() {
         "initialize" => json_rpc_ok(
             req.id.clone(),
@@ -410,19 +404,19 @@ fn handle_request(
             let cond = match connect_conductor(&tool_site_dir) {
                 Ok(c) => c,
                 Err(e) => {
-                    return json_rpc_ok(req.id.clone(), serde_json::json!({
-                        "content": [{"type": "text", "text": format!("Cannot connect to conductor: {e}. Is `presemble serve` running?")}],
-                        "isError": true
-                    }));
+                    return json_rpc_ok(
+                        req.id.clone(),
+                        serde_json::json!({
+                            "content": [{"type": "text", "text": format!("Cannot connect to conductor: {e}. Is `presemble serve` running?")}],
+                            "isError": true
+                        }),
+                    );
                 }
             };
 
             match tool_name {
                 "get_content" => {
-                    let file = arguments
-                        .get("file")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let file = arguments.get("file").and_then(|v| v.as_str()).unwrap_or("");
                     let content_file = match parse_file_arg(&req.id, file) {
                         Ok(f) => f,
                         Err(refusal) => return refusal,
@@ -430,14 +424,12 @@ fn handle_request(
                     match cond.send(&conductor::Command::GetDocumentText {
                         path: content_file.into(),
                     }) {
-                        Ok(conductor::Response::DocumentText(Some(text))) => {
-                            json_rpc_ok(
-                                req.id.clone(),
-                                serde_json::json!({
-                                    "content": [{"type": "text", "text": text}]
-                                }),
-                            )
-                        }
+                        Ok(conductor::Response::DocumentText(Some(text))) => json_rpc_ok(
+                            req.id.clone(),
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": text}]
+                            }),
+                        ),
                         Ok(conductor::Response::DocumentText(None)) => json_rpc_ok(
                             req.id.clone(),
                             serde_json::json!({
@@ -463,10 +455,7 @@ fn handle_request(
                 }
 
                 "get_schema" => {
-                    let stem = arguments
-                        .get("stem")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let stem = arguments.get("stem").and_then(|v| v.as_str()).unwrap_or("");
                     match cond.send(&conductor::Command::GetGrammar {
                         stem: stem.to_string(),
                     }) {
@@ -501,14 +490,8 @@ fn handle_request(
                 }
 
                 "suggest" => {
-                    let file = arguments
-                        .get("file")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let slot = arguments
-                        .get("slot")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let file = arguments.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                    let slot = arguments.get("slot").and_then(|v| v.as_str()).unwrap_or("");
                     let value = arguments
                         .get("value")
                         .and_then(|v| v.as_str())
@@ -562,35 +545,26 @@ fn handle_request(
                 }
 
                 "get_suggestions" => {
-                    let file = arguments
-                        .get("file")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let file = arguments.get("file").and_then(|v| v.as_str()).unwrap_or("");
 
                     // Query NED suggestions.
                     let content_file = match parse_file_arg(&req.id, file) {
                         Ok(f) => f,
                         Err(refusal) => return refusal,
                     };
-                    let (ned_lines, ned_error) = match cond.send(&conductor::Command::GetNedSuggestions {
-                        file: content_file,
-                    }) {
+                    let (ned_lines, ned_error) = match cond
+                        .send(&conductor::Command::GetNedSuggestions { file: content_file })
+                    {
                         Ok(conductor::Response::NedSuggestions(suggestions)) => {
-                            let lines: Vec<String> = suggestions
-                                .iter()
-                                .map(format_ned_suggestion)
-                                .collect();
+                            let lines: Vec<String> =
+                                suggestions.iter().map(format_ned_suggestion).collect();
                             (lines, None)
                         }
                         Ok(conductor::Response::Error(e)) => {
                             (vec![], Some(format!("[error fetching suggestions: {e}]")))
                         }
-                        Ok(other) => {
-                            (vec![], Some(format!("[unexpected response: {other:?}]")))
-                        }
-                        Err(e) => {
-                            (vec![], Some(format!("[error fetching suggestions: {e}]")))
-                        }
+                        Ok(other) => (vec![], Some(format!("[unexpected response: {other:?}]"))),
+                        Err(e) => (vec![], Some(format!("[error fetching suggestions: {e}]"))),
                     };
 
                     let text = {
@@ -624,9 +598,18 @@ fn handle_request(
 
                 "suggest_body_edit" => {
                     let file = arguments.get("file").and_then(|v| v.as_str()).unwrap_or("");
-                    let search = arguments.get("search").and_then(|v| v.as_str()).unwrap_or("");
-                    let replace = arguments.get("replace").and_then(|v| v.as_str()).unwrap_or("");
-                    let reason = arguments.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                    let search = arguments
+                        .get("search")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let replace = arguments
+                        .get("replace")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let reason = arguments
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
 
                     if let Err(e) = validate_body_edit_args(search, replace) {
                         return json_rpc_ok(
@@ -683,10 +666,21 @@ fn handle_request(
 
                 "suggest_ned" => {
                     let file = arguments.get("file").and_then(|v| v.as_str()).unwrap_or("");
-                    let selection = arguments.get("selection").and_then(|v| v.as_str()).unwrap_or("");
-                    let reason = arguments.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                    let mutation_value = arguments.get("mutation").cloned().unwrap_or(serde_json::Value::Null);
-                    let mutation: editorial_types::NedMutation = match serde_json::from_value(mutation_value) {
+                    let selection = arguments
+                        .get("selection")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let reason = arguments
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let mutation_value = arguments
+                        .get("mutation")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let mutation: editorial_types::NedMutation = match serde_json::from_value(
+                        mutation_value,
+                    ) {
                         Ok(m) => m,
                         Err(e) => {
                             return json_rpc_ok(
@@ -860,7 +854,9 @@ fn stale_hint(cause: &editorial_types::StaleCause) -> Option<&'static str> {
         | StaleCause::InvalidValue { .. }
         | StaleCause::EvalError { .. }
         | StaleCause::Overlap { .. } => None,
-        StaleCause::SpansAtom => Some("the text now matches across an image or HTML; review manually"),
+        StaleCause::SpansAtom => {
+            Some("the text now matches across an image or HTML; review manually")
+        }
     }
 }
 
@@ -1027,7 +1023,10 @@ fn format_ned_suggestion(s: &editorial_types::NedSuggestion) -> String {
         }
     };
 
-    format!("{author_label} {mutation_part}{stale_suffix} ({id})", id = s.id)
+    format!(
+        "{author_label} {mutation_part}{stale_suffix} ({id})",
+        id = s.id
+    )
 }
 
 #[cfg(test)]
@@ -1086,10 +1085,7 @@ mod tests {
             "serverInfo": { "name": "presemble", "version": env!("CARGO_PKG_VERSION") }
         });
         for key in expected_keys {
-            assert!(
-                result_value.get(key).is_some(),
-                "missing key: {key}"
-            );
+            assert!(result_value.get(key).is_some(), "missing key: {key}");
         }
     }
 
@@ -1114,7 +1110,15 @@ mod tests {
             {"name": "suggest_ned"},
             {"name": "list_content"}
         ]);
-        let expected = ["get_content", "get_schema", "suggest", "get_suggestions", "suggest_body_edit", "suggest_ned", "list_content"];
+        let expected = [
+            "get_content",
+            "get_schema",
+            "suggest",
+            "get_suggestions",
+            "suggest_body_edit",
+            "suggest_ned",
+            "list_content",
+        ];
         for name in expected {
             let found = tools
                 .as_array()
@@ -1139,8 +1143,14 @@ mod tests {
         ];
         let result = format_content_list(&paths);
         assert!(result.contains("## post"), "should have post section");
-        assert!(result.contains("content/post/hello.md"), "should list hello.md");
-        assert!(result.contains("content/post/world.md"), "should list world.md");
+        assert!(
+            result.contains("content/post/hello.md"),
+            "should list hello.md"
+        );
+        assert!(
+            result.contains("content/post/world.md"),
+            "should list world.md"
+        );
     }
 
     #[test]
@@ -1164,8 +1174,14 @@ mod tests {
         ];
         let result = format_content_list(&paths);
         assert!(result.contains("content/post/hello.md"));
-        assert!(!result.contains("schemas"), "non-content paths should be ignored");
-        assert!(!result.contains("templates"), "non-content paths should be ignored");
+        assert!(
+            !result.contains("schemas"),
+            "non-content paths should be ignored"
+        );
+        assert!(
+            !result.contains("templates"),
+            "non-content paths should be ignored"
+        );
     }
 
     // Suppresses dead_code warning for make_request helper used in future tests
@@ -1245,7 +1261,15 @@ mod tests {
             }
         ]);
 
-        let tool_names = ["get_content", "get_schema", "suggest", "get_suggestions", "suggest_body_edit", "suggest_ned", "list_content"];
+        let tool_names = [
+            "get_content",
+            "get_schema",
+            "suggest",
+            "get_suggestions",
+            "suggest_body_edit",
+            "suggest_ned",
+            "list_content",
+        ];
         for name in tool_names {
             let tool = tools
                 .as_array()
@@ -1253,10 +1277,11 @@ mod tests {
                 .iter()
                 .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
                 .unwrap_or_else(|| panic!("tool '{name}' missing"));
-            let has_site = tool
-                .pointer("/inputSchema/properties/site")
-                .is_some();
-            assert!(has_site, "tool '{name}' is missing 'site' property in inputSchema");
+            let has_site = tool.pointer("/inputSchema/properties/site").is_some();
+            assert!(
+                has_site,
+                "tool '{name}' is missing 'site' property in inputSchema"
+            );
         }
     }
 
@@ -1270,18 +1295,29 @@ mod tests {
         let text_a = format_content_list(&paths_a);
         let text_b = format_content_list(&paths_b);
 
-        assert!(text_a.contains("alpha.md"), "site A should list alpha.md, got: {text_a}");
-        assert!(!text_a.contains("beta.md"), "site A should not list beta.md");
-        assert!(text_b.contains("beta.md"), "site B should list beta.md, got: {text_b}");
-        assert!(!text_b.contains("alpha.md"), "site B should not list alpha.md");
+        assert!(
+            text_a.contains("alpha.md"),
+            "site A should list alpha.md, got: {text_a}"
+        );
+        assert!(
+            !text_a.contains("beta.md"),
+            "site A should not list beta.md"
+        );
+        assert!(
+            text_b.contains("beta.md"),
+            "site B should list beta.md, got: {text_b}"
+        );
+        assert!(
+            !text_b.contains("alpha.md"),
+            "site B should not list alpha.md"
+        );
     }
 
     // ── lower_suggest_args tests ──────────────────────────────────────────────
 
     #[test]
     fn lower_suggest_args_produces_correct_selection_and_mutation() {
-        let (selection, mutation) =
-            lower_suggest_args("content/post/x.md", "title", "Hello");
+        let (selection, mutation) = lower_suggest_args("content/post/x.md", "title", "Hello");
         assert_eq!(
             selection,
             r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/x.md") "title")))"#
@@ -1343,8 +1379,11 @@ mod tests {
     #[test]
     fn lower_body_edit_args_escapes_double_quotes_in_file() {
         // A file path containing a double-quote must be escaped in the selection.
-        let (selection, mutation) =
-            lower_body_edit_args(r#"content/post/say "hi".md"#, r#"search "x""#, r#"replace "y""#);
+        let (selection, mutation) = lower_body_edit_args(
+            r#"content/post/say "hi".md"#,
+            r#"search "x""#,
+            r#"replace "y""#,
+        );
         // File must have escaped double-quotes in the selection string.
         assert!(
             selection.contains(r#"\"hi\""#),
@@ -1397,7 +1436,8 @@ mod tests {
             id: editorial_types::SuggestionId::from("sug-test-id".to_string()),
             author,
             file: editorial_types::ContentPath::parse("content/post/hello.md").expect("valid"),
-            selection: "(ned/slot (ned/doc-by-path \"content/post/hello.md\") \"title\")".to_string(),
+            selection: "(ned/slot (ned/doc-by-path \"content/post/hello.md\") \"title\")"
+                .to_string(),
             mutation,
             workspace_hash: "abc123".to_string(),
             reason: "Test reason".to_string(),
@@ -1578,7 +1618,10 @@ mod tests {
     #[test]
     fn format_ned_suggestion_stale_unspecified_hints_exact_address() {
         let result = stale(editorial_types::StaleCause::Unspecified);
-        assert!(result.contains("[hint: re-suggest with an exact address]"), "{result}");
+        assert!(
+            result.contains("[hint: re-suggest with an exact address]"),
+            "{result}"
+        );
         assert!(result.ends_with(" (sug-test-id)"), "{result}");
     }
 
@@ -1618,8 +1661,12 @@ mod tests {
     fn format_ned_suggestion_stale_without_hint_for_other_causes() {
         for cause in [
             editorial_types::StaleCause::Unresolved,
-            editorial_types::StaleCause::InvalidValue { detail: "x".to_string() },
-            editorial_types::StaleCause::EvalError { detail: "y".to_string() },
+            editorial_types::StaleCause::InvalidValue {
+                detail: "x".to_string(),
+            },
+            editorial_types::StaleCause::EvalError {
+                detail: "y".to_string(),
+            },
         ] {
             let result = stale(cause);
             assert!(!result.contains("[hint:"), "{result}");
@@ -1688,15 +1735,25 @@ mod tests {
         let heading = NodeTree::element("heading")
             .with_attr("level", "2")
             .with_child(NodeTree::text("New section"));
-        assert_eq!(serde_json::to_string(&paragraph).unwrap(), NODE_TREE_PARAGRAPH_EXAMPLE);
-        assert_eq!(serde_json::to_string(&heading).unwrap(), NODE_TREE_HEADING_EXAMPLE);
+        assert_eq!(
+            serde_json::to_string(&paragraph).unwrap(),
+            NODE_TREE_PARAGRAPH_EXAMPLE
+        );
+        assert_eq!(
+            serde_json::to_string(&heading).unwrap(),
+            NODE_TREE_HEADING_EXAMPLE
+        );
     }
 
     #[test]
     fn suggest_ned_description_payload_example_decodes_to_blocks() {
-        let payload =
-            format!(r#"{{"InsertAfter": [{NODE_TREE_PARAGRAPH_EXAMPLE}, {NODE_TREE_HEADING_EXAMPLE}]}}"#);
-        assert!(suggest_ned_description().contains(&payload), "payload example not embedded");
+        let payload = format!(
+            r#"{{"InsertAfter": [{NODE_TREE_PARAGRAPH_EXAMPLE}, {NODE_TREE_HEADING_EXAMPLE}]}}"#
+        );
+        assert!(
+            suggest_ned_description().contains(&payload),
+            "payload example not embedded"
+        );
 
         let mutation: editorial_types::NedMutation =
             serde_json::from_str(&payload).expect("example mutation deserializes");
@@ -1705,8 +1762,9 @@ mod tests {
         };
         assert_eq!(trees.len(), 2);
         for tree in &trees {
-            node_store_bridge::content_bridge::tree_to_block(tree)
-                .unwrap_or_else(|e| panic!("example tree must decode to a block: {e}; tree: {tree:?}"));
+            node_store_bridge::content_bridge::tree_to_block(tree).unwrap_or_else(|e| {
+                panic!("example tree must decode to a block: {e}; tree: {tree:?}")
+            });
         }
     }
 
@@ -1810,11 +1868,16 @@ mod tests {
     fn build_e2e_site(tmp: &tempfile::TempDir) {
         // `suggest_body_edit` addresses body text only (ADR-056), so the
         // fixture has a real body after the separator.
-        build_e2e_site_with(tmp, TITLE_ONLY_SCHEMA, "# First Post\n\n----\n\nBody text here.\n");
+        build_e2e_site_with(
+            tmp,
+            TITLE_ONLY_SCHEMA,
+            "# First Post\n\n----\n\nBody text here.\n",
+        );
     }
 
     /// A schema with a single-heading `title` slot and a body.
-    const TITLE_ONLY_SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\n\n----\nBody.\n";
+    const TITLE_ONLY_SCHEMA: &str =
+        "# Post title {#title}\noccurs\n: exactly once\n\n----\nBody.\n";
 
     /// A schema with a `title` slot, a 1..3 paragraph `summary` slot and a body.
     const TITLE_SUMMARY_SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\n\nPost summary. {#summary}\noccurs\n: 1..3\n\n----\nBody.\n";
@@ -1845,17 +1908,14 @@ mod tests {
             let repo = site_repository::SiteRepository::builder()
                 .from_dir(&site_dir)
                 .build();
-            let cond = conductor::Conductor::with_repo(site_dir, repo)
-                .expect("conductor");
+            let cond = conductor::Conductor::with_repo(site_dir, repo).expect("conductor");
 
-            let rep_socket = nng::Socket::new(nng::Protocol::Rep0)
-                .expect("Rep0 socket");
+            let rep_socket = nng::Socket::new(nng::Protocol::Rep0).expect("Rep0 socket");
             rep_socket.listen(&url_clone).expect("listen");
 
             // Pub socket (required by socket_url protocol; MCP doesn't use it).
             let pub_url = format!("{url_clone}-pub");
-            let pub_socket = nng::Socket::new(nng::Protocol::Pub0)
-                .expect("Pub0 socket");
+            let pub_socket = nng::Socket::new(nng::Protocol::Pub0).expect("Pub0 socket");
             pub_socket.listen(&pub_url).expect("pub listen");
 
             loop {
@@ -2143,7 +2203,12 @@ mod tests {
         build_e2e_site(&tmp);
         let _url = start_conductor_server(tmp.path());
 
-        for bad in ["../outside.md", "/etc/passwd", "content/../../x.md", "schemas/post/item.md"] {
+        for bad in [
+            "../outside.md",
+            "/etc/passwd",
+            "content/../../x.md",
+            "schemas/post/item.md",
+        ] {
             let resp = call_tool(
                 tmp.path(),
                 "suggest_ned",
@@ -2171,7 +2236,11 @@ mod tests {
         let _url = start_conductor_server(tmp.path());
 
         for bad in ["../outside-marker.md", "/etc/passwd"] {
-            let resp = call_tool(tmp.path(), "get_content", serde_json::json!({ "file": bad }));
+            let resp = call_tool(
+                tmp.path(),
+                "get_content",
+                serde_json::json!({ "file": bad }),
+            );
             assert!(is_error(&resp), "{bad} must be an error");
             let text = extract_text(&resp);
             assert!(text.starts_with("Invalid file"), "{bad}: {text}");
@@ -2191,13 +2260,20 @@ mod tests {
             conductor::Response::NedSuggestions(s) => s,
             other => panic!("expected NedSuggestions, got {other:?}"),
         };
-        assert_eq!(suggestions.len(), 1, "expected one suggestion: {suggestions:?}");
+        assert_eq!(
+            suggestions.len(),
+            1,
+            "expected one suggestion: {suggestions:?}"
+        );
         let id = suggestions[0].id.clone();
 
         let accepted = client
             .send(&conductor::Command::AcceptNedSuggestion { id: id.clone() })
             .expect("accept");
-        assert!(matches!(accepted, conductor::Response::Ok), "accept: {accepted:?}");
+        assert!(
+            matches!(accepted, conductor::Response::Ok),
+            "accept: {accepted:?}"
+        );
 
         let after = match client
             .send(&conductor::Command::GetNedSuggestions {
@@ -2243,10 +2319,20 @@ mod tests {
         assert!(!is_error(&resp), "suggest failed: {}", extract_text(&resp));
 
         let saved = accept_only_suggestion_and_save(&url, tmp.path());
-        assert!(saved.contains("# A Better Title"), "title not changed: {saved:?}");
-        assert!(!saved.contains("First Post"), "old title remains: {saved:?}");
+        assert!(
+            saved.contains("# A Better Title"),
+            "title not changed: {saved:?}"
+        );
+        assert!(
+            !saved.contains("First Post"),
+            "old title remains: {saved:?}"
+        );
         assert!(saved.contains("Body text here."), "body changed: {saved:?}");
-        assert_eq!(saved.matches("A Better Title").count(), 1, "title duplicated: {saved:?}");
+        assert_eq!(
+            saved.matches("A Better Title").count(),
+            1,
+            "title duplicated: {saved:?}"
+        );
     }
 
     #[test]
@@ -2270,8 +2356,14 @@ mod tests {
             }),
         );
         let text = extract_text(&resp);
-        assert!(is_error(&resp), "multi-block slot must be refused; got: {text}");
-        assert!(text.contains("suggest_ned"), "error should point at suggest_ned; got: {text}");
+        assert!(
+            is_error(&resp),
+            "multi-block slot must be refused; got: {text}"
+        );
+        assert!(
+            text.contains("suggest_ned"),
+            "error should point at suggest_ned; got: {text}"
+        );
         // The conductor's own text is passed through verbatim.
         assert!(
             text.contains(&editorial_types::StaleCause::Ambiguous { matches: 2 }.to_string()),
@@ -2290,11 +2382,21 @@ mod tests {
         let url = start_conductor_server(tmp.path());
 
         let resp = body_edit(tmp.path(), "Hello", "Hi");
-        assert!(!is_error(&resp), "body edit failed: {}", extract_text(&resp));
+        assert!(
+            !is_error(&resp),
+            "body edit failed: {}",
+            extract_text(&resp)
+        );
 
         let saved = accept_only_suggestion_and_save(&url, tmp.path());
-        assert!(saved.contains("# Hello World"), "title must be unchanged: {saved:?}");
-        assert!(saved.contains("Hi reader, welcome."), "body not edited: {saved:?}");
+        assert!(
+            saved.contains("# Hello World"),
+            "title must be unchanged: {saved:?}"
+        );
+        assert!(
+            saved.contains("Hi reader, welcome."),
+            "body not edited: {saved:?}"
+        );
     }
 
     #[test]
@@ -2309,8 +2411,14 @@ mod tests {
 
         let resp = body_edit(tmp.path(), "cat", "dog");
         let text = extract_text(&resp);
-        assert!(is_error(&resp), "duplicate search must be refused; got: {text}");
-        assert!(text.contains("occur"), "error should mention occurrences; got: {text}");
+        assert!(
+            is_error(&resp),
+            "duplicate search must be refused; got: {text}"
+        );
+        assert!(
+            text.contains("occur"),
+            "error should mention occurrences; got: {text}"
+        );
         assert!(text.contains("exactly once"), "{text}");
     }
 
@@ -2326,7 +2434,10 @@ mod tests {
 
         let resp = body_edit(tmp.path(), "cat", "dog");
         let text = extract_text(&resp);
-        assert!(is_error(&resp), "search in two blocks must be refused; got: {text}");
+        assert!(
+            is_error(&resp),
+            "search in two blocks must be refused; got: {text}"
+        );
         assert!(
             text.contains(&editorial_types::StaleCause::Ambiguous { matches: 2 }.to_string()),
             "conductor error should be passed through; got: {text}"

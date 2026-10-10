@@ -50,7 +50,13 @@ pub fn ensure_trivia_element(store: &mut NodeStore, host: NodeId, attr: &str) ->
     let element_name = store.intern(TRIVIA_ELEMENT);
     let trivia = store.add_node(Node::Element(element_name));
     let name = store.intern(attr);
-    store.add_edge(host, Edge::Attribute { name, value: trivia });
+    store.add_edge(
+        host,
+        Edge::Attribute {
+            name,
+            value: trivia,
+        },
+    );
     trivia
 }
 
@@ -136,12 +142,32 @@ mod tests {
         add_comment(&mut store, a, ATTR_TRIVIA_BEFORE, "1");
         add_comment(&mut store, a, ATTR_TRIVIA_BEFORE, "2");
         add_comment(&mut store, b, ATTR_TRIVIA_BEFORE, "3");
-        assert_eq!(move_trivia(&mut store, a, ATTR_TRIVIA_BEFORE, b, ATTR_TRIVIA_BEFORE, Placement::At(0)), 2);
+        assert_eq!(
+            move_trivia(
+                &mut store,
+                a,
+                ATTR_TRIVIA_BEFORE,
+                b,
+                ATTR_TRIVIA_BEFORE,
+                Placement::At(0)
+            ),
+            2
+        );
         assert_eq!(texts(&store, b, ATTR_TRIVIA_BEFORE), vec!["1", "2", "3"]);
         assert!(texts(&store, a, ATTR_TRIVIA_BEFORE).is_empty());
         let body = element(&mut store, "body");
         add_comment(&mut store, body, ATTR_TRIVIA_END, "0");
-        move_trivia(&mut store, b, ATTR_TRIVIA_BEFORE, body, ATTR_TRIVIA_END, Placement::End);
-        assert_eq!(texts(&store, body, ATTR_TRIVIA_END), vec!["0", "1", "2", "3"]);
+        move_trivia(
+            &mut store,
+            b,
+            ATTR_TRIVIA_BEFORE,
+            body,
+            ATTR_TRIVIA_END,
+            Placement::End,
+        );
+        assert_eq!(
+            texts(&store, body, ATTR_TRIVIA_END),
+            vec!["0", "1", "2", "3"]
+        );
     }
 }

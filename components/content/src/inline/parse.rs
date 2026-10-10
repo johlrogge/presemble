@@ -2,19 +2,23 @@
 
 use pulldown_cmark::{Event, LinkType, Parser, Tag, TagEnd};
 
-use super::model::{
-    AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination,
-};
-use crate::parser::MARKDOWN_OPTIONS;
+use super::model::{AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination};
 use crate::Comment;
+use crate::parser::MARKDOWN_OPTIONS;
 
 /// An open emphasis, strong, link or image while events are read.
 enum Open {
     Root,
     Emph,
     Strong,
-    Link { destination: LinkDestination, title: Option<String> },
-    Image { source: AssetRef, title: Option<String> },
+    Link {
+        destination: LinkDestination,
+        title: Option<String>,
+    },
+    Image {
+        source: AssetRef,
+        title: Option<String>,
+    },
 }
 
 struct Frame {
@@ -38,7 +42,11 @@ pub fn inlines_from_events<'a>(
     events: impl IntoIterator<Item = Event<'a>>,
     ctx: InlineContext,
 ) -> Inlines {
-    let mut stack = vec![Frame { open: Open::Root, ctx, items: Vec::new() }];
+    let mut stack = vec![Frame {
+        open: Open::Root,
+        ctx,
+        items: Vec::new(),
+    }];
     for event in events {
         let top = stack.last_mut().expect("the root frame is never popped");
         match event {
@@ -55,25 +63,43 @@ pub fn inlines_from_events<'a>(
             }
             Event::Start(Tag::Emphasis) => {
                 let ctx = top.ctx;
-                stack.push(Frame { open: Open::Emph, ctx, items: Vec::new() });
+                stack.push(Frame {
+                    open: Open::Emph,
+                    ctx,
+                    items: Vec::new(),
+                });
             }
             Event::Start(Tag::Strong) => {
                 let ctx = top.ctx;
-                stack.push(Frame { open: Open::Strong, ctx, items: Vec::new() });
+                stack.push(Frame {
+                    open: Open::Strong,
+                    ctx,
+                    items: Vec::new(),
+                });
             }
-            Event::Start(Tag::Link { link_type, dest_url, title, .. }) => {
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                ..
+            }) => {
                 let destination = if link_type == LinkType::Email {
                     LinkDestination::new(format!("mailto:{dest_url}"))
                 } else {
                     LinkDestination::new(dest_url.to_string())
                 };
                 stack.push(Frame {
-                    open: Open::Link { destination, title: title_of(&title) },
+                    open: Open::Link {
+                        destination,
+                        title: title_of(&title),
+                    },
                     ctx: InlineContext::LinkText,
                     items: Vec::new(),
                 });
             }
-            Event::Start(Tag::Image { dest_url, title, .. }) => {
+            Event::Start(Tag::Image {
+                dest_url, title, ..
+            }) => {
                 stack.push(Frame {
                     open: Open::Image {
                         source: AssetRef::new(dest_url.to_string()),
@@ -99,15 +125,23 @@ pub fn inlines_from_events<'a>(
                     let node = match frame.open {
                         Open::Emph => Inline::Emph(children),
                         Open::Strong => Inline::Strong(children),
-                        Open::Link { destination, title } => {
-                            Inline::Link { destination, title, text: children }
-                        }
-                        Open::Image { source, title } => {
-                            Inline::Image { source, title, alt: children }
-                        }
+                        Open::Link { destination, title } => Inline::Link {
+                            destination,
+                            title,
+                            text: children,
+                        },
+                        Open::Image { source, title } => Inline::Image {
+                            source,
+                            title,
+                            alt: children,
+                        },
                         Open::Root => unreachable!("the root frame never closes"),
                     };
-                    stack.last_mut().expect("the root frame is never popped").items.push(node);
+                    stack
+                        .last_mut()
+                        .expect("the root frame is never popped")
+                        .items
+                        .push(node);
                 }
             }
             _ => {}
@@ -116,7 +150,11 @@ pub fn inlines_from_events<'a>(
     // Unclosed frames cannot come from pulldown; close them as plain content.
     while stack.len() > 1 {
         let frame = stack.pop().expect("more than the root");
-        stack.last_mut().expect("the root remains").items.extend(frame.items);
+        stack
+            .last_mut()
+            .expect("the root remains")
+            .items
+            .extend(frame.items);
     }
     let root = stack.pop().expect("the root frame");
     Inlines::new(root.items, root.ctx)
@@ -160,12 +198,18 @@ pub fn parse_inlines(source: &str, ctx: InlineContext) -> Result<Inlines, NotInl
             if events.is_empty() {
                 return Ok(Inlines::default());
             }
-            let is_paragraph_boundary =
-                |e: &Event<'_>| matches!(e, Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph));
+            let is_paragraph_boundary = |e: &Event<'_>| {
+                matches!(
+                    e,
+                    Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph)
+                )
+            };
             match events.as_slice() {
-                [Event::Start(Tag::Paragraph), inner @ .., Event::End(TagEnd::Paragraph)]
-                    if !inner.iter().any(is_paragraph_boundary) =>
-                {
+                [
+                    Event::Start(Tag::Paragraph),
+                    inner @ ..,
+                    Event::End(TagEnd::Paragraph),
+                ] if !inner.iter().any(is_paragraph_boundary) => {
                     Ok(inlines_from_events(inner.iter().cloned(), ctx))
                 }
                 _ => Err(err),
@@ -201,12 +245,18 @@ fn heading_content_events(source: &str) -> Option<Vec<Event<'static>>> {
         source,
     );
     let events: Vec<Event<'_>> = Parser::new_ext(&line, MARKDOWN_OPTIONS).collect();
-    let is_boundary =
-        |e: &Event<'_>| matches!(e, Event::Start(Tag::Heading { .. }) | Event::End(TagEnd::Heading(_)));
+    let is_boundary = |e: &Event<'_>| {
+        matches!(
+            e,
+            Event::Start(Tag::Heading { .. }) | Event::End(TagEnd::Heading(_))
+        )
+    };
     match events.as_slice() {
-        [Event::Start(Tag::Heading { .. }), inner @ .., Event::End(TagEnd::Heading(_))]
-            if !inner.iter().any(is_boundary) =>
-        {
+        [
+            Event::Start(Tag::Heading { .. }),
+            inner @ ..,
+            Event::End(TagEnd::Heading(_)),
+        ] if !inner.iter().any(is_boundary) => {
             Some(inner.iter().cloned().map(Event::into_static).collect())
         }
         _ => None,
@@ -292,8 +342,10 @@ fn single_body_cell(wrapper: &str) -> Option<Vec<Event<'_>>> {
         }
     }
     let rest: Vec<_> = events.map(|(event, _)| event).collect();
-    let closes_row =
-        matches!(rest.as_slice(), [Event::End(TagEnd::TableRow), Event::End(TagEnd::Table)]);
+    let closes_row = matches!(
+        rest.as_slice(),
+        [Event::End(TagEnd::TableRow), Event::End(TagEnd::Table)]
+    );
     let runs_to_last_pipe = cell_end.is_some_and(|end| wrapper[end..].trim() == "|");
     (closes_row && runs_to_last_pipe).then_some(cell)
 }
@@ -309,7 +361,10 @@ mod tests {
     }
 
     fn para(src: &str) -> Vec<Inline> {
-        parse_inlines(src, InlineContext::Paragraph).expect("inline content").as_slice().to_vec()
+        parse_inlines(src, InlineContext::Paragraph)
+            .expect("inline content")
+            .as_slice()
+            .to_vec()
     }
 
     fn txt(src: &str, ctx: InlineContext) -> Inlines {
@@ -318,9 +373,8 @@ mod tests {
 
     #[test]
     fn parse_inlines_reads_every_inline_kind() {
-        let got = para(
-            "*e* **s** `c`\\\nnext [l](/x \"t\") ![a](i.png \"T\") <b>x</b> <!-- c --> end",
-        );
+        let got =
+            para("*e* **s** `c`\\\nnext [l](/x \"t\") ![a](i.png \"T\") <b>x</b> <!-- c --> end");
         let expected = vec![
             Inline::Emph(txt("e", InlineContext::Paragraph)),
             t(" "),
@@ -415,7 +469,9 @@ mod tests {
     #[test]
     fn image_alt_is_inline_content() {
         let got = para("![a *b* `c`](i.png)");
-        let Some(Inline::Image { alt, .. }) = got.first() else { panic!("{got:?}") };
+        let Some(Inline::Image { alt, .. }) = got.first() else {
+            panic!("{got:?}")
+        };
         assert_eq!(
             alt.as_slice(),
             &[
@@ -427,7 +483,9 @@ mod tests {
         );
         // An image or a link inside alt text is replaced by its content.
         let got = para("![a ![b](y) [l](u)](x)");
-        let Some(Inline::Image { alt, .. }) = got.first() else { panic!("{got:?}") };
+        let Some(Inline::Image { alt, .. }) = got.first() else {
+            panic!("{got:?}")
+        };
         assert_eq!(alt.as_slice(), &[t("a b l")]);
     }
 
@@ -446,7 +504,9 @@ mod tests {
         for src in ["see [b](c)", "*[b](c)* x", "[a [b](c)](d)"] {
             assert_eq!(
                 parse_inlines(src, InlineContext::LinkText),
-                Err(NotInlineContent { ctx: InlineContext::LinkText }),
+                Err(NotInlineContent {
+                    ctx: InlineContext::LinkText
+                }),
                 "{src:?}"
             );
         }
@@ -456,7 +516,10 @@ mod tests {
         // Images are fine in link text.
         let got = parse_inlines("a ![i](p)", InlineContext::LinkText).unwrap();
         assert!(!contains_link(got.as_slice()));
-        assert!(matches!(got.as_slice(), [Inline::Text(_), Inline::Image { .. }]), "{got:?}");
+        assert!(
+            matches!(got.as_slice(), [Inline::Text(_), Inline::Image { .. }]),
+            "{got:?}"
+        );
         // Constructing one directly flattens it.
         let link = Inline::Link {
             destination: LinkDestination::new("/x"),
@@ -469,31 +532,56 @@ mod tests {
 
     #[test]
     fn paragraph_context_rejects_block_syntax() {
-        for src in ["- x", "1. x", "a\n\nb", "# h", "> q", "```\ncode\n```", "    indented", "| a |\n| - |"] {
+        for src in [
+            "- x",
+            "1. x",
+            "a\n\nb",
+            "# h",
+            "> q",
+            "```\ncode\n```",
+            "    indented",
+            "| a |\n| - |",
+        ] {
             assert_eq!(
                 parse_inlines(src, InlineContext::Paragraph),
-                Err(NotInlineContent { ctx: InlineContext::Paragraph }),
+                Err(NotInlineContent {
+                    ctx: InlineContext::Paragraph
+                }),
                 "{src:?}"
             );
         }
         // One paragraph, soft breaks and all, and nothing at all, are inline content.
         assert_eq!(
-            parse_inlines("a\nb", InlineContext::Paragraph).unwrap().as_slice(),
+            parse_inlines("a\nb", InlineContext::Paragraph)
+                .unwrap()
+                .as_slice(),
             &[t("a\nb")]
         );
-        assert!(parse_inlines("", InlineContext::Paragraph).unwrap().is_empty());
+        assert!(
+            parse_inlines("", InlineContext::Paragraph)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn contexts_wrap_their_source() {
         // Heading: the H1 line.
         assert_eq!(
-            parse_inlines("a *b*\nc", InlineContext::Heading).unwrap().as_slice(),
-            &[t("a "), Inline::Emph(txt("b", InlineContext::Heading)), t(" c")]
+            parse_inlines("a *b*\nc", InlineContext::Heading)
+                .unwrap()
+                .as_slice(),
+            &[
+                t("a "),
+                Inline::Emph(txt("b", InlineContext::Heading)),
+                t(" c")
+            ]
         );
         // Cell: the table wrapper; `\|` is a pipe.
         assert_eq!(
-            parse_inlines("`a\\|b` x", InlineContext::Cell).unwrap().as_slice(),
+            parse_inlines("`a\\|b` x", InlineContext::Cell)
+                .unwrap()
+                .as_slice(),
             &[Inline::Code("a|b".into()), t(" x")]
         );
         // Sources that do not read as exactly one element are refused, not rewritten.
@@ -503,8 +591,16 @@ mod tests {
             ("a | b", InlineContext::Cell),
             ("a\nb", InlineContext::Cell),
         ] {
-            assert_eq!(parse_inlines(src, ctx), Err(NotInlineContent { ctx }), "{src:?} in {ctx:?}");
+            assert_eq!(
+                parse_inlines(src, ctx),
+                Err(NotInlineContent { ctx }),
+                "{src:?} in {ctx:?}"
+            );
         }
-        assert!(parse_inlines("", InlineContext::Paragraph).unwrap().is_empty());
+        assert!(
+            parse_inlines("", InlineContext::Paragraph)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

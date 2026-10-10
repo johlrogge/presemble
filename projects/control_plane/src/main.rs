@@ -25,10 +25,9 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/var/lib/presemble/registry.json"));
 
-    let registry = site_registry::SiteRegistry::new(
-        site_registry::FileSiteStore::new(&registry_path),
-    )
-    .expect("failed to initialise site registry");
+    let registry =
+        site_registry::SiteRegistry::new(site_registry::FileSiteStore::new(&registry_path))
+            .expect("failed to initialise site registry");
 
     // ── Session key ───────────────────────────────────────────────────────────
     // This single validated key is the ONLY source of the signing key.  It is fed to
@@ -57,8 +56,8 @@ async fn main() {
 
     // ── Bind address ──────────────────────────────────────────────────────────
 
-    let listen_addr = std::env::var("PRESEMBLE_LISTEN_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let listen_addr =
+        std::env::var("PRESEMBLE_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
     // ── Real provisioning seams ───────────────────────────────────────────────
 
@@ -68,8 +67,8 @@ async fn main() {
     let health: Arc<dyn provisioning::HealthChecker> =
         Arc::new(provisioning::HttpHealthChecker::new());
 
-    let base_domain = std::env::var("PRESEMBLE_BASE_DOMAIN")
-        .unwrap_or_else(|_| "presemble.pub".to_string());
+    let base_domain =
+        std::env::var("PRESEMBLE_BASE_DOMAIN").unwrap_or_else(|_| "presemble.pub".to_string());
 
     let router: Arc<dyn provisioning::CaddyRouter> =
         Arc::new(provisioning::HttpCaddyRouter::new(base_domain.clone()));
@@ -92,7 +91,9 @@ async fn main() {
 
     // ── Accounts stores ───────────────────────────────────────────────────────
 
-    let sessions = Arc::new(accounts::MagicLinkSessionStore::with_key(session_key.clone()));
+    let sessions = Arc::new(accounts::MagicLinkSessionStore::with_key(
+        session_key.clone(),
+    ));
     // LoginTokenStore's `consumed` set is per-process memory; the control plane
     // must remain single-instance unless this is moved to a shared store (ADR-055).
     let login_tokens = accounts::LoginTokenStore::with_key(session_key);
@@ -126,14 +127,10 @@ async fn main() {
             std::process::exit(1);
         });
 
-    eprintln!(
-        "control_plane listening on {listen_addr} (public: {public_base_url})"
-    );
+    eprintln!("control_plane listening on {listen_addr} (public: {public_base_url})");
 
-    axum::serve(listener, app)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("error: server error: {e}");
-            std::process::exit(1);
-        });
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        eprintln!("error: server error: {e}");
+        std::process::exit(1);
+    });
 }

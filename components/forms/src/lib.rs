@@ -95,11 +95,7 @@ impl std::fmt::Display for Form {
                 namespace: None,
                 name,
             } => write!(f, ":{name}"),
-            Form::Str(s) => write!(
-                f,
-                "\"{}\"",
-                s.replace('\\', "\\\\").replace('"', "\\\"")
-            ),
+            Form::Str(s) => write!(f, "\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
             Form::Integer(n) => write!(f, "{n}"),
             Form::Bool(b) => write!(f, "{b}"),
             Form::Nil => write!(f, "nil"),
@@ -213,11 +209,7 @@ mod tests {
 
     #[test]
     fn display_vector() {
-        let v = Form::Vector(vec![
-            Form::Integer(1),
-            Form::Integer(2),
-            Form::Integer(3),
-        ]);
+        let v = Form::Vector(vec![Form::Integer(1), Form::Integer(2), Form::Integer(3)]);
         assert_eq!(v.to_string(), "[1 2 3]");
     }
 
@@ -307,10 +299,7 @@ mod tests {
                     name: "desc".into(),
                 },
             ]),
-            Form::List(vec![
-                Form::Symbol("take".into()),
-                Form::Integer(3),
-            ]),
+            Form::List(vec![Form::Symbol("take".into()), Form::Integer(3)]),
         ]);
         assert_eq!(
             form.to_string(),

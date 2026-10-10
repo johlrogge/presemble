@@ -18,7 +18,9 @@
 //! as markdown (ADR-059 §7). There is no repair: malformed inline structure
 //! must be impossible to create, so it is refused, never fixed afterwards.
 
-use crate::access::{add_child_element, add_child_text, add_text_attr, find_attr_text, make_element};
+use crate::access::{
+    add_child_element, add_child_text, add_text_attr, find_attr_text, make_element,
+};
 use crate::block::{BlockDecodeError, node_to_tree, tree_contains_existing};
 use content::Comment;
 use content::inline::{AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination};
@@ -58,7 +60,11 @@ pub fn inlines_to_store(store: &mut NodeStore, parent: NodeId, inlines: &Inlines
             Inline::LineBreak => {
                 add_child_element(store, parent, LINE_BREAK);
             }
-            Inline::Link { destination, title, text } => {
+            Inline::Link {
+                destination,
+                title,
+                text,
+            } => {
                 let node = add_child_element(store, parent, LINK);
                 add_text_attr(store, node, "href", destination.as_str());
                 if let Some(title) = title {
@@ -108,11 +114,20 @@ impl Place {
     }
 
     fn in_link(self) -> Place {
-        Place { ctx: InlineContext::LinkText, links: false, ..self }
+        Place {
+            ctx: InlineContext::LinkText,
+            links: false,
+            ..self
+        }
     }
 
     fn in_image(self) -> Place {
-        Place { ctx: InlineContext::Alt, links: false, images: false, ..self }
+        Place {
+            ctx: InlineContext::Alt,
+            links: false,
+            images: false,
+            ..self
+        }
     }
 }
 
@@ -133,12 +148,17 @@ fn require_leaf(store: &NodeStore, node: NodeId, kind: &str) -> Result<(), Block
     if store.children(node).is_empty() {
         Ok(())
     } else {
-        Err(BlockDecodeError::NonTextChild { kind: kind.to_string() })
+        Err(BlockDecodeError::NonTextChild {
+            kind: kind.to_string(),
+        })
     }
 }
 
 fn not_allowed(kind: &str, place: Place) -> BlockDecodeError {
-    BlockDecodeError::InlineNotAllowed { kind: kind.to_string(), ctx: place.ctx }
+    BlockDecodeError::InlineNotAllowed {
+        kind: kind.to_string(),
+        ctx: place.ctx,
+    }
 }
 
 /// The children of `container` as raw items, nested runs already built.
@@ -170,7 +190,11 @@ fn decode_element(
     match kind {
         EMPH | STRONG => {
             let content = Inlines::new(decode_children(store, node, place)?, place.ctx);
-            Ok(if kind == EMPH { Inline::Emph(content) } else { Inline::Strong(content) })
+            Ok(if kind == EMPH {
+                Inline::Emph(content)
+            } else {
+                Inline::Strong(content)
+            })
         }
         CODE => {
             let children = store.children(node);
@@ -182,7 +206,9 @@ fn decode_element(
             };
             match store.get(*only) {
                 Some(Node::Text(s)) => Ok(Inline::Code(s.clone())),
-                _ => Err(BlockDecodeError::NonTextChild { kind: kind.to_string() }),
+                _ => Err(BlockDecodeError::NonTextChild {
+                    kind: kind.to_string(),
+                }),
             }
         }
         LINE_BREAK => {
@@ -236,13 +262,19 @@ fn decode_element(
                 .map(Inline::Comment)
                 .ok_or(BlockDecodeError::InvalidComment(source))
         }
-        other => Err(BlockDecodeError::UnknownInline { kind: other.to_string() }),
+        other => Err(BlockDecodeError::UnknownInline {
+            kind: other.to_string(),
+        }),
     }
 }
 
 /// The children of `node` as trees, for comparing two encodings.
 fn child_trees(store: &NodeStore, node: NodeId) -> Vec<NodeTree> {
-    store.children(node).into_iter().map(|c| node_to_tree(store, c)).collect()
+    store
+        .children(node)
+        .into_iter()
+        .map(|c| node_to_tree(store, c))
+        .collect()
 }
 
 /// What [`inlines_to_store`] writes for `inlines`, as trees. This is also the

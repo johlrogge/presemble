@@ -84,9 +84,15 @@ pub fn parse_schema_url(url: &str) -> Option<(String, SchemaKind)> {
 
 #[derive(Debug)]
 pub enum FileKind {
-    Content { schema_stem: SchemaStem },
-    Template { schema_stem: SchemaStem },
-    Schema { stem: SchemaStem },
+    Content {
+        schema_stem: SchemaStem,
+    },
+    Template {
+        schema_stem: SchemaStem,
+    },
+    Schema {
+        stem: SchemaStem,
+    },
     /// A CSS (or future SCSS) stylesheet under `assets/`
     Stylesheet,
     /// A non-stylesheet asset under `assets/` (image, font, video, etc.)
@@ -130,13 +136,21 @@ impl SiteIndex {
                 // content/file.md → root content, stem ""
                 // content/{stem}/file.md → stem is directory name
                 if let Some(second_component) = components.next() {
-                    let second_str = second_component.as_os_str().to_str().unwrap_or("").to_string();
+                    let second_str = second_component
+                        .as_os_str()
+                        .to_str()
+                        .unwrap_or("")
+                        .to_string();
                     if components.next().is_some() {
                         // content/{stem}/file.md — stem is the directory name (second_str)
-                        FileKind::Content { schema_stem: SchemaStem::new(second_str) }
+                        FileKind::Content {
+                            schema_stem: SchemaStem::new(second_str),
+                        }
                     } else {
                         // content/file.md — root-level file, stem ""
-                        FileKind::Content { schema_stem: SchemaStem::new("") }
+                        FileKind::Content {
+                            schema_stem: SchemaStem::new(""),
+                        }
                     }
                 } else {
                     FileKind::Unknown
@@ -150,9 +164,12 @@ impl SiteIndex {
                     if let Some(second_component) = components.next() {
                         // Directory-based: templates/{stem}/item.html — stem is the directory
                         let file_path = Path::new(second_component.as_os_str());
-                        let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        let file_stem =
+                            file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                         if file_stem == "item" {
-                            FileKind::Template { schema_stem: SchemaStem::new(first_str) }
+                            FileKind::Template {
+                                schema_stem: SchemaStem::new(first_str),
+                            }
                         } else {
                             // Partial template inside a type directory — not a type template
                             FileKind::Unknown
@@ -171,7 +188,9 @@ impl SiteIndex {
                         } else {
                             file_stem
                         };
-                        FileKind::Template { schema_stem: SchemaStem::new(schema_stem) }
+                        FileKind::Template {
+                            schema_stem: SchemaStem::new(schema_stem),
+                        }
                     }
                 } else {
                     FileKind::Unknown
@@ -185,9 +204,12 @@ impl SiteIndex {
                     if let Some(second_component) = components.next() {
                         // Directory-based: schemas/{stem}/item.md — stem is the directory
                         let file_path = Path::new(second_component.as_os_str());
-                        let file_stem = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        let file_stem =
+                            file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                         if file_stem == "item" {
-                            FileKind::Schema { stem: SchemaStem::new(first_str) }
+                            FileKind::Schema {
+                                stem: SchemaStem::new(first_str),
+                            }
                         } else {
                             FileKind::Unknown
                         }
@@ -205,7 +227,9 @@ impl SiteIndex {
                         } else {
                             file_stem
                         };
-                        FileKind::Schema { stem: SchemaStem::new(stem) }
+                        FileKind::Schema {
+                            stem: SchemaStem::new(stem),
+                        }
                     }
                 } else {
                     FileKind::Unknown
@@ -423,9 +447,9 @@ impl SiteIndex {
             // Load the grammar and look for TypeLink constraints
             if let Some(grammar) = self.load_grammar(stem) {
                 let references_target = grammar.preamble.iter().any(|slot| {
-                    slot.constraints.iter().any(|c| {
-                        matches!(c, schema::Constraint::TypeLink(name) if name == target_stem)
-                    })
+                    slot.constraints.iter().any(
+                        |c| matches!(c, schema::Constraint::TypeLink(name) if name == target_stem),
+                    )
                 });
                 if references_target {
                     result.push(stem.clone());
@@ -442,7 +466,11 @@ impl SiteIndex {
 /// e.g. `presemble build site/` → `output/site/`
 pub fn output_dir(site_dir: &std::path::Path) -> std::path::PathBuf {
     let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
-    site_dir.parent().unwrap_or(site_dir).join("output").join(name)
+    site_dir
+        .parent()
+        .unwrap_or(site_dir)
+        .join("output")
+        .join(name)
 }
 
 /// Where the editorial build (`presemble build --editorial`) writes:
@@ -451,7 +479,11 @@ pub fn output_dir(site_dir: &std::path::Path) -> std::path::PathBuf {
 /// deployed; editorial output has unpublished pages and editor-only attributes.
 pub fn editorial_output_dir(site_dir: &std::path::Path) -> std::path::PathBuf {
     let name = site_dir.file_name().unwrap_or(std::ffi::OsStr::new("site"));
-    site_dir.parent().unwrap_or(site_dir).join("output-editorial").join(name)
+    site_dir
+        .parent()
+        .unwrap_or(site_dir)
+        .join("output-editorial")
+        .join(name)
 }
 
 /// Derive the clean URL path for a content page given its schema stem and slug.
@@ -460,7 +492,11 @@ pub fn editorial_output_dir(site_dir: &std::path::Path) -> std::path::PathBuf {
 /// - Named collection: index -> "/{stem}/", other -> "/{stem}/{slug}"
 pub fn url_for_stem_slug(stem: &str, slug: &str) -> String {
     if stem.is_empty() {
-        if slug == "index" { "/".to_string() } else { format!("/{slug}") }
+        if slug == "index" {
+            "/".to_string()
+        } else {
+            format!("/{slug}")
+        }
     } else if slug == "index" {
         format!("/{stem}/")
     } else {
@@ -469,7 +505,11 @@ pub fn url_for_stem_slug(stem: &str, slug: &str) -> String {
 }
 
 /// Derive the output file path for a content page.
-pub fn output_path_for_stem_slug(output_dir: &std::path::Path, stem: &str, slug: &str) -> std::path::PathBuf {
+pub fn output_path_for_stem_slug(
+    output_dir: &std::path::Path,
+    stem: &str,
+    slug: &str,
+) -> std::path::PathBuf {
     if stem.is_empty() {
         if slug == "index" {
             output_dir.join("index.html")
@@ -489,7 +529,11 @@ pub fn output_path_for_stem_slug(output_dir: &std::path::Path, stem: &str, slug:
 /// (or just "index" for the root collection).
 pub fn schema_cache_key(stem: &str, slug: &str) -> String {
     if slug == "index" {
-        if stem.is_empty() { "index".to_string() } else { format!("{stem}/index") }
+        if stem.is_empty() {
+            "index".to_string()
+        } else {
+            format!("{stem}/index")
+        }
     } else {
         stem.to_string()
     }
@@ -522,42 +566,60 @@ mod tests {
 
     #[test]
     fn parse_schema_url_root_index() {
-        assert_eq!(parse_schema_url("/_schema/index"), Some((String::new(), SchemaKind::Index)));
+        assert_eq!(
+            parse_schema_url("/_schema/index"),
+            Some((String::new(), SchemaKind::Index))
+        );
     }
 
     #[test]
     fn parse_schema_url_collection_index() {
-        assert_eq!(parse_schema_url("/_schema/post/index"), Some(("post".to_string(), SchemaKind::Index)));
+        assert_eq!(
+            parse_schema_url("/_schema/post/index"),
+            Some(("post".to_string(), SchemaKind::Index))
+        );
     }
 
     #[test]
     fn parse_schema_url_item() {
-        assert_eq!(parse_schema_url("/_schema/post/item"), Some(("post".to_string(), SchemaKind::Item)));
+        assert_eq!(
+            parse_schema_url("/_schema/post/item"),
+            Some(("post".to_string(), SchemaKind::Item))
+        );
     }
 
     #[test]
     fn parse_schema_url_with_trailing_slash() {
-        assert_eq!(parse_schema_url("/_schema/post/item/"), Some(("post".to_string(), SchemaKind::Item)));
+        assert_eq!(
+            parse_schema_url("/_schema/post/item/"),
+            Some(("post".to_string(), SchemaKind::Item))
+        );
     }
 
     #[test]
     fn parse_schema_url_not_schema_url_returns_none() {
         assert_eq!(parse_schema_url("/post/foo"), None);
-        assert_eq!(parse_schema_url("/_schema/foo/bar/baz"), None);  // wrong shape
+        assert_eq!(parse_schema_url("/_schema/foo/bar/baz"), None); // wrong shape
         assert_eq!(parse_schema_url("/_schema/post/unknown"), None); // wrong kind
     }
 
     #[test]
     fn parse_schema_url_empty_returns_none() {
         assert_eq!(parse_schema_url(""), None);
-        assert_eq!(parse_schema_url("/_schema"), None);   // missing kind
-        assert_eq!(parse_schema_url("/_schema/"), None);  // empty kind segment
+        assert_eq!(parse_schema_url("/_schema"), None); // missing kind
+        assert_eq!(parse_schema_url("/_schema/"), None); // empty kind segment
     }
 
     #[test]
     fn parse_schema_url_index_with_trailing_slash() {
-        assert_eq!(parse_schema_url("/_schema/index/"), Some((String::new(), SchemaKind::Index)));
-        assert_eq!(parse_schema_url("/_schema/post/index/"), Some(("post".to_string(), SchemaKind::Index)));
+        assert_eq!(
+            parse_schema_url("/_schema/index/"),
+            Some((String::new(), SchemaKind::Index))
+        );
+        assert_eq!(
+            parse_schema_url("/_schema/post/index/"),
+            Some(("post".to_string(), SchemaKind::Index))
+        );
     }
 
     // ---
@@ -585,25 +647,37 @@ mod tests {
     #[test]
     fn output_path_for_stem_slug_root_index() {
         let dir = std::path::Path::new("/out");
-        assert_eq!(output_path_for_stem_slug(dir, "", "index"), std::path::PathBuf::from("/out/index.html"));
+        assert_eq!(
+            output_path_for_stem_slug(dir, "", "index"),
+            std::path::PathBuf::from("/out/index.html")
+        );
     }
 
     #[test]
     fn output_path_for_stem_slug_root_non_index() {
         let dir = std::path::Path::new("/out");
-        assert_eq!(output_path_for_stem_slug(dir, "", "about"), std::path::PathBuf::from("/out/about/index.html"));
+        assert_eq!(
+            output_path_for_stem_slug(dir, "", "about"),
+            std::path::PathBuf::from("/out/about/index.html")
+        );
     }
 
     #[test]
     fn output_path_for_stem_slug_named_index() {
         let dir = std::path::Path::new("/out");
-        assert_eq!(output_path_for_stem_slug(dir, "post", "index"), std::path::PathBuf::from("/out/post/index.html"));
+        assert_eq!(
+            output_path_for_stem_slug(dir, "post", "index"),
+            std::path::PathBuf::from("/out/post/index.html")
+        );
     }
 
     #[test]
     fn output_path_for_stem_slug_named_non_index() {
         let dir = std::path::Path::new("/out");
-        assert_eq!(output_path_for_stem_slug(dir, "post", "hello"), std::path::PathBuf::from("/out/post/hello/index.html"));
+        assert_eq!(
+            output_path_for_stem_slug(dir, "post", "hello"),
+            std::path::PathBuf::from("/out/post/hello/index.html")
+        );
     }
 
     #[test]
@@ -640,7 +714,10 @@ mod tests {
     fn output_dir_computes_correct_path() {
         let site_dir = std::path::Path::new("/projects/mysite/site");
         let out = super::output_dir(site_dir);
-        assert_eq!(out, std::path::PathBuf::from("/projects/mysite/output/site"));
+        assert_eq!(
+            out,
+            std::path::PathBuf::from("/projects/mysite/output/site")
+        );
     }
 
     #[test]
@@ -737,13 +814,23 @@ mod tests {
     fn schema_stems_discovers_all_schemas() {
         let idx = index();
         let stems = idx.schema_stems();
-        assert!(stems.contains(&"article".to_string()), "should find article stem");
-        assert!(stems.contains(&"author".to_string()), "should find author stem");
-        assert_eq!(stems, {
-            let mut s = stems.clone();
-            s.sort();
-            s
-        }, "stems should be sorted");
+        assert!(
+            stems.contains(&"article".to_string()),
+            "should find article stem"
+        );
+        assert!(
+            stems.contains(&"author".to_string()),
+            "should find author stem"
+        );
+        assert_eq!(
+            stems,
+            {
+                let mut s = stems.clone();
+                s.sort();
+                s
+            },
+            "stems should be sorted"
+        );
     }
 
     #[test]
@@ -752,7 +839,9 @@ mod tests {
         let files = idx.content_files("article");
         assert!(!files.is_empty(), "should find article content files");
         assert!(
-            files.iter().any(|p| p.file_name().and_then(|n| n.to_str()) == Some("hello-world.md")),
+            files
+                .iter()
+                .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("hello-world.md")),
             "should find hello-world.md"
         );
         // All returned files should have .md extension
@@ -765,7 +854,10 @@ mod tests {
     fn sample_url_for_stem_returns_some_for_existing_content() {
         let idx = index();
         let url = idx.sample_url_for_stem("article");
-        assert!(url.is_some(), "should return a URL when content files exist");
+        assert!(
+            url.is_some(),
+            "should return a URL when content files exist"
+        );
         let url = url.unwrap();
         // URL should be root-relative and contain the stem
         assert!(
@@ -779,7 +871,10 @@ mod tests {
         // Use a stem that has no content files in the fixture.
         let idx = index();
         let url = idx.sample_url_for_stem("nonexistent_stem_xyz");
-        assert!(url.is_none(), "should return None when no content files exist");
+        assert!(
+            url.is_none(),
+            "should return None when no content files exist"
+        );
     }
 
     #[test]
@@ -801,7 +896,9 @@ mod tests {
     fn dependents_of_schema_returns_schema_content_and_template() {
         let idx = index();
         let deps = idx.dependents_of_schema("article");
-        let has_schema = deps.iter().any(|f| matches!(&f.kind, FileKind::Schema { stem } if stem.as_str() == "article"));
+        let has_schema = deps
+            .iter()
+            .any(|f| matches!(&f.kind, FileKind::Schema { stem } if stem.as_str() == "article"));
         let has_content = deps.iter().any(|f| matches!(&f.kind, FileKind::Content { schema_stem } if schema_stem.as_str() == "article"));
         let has_template = deps.iter().any(|f| matches!(&f.kind, FileKind::Template { schema_stem } if schema_stem.as_str() == "article"));
         assert!(has_schema, "should include schema file");
@@ -985,7 +1082,10 @@ mod tests {
         let including = idx.schemas_including("author");
         let mut sorted = including.clone();
         sorted.sort();
-        assert_eq!(including, sorted, "schemas_including should return sorted results");
+        assert_eq!(
+            including, sorted,
+            "schemas_including should return sorted results"
+        );
     }
 
     #[test]

@@ -26,7 +26,9 @@ impl std::fmt::Display for SearchReplaceError {
             SearchReplaceError::SpansAtom => {
                 f.write_str("the match contains an image, raw HTML or a hard break")
             }
-            SearchReplaceError::NotWritable => f.write_str("the result cannot be written as markdown"),
+            SearchReplaceError::NotWritable => {
+                f.write_str("the result cannot be written as markdown")
+            }
         }
     }
 }
@@ -56,7 +58,10 @@ pub(super) fn search_replace(
     let starts: Vec<usize> = if search.is_empty() {
         Vec::new()
     } else {
-        text.char_indices().map(|(at, _)| at).filter(|&at| text[at..].starts_with(search)).collect()
+        text.char_indices()
+            .map(|(at, _)| at)
+            .filter(|&at| text[at..].starts_with(search))
+            .collect()
     };
     let from = match starts.as_slice() {
         [] => return Err(SearchReplaceError::NotFound),
@@ -65,8 +70,11 @@ pub(super) fn search_replace(
     };
     let to = from + search.len();
 
-    let covered: Vec<&EditSegment> =
-        edit.segments().iter().filter(|s| s.range.start < to && s.range.end > from).collect();
+    let covered: Vec<&EditSegment> = edit
+        .segments()
+        .iter()
+        .filter(|s| s.range.start < to && s.range.end > from)
+        .collect();
     if covered.iter().any(|s| s.kind == EditKind::Atom) {
         return Err(SearchReplaceError::SpansAtom);
     }
@@ -86,13 +94,19 @@ pub(super) fn search_replace(
 
     let items = rewrite(inlines.as_slice(), &new_text, &mut Vec::new());
     let result = Inlines::new(items, ctx);
-    result.check_writable(ctx).map_err(|_| SearchReplaceError::NotWritable)?;
+    result
+        .check_writable(ctx)
+        .map_err(|_| SearchReplaceError::NotWritable)?;
     Ok(result)
 }
 
 /// `items` with the text of the nodes in `new_text` (by path) replaced. Empty
 /// text and emphasis are left for normalisation to remove.
-fn rewrite(items: &[Inline], new_text: &HashMap<Vec<usize>, String>, path: &mut Vec<usize>) -> Vec<Inline> {
+fn rewrite(
+    items: &[Inline],
+    new_text: &HashMap<Vec<usize>, String>,
+    path: &mut Vec<usize>,
+) -> Vec<Inline> {
     let mut out = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         path.push(i);
@@ -106,12 +120,24 @@ fn rewrite(items: &[Inline], new_text: &HashMap<Vec<usize>, String>, path: &mut 
                 None => item.clone(),
             }),
             Inline::Emph(content) => {
-                out.push(Inline::Emph(Inlines::from_normal(rewrite(content.as_slice(), new_text, path))));
+                out.push(Inline::Emph(Inlines::from_normal(rewrite(
+                    content.as_slice(),
+                    new_text,
+                    path,
+                ))));
             }
             Inline::Strong(content) => {
-                out.push(Inline::Strong(Inlines::from_normal(rewrite(content.as_slice(), new_text, path))));
+                out.push(Inline::Strong(Inlines::from_normal(rewrite(
+                    content.as_slice(),
+                    new_text,
+                    path,
+                ))));
             }
-            Inline::Link { destination, title, text } => {
+            Inline::Link {
+                destination,
+                title,
+                text,
+            } => {
                 // A link is never removed: emptied text leaves `[](dest)`.
                 out.push(Inline::Link {
                     destination: destination.clone(),
@@ -131,7 +157,7 @@ fn rewrite(items: &[Inline], new_text: &HashMap<Vec<usize>, String>, path: &mut 
 #[cfg(test)]
 mod tests {
     use super::super::{
-        serialize_inlines, AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination,
+        AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination, serialize_inlines,
     };
     use super::*;
     use crate::Comment;
@@ -150,8 +176,14 @@ mod tests {
         Inlines::new(items, P)
     }
 
-    fn replaced(items: Vec<Inline>, search: &str, replace: &str) -> Result<Vec<Inline>, SearchReplaceError> {
-        run(items).search_replace(search, replace, P).map(|r| r.as_slice().to_vec())
+    fn replaced(
+        items: Vec<Inline>,
+        search: &str,
+        replace: &str,
+    ) -> Result<Vec<Inline>, SearchReplaceError> {
+        run(items)
+            .search_replace(search, replace, P)
+            .map(|r| r.as_slice().to_vec())
     }
 
     fn image() -> Inline {
@@ -164,9 +196,18 @@ mod tests {
 
     #[test]
     fn search_replace_within_one_text_node() {
-        assert_eq!(replaced(vec![t("hello world")], "world", "there"), Ok(vec![t("hello there")]));
-        assert_eq!(replaced(vec![t("hello world")], "hello", "bye"), Ok(vec![t("bye world")]));
-        assert_eq!(replaced(vec![t("a \u{e9}t\u{e9} b")], "\u{e9}t\u{e9}", "x"), Ok(vec![t("a x b")]));
+        assert_eq!(
+            replaced(vec![t("hello world")], "world", "there"),
+            Ok(vec![t("hello there")])
+        );
+        assert_eq!(
+            replaced(vec![t("hello world")], "hello", "bye"),
+            Ok(vec![t("bye world")])
+        );
+        assert_eq!(
+            replaced(vec![t("a \u{e9}t\u{e9} b")], "\u{e9}t\u{e9}", "x"),
+            Ok(vec![t("a x b")])
+        );
         // The replacement is literal text, never markdown.
         assert_eq!(replaced(vec![t("a b")], "b", "*c*"), Ok(vec![t("a *c*")]));
         // A replacement with an empty string deletes.
@@ -182,11 +223,20 @@ mod tests {
     fn search_replace_takes_formatting_of_match_start() {
         let items = || vec![t("a "), em(vec![t("bc")]), t(" d")];
         // Starts in the emphasis, ends in the text after it.
-        assert_eq!(replaced(items(), "c d", "X"), Ok(vec![t("a "), em(vec![t("bX")])]));
+        assert_eq!(
+            replaced(items(), "c d", "X"),
+            Ok(vec![t("a "), em(vec![t("bX")])])
+        );
         // Starts in the text before it: the replacement is plain.
-        assert_eq!(replaced(items(), "a b", "Z"), Ok(vec![t("Z"), em(vec![t("c")]), t(" d")]));
+        assert_eq!(
+            replaced(items(), "a b", "Z"),
+            Ok(vec![t("Z"), em(vec![t("c")]), t(" d")])
+        );
         // Wholly inside the emphasis.
-        assert_eq!(replaced(items(), "bc", "xy"), Ok(vec![t("a "), em(vec![t("xy")]), t(" d")]));
+        assert_eq!(
+            replaced(items(), "bc", "xy"),
+            Ok(vec![t("a "), em(vec![t("xy")]), t(" d")])
+        );
         // Through link text.
         let link = Inline::Link {
             destination: LinkDestination::new("/x"),
@@ -201,21 +251,32 @@ mod tests {
             text: Inlines::new(vec![t("lin"), em(vec![t("k")])], InlineContext::LinkText),
         };
         let got = replaced(vec![t("see "), link.clone(), t(" now")], "nk n", "!").unwrap();
-        let Inline::Link { text, .. } = &got[1] else { panic!("{got:?}") };
+        let Inline::Link { text, .. } = &got[1] else {
+            panic!("{got:?}")
+        };
         assert_eq!(got.len(), 3, "{got:?}");
         assert_eq!(text.as_slice(), &[t("li!")]);
         assert_eq!(got[2], t("ow"));
         // A match that starts in a code span: the replacement stays in the code.
         let code = |s: &str| Inline::Code(s.to_string());
-        assert_eq!(replaced(vec![t("x "), code("abc")], "bc", "Z"), Ok(vec![t("x "), code("aZ")]));
+        assert_eq!(
+            replaced(vec![t("x "), code("abc")], "bc", "Z"),
+            Ok(vec![t("x "), code("aZ")])
+        );
         assert_eq!(
             replaced(vec![t("x "), code("abc"), t(" y")], "bc y", "Z"),
             Ok(vec![t("x "), code("aZ")])
         );
         // Starting before the code, the code is trimmed.
-        assert_eq!(replaced(vec![t("x "), code("abc")], "x a", "Y"), Ok(vec![t("Y"), code("bc")]));
+        assert_eq!(
+            replaced(vec![t("x "), code("abc")], "x a", "Y"),
+            Ok(vec![t("Y"), code("bc")])
+        );
         // A newline cannot stay in code (N6).
-        assert_eq!(replaced(vec![code("abc")], "b", "1\n2"), Ok(vec![code("a1 2c")]));
+        assert_eq!(
+            replaced(vec![code("abc")], "b", "1\n2"),
+            Ok(vec![code("a1 2c")])
+        );
     }
 
     #[test]
@@ -232,11 +293,14 @@ mod tests {
             t(" b"),
         ];
         assert_eq!(replaced(nested.clone(), "xyz", ""), Ok(vec![t("a  b")]));
-        assert_eq!(replaced(nested, "y", ""), Ok(vec![
-            t("a "),
-            Inline::Strong(Inlines::new(vec![t("xz")], P)),
-            t(" b"),
-        ]));
+        assert_eq!(
+            replaced(nested, "y", ""),
+            Ok(vec![
+                t("a "),
+                Inline::Strong(Inlines::new(vec![t("xz")], P)),
+                t(" b"),
+            ])
+        );
         // Comments are kept, also when the match crosses them.
         let comment = Inline::Comment(Comment::new("<!-- c -->").unwrap());
         assert_eq!(
@@ -266,7 +330,12 @@ mod tests {
         assert_eq!(serialize_inlines(&tree, P), "see [](y) now");
         assert_eq!(tree.check_writable(P), Ok(()));
         // Emptied emphasis inside the link is removed, the link is not.
-        let got = replaced(vec![t("a "), link(vec![em(vec![t("x")])]), t(" b")], "x", "").unwrap();
+        let got = replaced(
+            vec![t("a "), link(vec![em(vec![t("x")])]), t(" b")],
+            "x",
+            "",
+        )
+        .unwrap();
         assert_eq!(got, vec![t("a "), link(vec![]), t(" b")]);
         // A match across the whole link text and beyond keeps it too.
         let got = replaced(vec![t("a "), link(vec![t("lk")]), t(" b")], "lk b", "").unwrap();
@@ -277,15 +346,24 @@ mod tests {
     fn hard_break_left_at_the_edge_is_dropped() {
         let lb = || Inline::LineBreak;
         // The text before the break goes: the break is at the start (N7).
-        assert_eq!(replaced(vec![t("a"), lb(), t("b")], "a", ""), Ok(vec![t("b")]));
+        assert_eq!(
+            replaced(vec![t("a"), lb(), t("b")], "a", ""),
+            Ok(vec![t("b")])
+        );
         // The text after the break goes: the break is at the end.
-        assert_eq!(replaced(vec![t("a"), lb(), t("b")], "b", ""), Ok(vec![t("a")]));
+        assert_eq!(
+            replaced(vec![t("a"), lb(), t("b")], "b", ""),
+            Ok(vec![t("a")])
+        );
         // A break that is not at an edge stays, wherever the match is.
         assert_eq!(
             replaced(vec![t("a"), lb(), t("b"), lb(), t("c")], "a", ""),
             Ok(vec![t("b"), lb(), t("c")])
         );
-        assert_eq!(replaced(vec![t("a"), lb(), t("b")], "a", "x"), Ok(vec![t("x"), lb(), t("b")]));
+        assert_eq!(
+            replaced(vec![t("a"), lb(), t("b")], "a", "x"),
+            Ok(vec![t("x"), lb(), t("b")])
+        );
         // In link text there is no edge rule (N7 is for the top-level run).
         let got = Inlines::new(
             vec![Inline::Link {
@@ -296,7 +374,9 @@ mod tests {
             P,
         );
         let got = got.search_replace("a", "", P).unwrap();
-        let [Inline::Link { text, .. }] = got.as_slice() else { panic!("{got:?}") };
+        let [Inline::Link { text, .. }] = got.as_slice() else {
+            panic!("{got:?}")
+        };
         assert_eq!(text.as_slice(), &[lb(), t("b")]);
     }
 
@@ -313,20 +393,41 @@ mod tests {
                 );
             }
             // Matches next to the atom are fine, and the atom stays.
-            assert_eq!(replaced(items.clone(), "a", "X"), Ok(vec![t("X"), atom.clone(), t("b")]));
+            assert_eq!(
+                replaced(items.clone(), "a", "X"),
+                Ok(vec![t("X"), atom.clone(), t("b")])
+            );
             assert_eq!(replaced(items, "b", "X"), Ok(vec![t("a"), atom, t("X")]));
         }
     }
 
     #[test]
     fn search_replace_not_found_and_not_unique() {
-        assert_eq!(replaced(vec![t("banana")], "zz", "x"), Err(SearchReplaceError::NotFound));
-        assert_eq!(replaced(vec![t("banana")], "", "x"), Err(SearchReplaceError::NotFound));
-        assert_eq!(replaced(vec![], "a", "x"), Err(SearchReplaceError::NotFound));
-        assert_eq!(replaced(vec![t("banana")], "a", "x"), Err(SearchReplaceError::NotUnique(3)));
+        assert_eq!(
+            replaced(vec![t("banana")], "zz", "x"),
+            Err(SearchReplaceError::NotFound)
+        );
+        assert_eq!(
+            replaced(vec![t("banana")], "", "x"),
+            Err(SearchReplaceError::NotFound)
+        );
+        assert_eq!(
+            replaced(vec![], "a", "x"),
+            Err(SearchReplaceError::NotFound)
+        );
+        assert_eq!(
+            replaced(vec![t("banana")], "a", "x"),
+            Err(SearchReplaceError::NotUnique(3))
+        );
         // Overlapping occurrences count.
-        assert_eq!(replaced(vec![t("banana")], "ana", "x"), Err(SearchReplaceError::NotUnique(2)));
-        assert_eq!(replaced(vec![t("aaaa")], "aa", "x"), Err(SearchReplaceError::NotUnique(3)));
+        assert_eq!(
+            replaced(vec![t("banana")], "ana", "x"),
+            Err(SearchReplaceError::NotUnique(2))
+        );
+        assert_eq!(
+            replaced(vec![t("aaaa")], "aa", "x"),
+            Err(SearchReplaceError::NotUnique(3))
+        );
         // The search runs over the edit text, across nodes.
         assert_eq!(
             replaced(vec![t("an"), em(vec![t("an")]), t("a")], "ana", "x"),
@@ -345,7 +446,9 @@ mod tests {
         // Newlines in a heading's replacement become spaces; a result that
         // cannot be written is refused.
         let heading = Inlines::new(vec![t("a b")], InlineContext::Heading);
-        let got = heading.search_replace("b", "x\ny", InlineContext::Heading).unwrap();
+        let got = heading
+            .search_replace("b", "x\ny", InlineContext::Heading)
+            .unwrap();
         assert_eq!(got.as_slice(), &[t("a x y")]);
         // `a` + emph(`.b`) + `c` cannot be written.
         let tree = run(vec![t("a "), em(vec![t(".b")]), t("c")]);

@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use super::model::{Inline, Inlines};
-use crate::inline::{normalize_plain_text, AsPlainText};
+use crate::inline::{AsPlainText, normalize_plain_text};
 
 impl AsPlainText for Inlines {
     /// ADR-059 §8: `Text`, `Code` and `Html` contribute their text, a hard
@@ -75,7 +75,10 @@ pub(super) fn with_text_at(
         }
         Some(out)
     }
-    Some(Inlines::new(rewrite(inlines.as_slice(), path.as_slice(), value)?, ctx))
+    Some(Inlines::new(
+        rewrite(inlines.as_slice(), path.as_slice(), value)?,
+        ctx,
+    ))
 }
 
 /// What a stretch of edit text stands for.
@@ -147,7 +150,10 @@ pub(super) fn edit_text(inlines: &Inlines) -> EditText {
             path.pop();
         }
     }
-    let mut out = EditText { text: String::new(), segments: Vec::new() };
+    let mut out = EditText {
+        text: String::new(),
+        segments: Vec::new(),
+    };
     walk(inlines.as_slice(), &mut Vec::new(), &mut out);
     out
 }
@@ -205,7 +211,11 @@ mod tests {
         assert_eq!(at(10), (vec![3, 0], 1, EditKind::Text));
         assert!(edit.locate(11).is_none());
         // The ranges tile the text.
-        let ends: Vec<_> = edit.segments().iter().map(|s| (s.range.start, s.range.end)).collect();
+        let ends: Vec<_> = edit
+            .segments()
+            .iter()
+            .map(|s| (s.range.start, s.range.end))
+            .collect();
         assert_eq!(ends, vec![(0, 5), (5, 7), (7, 9), (9, 11)]);
     }
 
@@ -240,8 +250,14 @@ mod tests {
         );
         // Comments contribute nothing; atoms report offset 0.
         let (seg, inner) = edit.locate(1).unwrap();
-        assert_eq!((seg.path.as_slice(), inner, seg.kind), (&[1][..], 0, EditKind::Atom));
+        assert_eq!(
+            (seg.path.as_slice(), inner, seg.kind),
+            (&[1][..], 0, EditKind::Atom)
+        );
         let (seg, inner) = edit.locate(11).unwrap();
-        assert_eq!((seg.path.as_slice(), inner, seg.kind), (&[6][..], 0, EditKind::Code));
+        assert_eq!(
+            (seg.path.as_slice(), inner, seg.kind),
+            (&[6][..], 0, EditKind::Code)
+        );
     }
 }

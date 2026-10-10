@@ -104,7 +104,11 @@ pub fn block_addresses(
         AddressContainer::Body => "body",
         AddressContainer::Slot(name) => name,
     };
-    let children = format!("(ned/children (ned/slot {} {}))", doc_expr(file), clj_str(slot_name));
+    let children = format!(
+        "(ned/children (ned/slot {} {}))",
+        doc_expr(file),
+        clj_str(slot_name)
+    );
     let addressed = |el: &ContentElement| !matches!(el, ContentElement::LinkExpression { .. });
 
     let AddressContainer::Body = container else {
@@ -116,9 +120,10 @@ pub fn block_addresses(
                 let n = seen.entry(kind).or_insert(0);
                 let idx = *n;
                 *n += 1;
-                addressed(el).then(|| format!("(ned/nth-of-kind {children} {} {idx})", clj_str(kind)))
+                addressed(el)
+                    .then(|| format!("(ned/nth-of-kind {children} {} {idx})", clj_str(kind)))
             })
-            .collect()
+            .collect();
     };
 
     let heading_text = |el: &ContentElement| match el {
@@ -152,7 +157,10 @@ pub fn block_addresses(
                 return None;
             }
             match &anchor {
-                None => Some(format!("(ned/nth-of-kind {children} {} {idx})", clj_str(kind))),
+                None => Some(format!(
+                    "(ned/nth-of-kind {children} {} {idx})",
+                    clj_str(kind)
+                )),
                 Some(heading) => heading
                     .as_ref()
                     .map(|h| format!("(ned/nth-after {h} {} {idx})", clj_str(kind))),
@@ -175,7 +183,10 @@ mod tests {
     }
 
     fn code() -> ContentElement {
-        ContentElement::CodeBlock { language: None, code: "x".to_string() }
+        ContentElement::CodeBlock {
+            language: None,
+            code: "x".to_string(),
+        }
     }
 
     const KIDS: &str = r#"(ned/children (ned/slot (ned/doc-by-path "content/p.md") "body"))"#;
@@ -231,7 +242,14 @@ mod tests {
     #[test]
     fn duplicate_headings_are_not_addressable() {
         // Plain text decides: `*A*` and `A` are the same heading text.
-        let els = [h("*A*"), p("under a"), h("A"), p("also under a"), h("B"), p("under b")];
+        let els = [
+            h("*A*"),
+            p("under a"),
+            h("A"),
+            p("also under a"),
+            h("B"),
+            p("under b"),
+        ];
         let got = block_addresses("f.md", AddressContainer::Body, &els);
         assert_eq!(got[..4], [None, None, None, None]);
         assert!(got[4].is_some() && got[5].is_some(), "{got:?}");

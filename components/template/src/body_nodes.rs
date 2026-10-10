@@ -40,14 +40,19 @@ pub(crate) enum BlockRole<'a> {
 
 impl BlockRole<'_> {
     /// A body slot element without editor data (published output).
-    const PLAIN: BlockRole<'static> =
-        BlockRole::BodySlot { md: None, address: None, editorial: false };
+    const PLAIN: BlockRole<'static> = BlockRole::BodySlot {
+        md: None,
+        address: None,
+        editorial: false,
+    };
 
     /// This block's own path inside its top-level block: empty for the
     /// top-level block, `None` in published output.
     fn path(&self) -> Option<&str> {
         match self {
-            BlockRole::BodySlot { editorial: true, .. } => Some(""),
+            BlockRole::BodySlot {
+                editorial: true, ..
+            } => Some(""),
             BlockRole::BodySlot { .. } => None,
             BlockRole::Nested { path } | BlockRole::TightItem { path } => path.as_deref(),
         }
@@ -56,7 +61,13 @@ impl BlockRole<'_> {
 
 /// `path` extended by one step (`i1`, `b0`); `None` stays `None`.
 fn step(path: Option<&str>, step: String) -> Option<String> {
-    path.map(|p| if p.is_empty() { step } else { format!("{p}/{step}") })
+    path.map(|p| {
+        if p.is_empty() {
+            step
+        } else {
+            format!("{p}/{step}")
+        }
+    })
 }
 
 fn attr(name: &str, value: impl Into<String>) -> (String, Form) {
@@ -64,7 +75,11 @@ fn attr(name: &str, value: impl Into<String>) -> (String, Form) {
 }
 
 fn el(name: &str, attrs: Vec<(String, Form)>, children: Vec<Node>) -> Node {
-    Node::Element(Element { name: name.to_string(), attrs, children })
+    Node::Element(Element {
+        name: name.to_string(),
+        attrs,
+        children,
+    })
 }
 
 /// The attributes that make an element the `body` slot: the slot marker, then
@@ -72,7 +87,10 @@ fn el(name: &str, attrs: Vec<(String, Form)>, children: Vec<Node>) -> Node {
 fn slot_attrs(role: &BlockRole) -> Vec<(String, Form)> {
     let BlockRole::BodySlot { md, address, .. } = role else {
         // A nested block is not a slot; in editorial output it knows its path.
-        return role.path().map(|path| vec![attr(ATTR_PATH, path)]).unwrap_or_default();
+        return role
+            .path()
+            .map(|path| vec![attr(ATTR_PATH, path)])
+            .unwrap_or_default();
     };
     let mut attrs = vec![attr(ATTR_SLOT, "body")];
     if let Some(md) = md {
@@ -103,7 +121,9 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
         // `<a>`, a lone image an `<img>`, never wrapped in a `<p>`; anything
         // else is a `<p>` of its inline nodes. A paragraph with a marker is
         // misuse and is text.
-        ContentElement::Paragraph { content, .. } if matches!(role, BlockRole::TightItem { .. }) => {
+        ContentElement::Paragraph { content, .. }
+            if matches!(role, BlockRole::TightItem { .. }) =>
+        {
             crate::inline_nodes::inline_nodes(content)
         }
         ContentElement::Paragraph { content, marker } => match BlockShape::of(content) {
@@ -113,7 +133,11 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
                 if let Some(title) = parts.title.filter(|t| !t.is_empty()) {
                     attrs.push(attr("title", title));
                 }
-                vec![el("a", attrs, crate::inline_nodes::inline_nodes(parts.text))]
+                vec![el(
+                    "a",
+                    attrs,
+                    crate::inline_nodes::inline_nodes(parts.text),
+                )]
             }
             BlockShape::SoleImage(parts) if marker.is_none() => {
                 use content::AsPlainText;
@@ -125,7 +149,11 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
                 }
                 vec![el("img", attrs, Vec::new())]
             }
-            _ => vec![el("p", slot_attrs(role), crate::inline_nodes::inline_nodes(content))],
+            _ => vec![el(
+                "p",
+                slot_attrs(role),
+                crate::inline_nodes::inline_nodes(content),
+            )],
         },
         ContentElement::CodeBlock { language, code } => {
             let code_attrs = language
@@ -162,7 +190,11 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
                     }
                 }
             }
-            vec![el("div", attrs, vec![Node::Text(MSG_HTML_REMOVED.to_string())])]
+            vec![el(
+                "div",
+                attrs,
+                vec![Node::Text(MSG_HTML_REMOVED.to_string())],
+            )]
         }
         // A quote renders its blocks, none of them a slot (the whole quote is
         // the editable block). Comments are never rendered.
@@ -220,8 +252,15 @@ pub(crate) fn block_nodes(element: &ContentElement, role: &BlockRole) -> Vec<Nod
                 };
                 el(name, attrs, crate::inline_nodes::inline_nodes(content))
             };
-            let header_cells = columns.iter().map(|c| cell("th", &c.header, c.align)).collect();
-            let head = el("thead", Vec::new(), vec![el("tr", Vec::new(), header_cells)]);
+            let header_cells = columns
+                .iter()
+                .map(|c| cell("th", &c.header, c.align))
+                .collect();
+            let head = el(
+                "thead",
+                Vec::new(),
+                vec![el("tr", Vec::new(), header_cells)],
+            );
             let body_rows = rows
                 .iter()
                 .map(|row| {
@@ -257,7 +296,11 @@ pub(crate) fn list_items_nodes(list: &List, path: Option<&str>) -> Vec<Vec<Node>
                 .enumerate()
                 .flat_map(|(j, block)| {
                     let path = step(item_path.as_deref(), format!("b{j}"));
-                    let role = if tight { BlockRole::TightItem { path } } else { BlockRole::Nested { path } };
+                    let role = if tight {
+                        BlockRole::TightItem { path }
+                    } else {
+                        BlockRole::Nested { path }
+                    };
                     block_nodes(&block.node, &role)
                 })
                 .collect()
@@ -280,7 +323,14 @@ pub(crate) fn body_block_nodes(
         return block_nodes(element, &BlockRole::PLAIN);
     }
     let md = content::project_markdown(element, content::Projection::Block);
-    block_nodes(element, &BlockRole::BodySlot { md: md.as_deref(), address, editorial: true })
+    block_nodes(
+        element,
+        &BlockRole::BodySlot {
+            md: md.as_deref(),
+            address,
+            editorial: true,
+        },
+    )
 }
 
 /// The editor addresses of body blocks, one per block, built without a file.
@@ -346,7 +396,10 @@ mod tests {
     use schema::Span;
 
     fn spanned(node: ContentElement) -> Spanned<ContentElement> {
-        Spanned { node, span: Span { start: 0, end: 0 } }
+        Spanned {
+            node,
+            span: Span { start: 0, end: 0 },
+        }
     }
 
     fn render(el: ContentElement) -> String {
@@ -370,7 +423,9 @@ mod tests {
     /// `<td>` cells; the default renders nothing.
     #[test]
     fn aligned_column_renders_its_alignment() {
-        let flat = content::parse_document("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |\n").unwrap();
+        let flat =
+            content::parse_document("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |\n")
+                .unwrap();
         let html = render(flat.elements[0].node.clone());
         for (tag, cell, align) in [
             ("th", "a", "left"),
@@ -383,12 +438,17 @@ mod tests {
             let expected = format!("<{tag} style=\"text-align: {align}\">{cell}</{tag}>");
             assert!(html.contains(&expected), "{expected} in {html}");
         }
-        assert!(html.contains("<th>d</th>") && html.contains("<td>4</td>"), "{html}");
+        assert!(
+            html.contains("<th>d</th>") && html.contains("<td>4</td>"),
+            "{html}"
+        );
     }
 
     /// The list `md` reads as, rendered as a body block.
     fn list_html(md: &str) -> String {
-        let el = content::parse_document(md).unwrap().elements[0].node.clone();
+        let el = content::parse_document(md).unwrap().elements[0]
+            .node
+            .clone();
         assert!(matches!(el, ContentElement::List { .. }), "{md:?}: {el:?}");
         render(el)
     }
@@ -398,8 +458,14 @@ mod tests {
     /// `<p>`s, and an item holds its blocks, nested lists and quotes included.
     #[test]
     fn list_renders_ul_ol_and_li() {
-        assert_eq!(list_html("- a\n- b"), r#"<ul data-presemble-slot="body"><li>a</li><li>b</li></ul>"#);
-        assert_eq!(list_html("1. a\n2. b"), r#"<ol data-presemble-slot="body"><li>a</li><li>b</li></ol>"#);
+        assert_eq!(
+            list_html("- a\n- b"),
+            r#"<ul data-presemble-slot="body"><li>a</li><li>b</li></ul>"#
+        );
+        assert_eq!(
+            list_html("1. a\n2. b"),
+            r#"<ol data-presemble-slot="body"><li>a</li><li>b</li></ol>"#
+        );
         assert_eq!(
             list_html("- a\n\n- b"),
             r#"<ul data-presemble-slot="body"><li><p>a</p></li><li><p>b</p></li></ul>"#
@@ -435,55 +501,100 @@ mod tests {
     /// The `start` of an ordered list is written only when it is not 1.
     #[test]
     fn ordered_start_renders_only_when_not_1() {
-        assert_eq!(list_html("3. a"), r#"<ol data-presemble-slot="body" start="3"><li>a</li></ol>"#);
-        assert_eq!(list_html("0. a"), r#"<ol data-presemble-slot="body" start="0"><li>a</li></ol>"#);
-        assert_eq!(list_html("1. a"), r#"<ol data-presemble-slot="body"><li>a</li></ol>"#);
+        assert_eq!(
+            list_html("3. a"),
+            r#"<ol data-presemble-slot="body" start="3"><li>a</li></ol>"#
+        );
+        assert_eq!(
+            list_html("0. a"),
+            r#"<ol data-presemble-slot="body" start="0"><li>a</li></ol>"#
+        );
+        assert_eq!(
+            list_html("1. a"),
+            r#"<ol data-presemble-slot="body"><li>a</li></ol>"#
+        );
     }
 
     #[test]
     fn separator_is_a_hidden_body_marker() {
-        assert_eq!(render(ContentElement::Separator), r#"<span data-presemble-slot="body" hidden=""></span>"#);
+        assert_eq!(
+            render(ContentElement::Separator),
+            r#"<span data-presemble-slot="body" hidden=""></span>"#
+        );
     }
 
     #[test]
     fn table_always_has_a_tbody() {
-        let table = content::parse_document("| h |\n| --- |").unwrap().elements[0].node.clone();
+        let table = content::parse_document("| h |\n| --- |").unwrap().elements[0]
+            .node
+            .clone();
         let html = render(table);
-        assert!(html.contains("<thead><tr><th>h</th></tr></thead><tbody></tbody>"), "{html}");
+        assert!(
+            html.contains("<thead><tr><th>h</th></tr></thead><tbody></tbody>"),
+            "{html}"
+        );
     }
 
     #[test]
     fn image_without_alt_has_empty_alt() {
         let html = render(ContentElement::lone_image("", "/i.png"));
-        assert_eq!(html, r#"<img data-presemble-slot="body" src="/i.png" alt="" />"#);
+        assert_eq!(
+            html,
+            r#"<img data-presemble-slot="body" src="/i.png" alt="" />"#
+        );
     }
 
     #[test]
     fn html_block_is_a_placeholder_and_not_a_slot() {
-        let html = render(ContentElement::HtmlBlock { source: "<div>x</div>".to_string() });
-        assert!(html.contains("presemble-html-removed") && !html.contains("data-presemble-slot"), "{html}");
+        let html = render(ContentElement::HtmlBlock {
+            source: "<div>x</div>".to_string(),
+        });
+        assert!(
+            html.contains("presemble-html-removed") && !html.contains("data-presemble-slot"),
+            "{html}"
+        );
         assert!(!html.contains("x</div>"), "{html}");
     }
 
     #[test]
     fn editorial_html_placeholder_is_addressed_and_stamped_but_not_a_slot() {
         let mut nodes = render_body_nodes(
-            &im::vector![spanned(ContentElement::HtmlBlock { source: "<div>x</div>".to_string() })],
+            &im::vector![spanned(ContentElement::HtmlBlock {
+                source: "<div>x</div>".to_string()
+            })],
             true,
         );
         stamp_file(&mut nodes, "content/p.md");
         let html = serialize_nodes(&nodes);
-        assert!(html.contains("data-presemble-address=") && html.contains("content/p.md"), "{html}");
-        assert!(!html.contains("data-presemble-slot") && !html.contains(ATTR_FILE), "{html}");
+        assert!(
+            html.contains("data-presemble-address=") && html.contains("content/p.md"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("data-presemble-slot") && !html.contains(ATTR_FILE),
+            "{html}"
+        );
 
         let quote = ContentElement::Blockquote {
             blocks: content::Blocks {
-                elements: im::vector![spanned(ContentElement::HtmlBlock { source: "<b>".to_string() })],
+                elements: im::vector![spanned(ContentElement::HtmlBlock {
+                    source: "<b>".to_string()
+                })],
                 ..Default::default()
             },
         };
-        let html = serialize_nodes(&block_nodes(&quote, &BlockRole::BodySlot { md: None, address: None, editorial: true }));
-        assert!(html.contains(r#"<div class="presemble-html-removed" data-presemble-path="b0">"#), "{html}");
+        let html = serialize_nodes(&block_nodes(
+            &quote,
+            &BlockRole::BodySlot {
+                md: None,
+                address: None,
+                editorial: true,
+            },
+        ));
+        assert!(
+            html.contains(r#"<div class="presemble-html-removed" data-presemble-path="b0">"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -491,14 +602,19 @@ mod tests {
         let mut nodes = render_body_nodes(
             &im::vector![
                 spanned(ContentElement::paragraph_from_markdown("a *b*")),
-                spanned(ContentElement::HtmlBlock { source: "<div>x</div>".to_string() }),
+                spanned(ContentElement::HtmlBlock {
+                    source: "<div>x</div>".to_string()
+                }),
             ],
             false,
         );
         stamp_file(&mut nodes, "content/p.md");
         let html = serialize_nodes(&nodes);
         assert_eq!(html.matches(ATTR_FILE).count(), 1, "{html}");
-        assert!(html.contains(r#"<p data-presemble-slot="body" data-presemble-file="content/p.md">"#), "{html}");
+        assert!(
+            html.contains(r#"<p data-presemble-slot="body" data-presemble-file="content/p.md">"#),
+            "{html}"
+        );
         assert!(!html.contains("<em data-presemble-file"), "{html}");
 
         let mut nodes = vec![el("p", vec![attr(ATTR_SLOT, "body")], vec![])];
@@ -509,11 +625,16 @@ mod tests {
     #[test]
     fn editorial_blocks_carry_canonical_md_escaped() {
         let nodes = render_body_nodes(
-            &im::vector![spanned(ContentElement::paragraph_from_markdown("a \"b\" & c"))],
+            &im::vector![spanned(ContentElement::paragraph_from_markdown(
+                "a \"b\" & c"
+            ))],
             true,
         );
         let html = serialize_nodes(&nodes);
-        assert!(html.contains(r#"data-presemble-md="a &quot;b&quot; &amp; c""#), "{html}");
+        assert!(
+            html.contains(r#"data-presemble-md="a &quot;b&quot; &amp; c""#),
+            "{html}"
+        );
     }
 
     #[test]

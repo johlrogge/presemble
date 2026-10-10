@@ -171,10 +171,16 @@ mod tests {
         let attrs = extract_slot_constraint_attrs(&slot);
         assert_eq!(attrs.len(), 2, "expected two constraint attrs");
 
-        let occurs = attrs.iter().find(|(k, _)| k == "occurs").expect("missing occurs");
+        let occurs = attrs
+            .iter()
+            .find(|(k, _)| k == "occurs")
+            .expect("missing occurs");
         assert_eq!(occurs.1, "1..3");
 
-        let content = attrs.iter().find(|(k, _)| k == "content").expect("missing content");
+        let content = attrs
+            .iter()
+            .find(|(k, _)| k == "content")
+            .expect("missing content");
         assert_eq!(content.1, "capitalized");
     }
 
@@ -189,10 +195,13 @@ mod tests {
             preamble: vec![
                 make_slot("title", vec![Constraint::Occurs(CountRange::Exactly(1))]),
                 make_slot("author", vec![Constraint::TypeLink("person".to_string())]),
-                make_slot("cover", vec![
-                    Constraint::Orientation(Orientation::Landscape),
-                    Constraint::Alt(AltRequirement::Required),
-                ]),
+                make_slot(
+                    "cover",
+                    vec![
+                        Constraint::Orientation(Orientation::Landscape),
+                        Constraint::Alt(AltRequirement::Required),
+                    ],
+                ),
             ],
             body: None,
         };
@@ -208,8 +217,16 @@ mod tests {
 
         let cover_attrs = extract_slot_constraint_attrs(&grammar.preamble[2]);
         assert_eq!(cover_attrs.len(), 2);
-        assert!(cover_attrs.iter().any(|(k, v)| k == "orientation" && v == "landscape"));
-        assert!(cover_attrs.iter().any(|(k, v)| k == "alt" && v == "required"));
+        assert!(
+            cover_attrs
+                .iter()
+                .any(|(k, v)| k == "orientation" && v == "landscape")
+        );
+        assert!(
+            cover_attrs
+                .iter()
+                .any(|(k, v)| k == "alt" && v == "required")
+        );
     }
 
     // -------------------------------------------------------------------------

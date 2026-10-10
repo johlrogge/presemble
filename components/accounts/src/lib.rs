@@ -20,12 +20,12 @@
 //!   Debug). Every HMAC store requires one; `SessionKey::from_env` is the only
 //!   reader of `PRESEMBLE_SESSION_KEY`.
 
+use axum::extract::FromRef;
 use axum::{
     extract::FromRequestParts,
     http::{HeaderMap, StatusCode, request::Parts},
     response::{IntoResponse, Response},
 };
-use axum::extract::FromRef;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -349,8 +349,8 @@ impl DevSessionStore {
         let sig_bytes = base64url_decode(b64_sig)?;
 
         // Constant-time HMAC verification
-        let mut mac = HmacSha256::new_from_slice(self.key.as_bytes())
-            .expect("HMAC key length error");
+        let mut mac =
+            HmacSha256::new_from_slice(self.key.as_bytes()).expect("HMAC key length error");
         mac.update(&payload_bytes);
         mac.verify_slice(&sig_bytes).ok()?;
 
@@ -405,15 +405,15 @@ impl MagicLinkSessionStore {
     }
 
     fn hmac_sign(&self, data: &[u8]) -> Vec<u8> {
-        let mut mac = HmacSha256::new_from_slice(self.key.as_bytes())
-            .expect("HMAC key length error");
+        let mut mac =
+            HmacSha256::new_from_slice(self.key.as_bytes()).expect("HMAC key length error");
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }
 
     fn hmac_verify(&self, data: &[u8], sig: &[u8]) -> bool {
-        let mut mac = HmacSha256::new_from_slice(self.key.as_bytes())
-            .expect("HMAC key length error");
+        let mut mac =
+            HmacSha256::new_from_slice(self.key.as_bytes()).expect("HMAC key length error");
         mac.update(data);
         mac.verify_slice(sig).is_ok()
     }
@@ -436,7 +436,9 @@ impl SessionStore for MagicLinkSessionStore {
         let payload = std::str::from_utf8(&payload_bytes).ok()?;
         let id_str = payload.strip_prefix("acct:")?;
         let account_id = AccountId::parse(id_str)?;
-        Some(Session::new(Principal::Account { account: account_id }))
+        Some(Session::new(Principal::Account {
+            account: account_id,
+        }))
     }
 }
 
@@ -485,8 +487,8 @@ impl LoginTokenStore {
     }
 
     fn hmac_sign(&self, data: &[u8]) -> Vec<u8> {
-        let mut mac = HmacSha256::new_from_slice(self.key.as_bytes())
-            .expect("HMAC key length error");
+        let mut mac =
+            HmacSha256::new_from_slice(self.key.as_bytes()).expect("HMAC key length error");
         mac.update(data);
         mac.finalize().into_bytes().to_vec()
     }
@@ -535,8 +537,8 @@ impl LoginTokenStore {
         let sig_bytes = base64url_decode(b64_sig)?;
 
         // Constant-time HMAC check
-        let mut mac = HmacSha256::new_from_slice(self.key.as_bytes())
-            .expect("HMAC key length error");
+        let mut mac =
+            HmacSha256::new_from_slice(self.key.as_bytes()).expect("HMAC key length error");
         mac.update(&payload_bytes);
         mac.verify_slice(&sig_bytes).ok()?;
 
@@ -868,7 +870,10 @@ impl IntoResponse for Unauthorized {
 ///
 /// Reads the `presemble_session` cookie and verifies it. On failure the
 /// `Unauthorized` variant is chosen from the store's login availability.
-pub fn authenticate(store: &dyn SessionStore, headers: &HeaderMap) -> Result<Session, Unauthorized> {
+pub fn authenticate(
+    store: &dyn SessionStore,
+    headers: &HeaderMap,
+) -> Result<Session, Unauthorized> {
     headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -895,9 +900,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use axum::{Router, routing::get, extract::State};
     use axum::extract::FromRef;
+    use axum::{Router, extract::State, routing::get};
+    use std::sync::Arc;
 
     // Minimal state for extractor tests
     #[derive(Clone)]
@@ -920,7 +925,10 @@ mod tests {
 
     #[test]
     fn session_key_rejects_empty() {
-        assert_eq!(SessionKey::try_from("").unwrap_err(), SessionKeyError::Empty);
+        assert_eq!(
+            SessionKey::try_from("").unwrap_err(),
+            SessionKeyError::Empty
+        );
     }
 
     #[test]
@@ -1048,7 +1056,10 @@ mod tests {
         // Flip first char of payload
         chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
         let tampered = SessionToken(chars.iter().collect());
-        assert!(store.verify(&tampered).is_none(), "tampered token must not verify");
+        assert!(
+            store.verify(&tampered).is_none(),
+            "tampered token must not verify"
+        );
     }
 
     #[test]
@@ -1076,7 +1087,10 @@ mod tests {
         let store = DevSessionStore::with_key(key("test-key"));
         let token = store.mint("dev");
         let cookie = set_session_cookie(&token);
-        assert!(cookie.starts_with("presemble_session="), "must start with cookie name");
+        assert!(
+            cookie.starts_with("presemble_session="),
+            "must start with cookie name"
+        );
         assert!(cookie.contains("HttpOnly"), "must be HttpOnly");
         assert!(cookie.contains("SameSite=Lax"), "must be SameSite=Lax");
         assert!(cookie.contains("Path=/"), "must be Path=/");
@@ -1086,11 +1100,20 @@ mod tests {
     fn read_session_cookie_extracts_value() {
         let store = DevSessionStore::with_key(key("test-key-cookie"));
         let token = store.mint("dev");
-        let cookie_header = format!("other=123; presemble_session={}; another=456", token.as_str());
+        let cookie_header = format!(
+            "other=123; presemble_session={}; another=456",
+            token.as_str()
+        );
         let extracted = read_session_cookie(&cookie_header);
-        assert!(extracted.is_some(), "must extract token from multi-value cookie");
+        assert!(
+            extracted.is_some(),
+            "must extract token from multi-value cookie"
+        );
         // Verify the extracted token is valid
-        assert!(store.verify(&extracted.unwrap()).is_some(), "extracted token must be valid");
+        assert!(
+            store.verify(&extracted.unwrap()).is_some(),
+            "extracted token must be valid"
+        );
     }
 
     #[test]
@@ -1104,23 +1127,24 @@ mod tests {
     async fn extractor_with_valid_cookie_returns_session() {
         use tower::ServiceExt;
 
-        let store = Arc::new(DevSessionStore::with_key(key("extractor-test-key"))) as Arc<dyn SessionStore>;
+        let store =
+            Arc::new(DevSessionStore::with_key(key("extractor-test-key"))) as Arc<dyn SessionStore>;
         let token = {
             let ds = DevSessionStore::with_key(key("extractor-test-key"));
             ds.mint("testuser")
         };
         let cookie_header = format!("presemble_session={}", token.as_str());
 
-        let state = TestState { session_store: store };
+        let state = TestState {
+            session_store: store,
+        };
 
         async fn handler(session: Session, State(_s): State<TestState>) -> &'static str {
             let _ = session;
             "ok"
         }
 
-        let app = Router::new()
-            .route("/test", get(handler))
-            .with_state(state);
+        let app = Router::new().route("/test", get(handler)).with_state(state);
 
         let req = axum::http::Request::builder()
             .uri("/test")
@@ -1136,17 +1160,18 @@ mod tests {
     async fn extractor_without_cookie_returns_401() {
         use tower::ServiceExt;
 
-        let store = Arc::new(DevSessionStore::with_key(key("extractor-test-key2"))) as Arc<dyn SessionStore>;
-        let state = TestState { session_store: store };
+        let store = Arc::new(DevSessionStore::with_key(key("extractor-test-key2")))
+            as Arc<dyn SessionStore>;
+        let state = TestState {
+            session_store: store,
+        };
 
         async fn handler(session: Session, State(_s): State<TestState>) -> &'static str {
             let _ = session;
             "ok"
         }
 
-        let app = Router::new()
-            .route("/test", get(handler))
-            .with_state(state);
+        let app = Router::new().route("/test", get(handler)).with_state(state);
 
         let req = axum::http::Request::builder()
             .uri("/test")
@@ -1161,17 +1186,18 @@ mod tests {
     async fn extractor_with_invalid_cookie_returns_401() {
         use tower::ServiceExt;
 
-        let store = Arc::new(DevSessionStore::with_key(key("extractor-test-key3"))) as Arc<dyn SessionStore>;
-        let state = TestState { session_store: store };
+        let store = Arc::new(DevSessionStore::with_key(key("extractor-test-key3")))
+            as Arc<dyn SessionStore>;
+        let state = TestState {
+            session_store: store,
+        };
 
         async fn handler(session: Session, State(_s): State<TestState>) -> &'static str {
             let _ = session;
             "ok"
         }
 
-        let app = Router::new()
-            .route("/test", get(handler))
-            .with_state(state);
+        let app = Router::new().route("/test", get(handler)).with_state(state);
 
         let req = axum::http::Request::builder()
             .uri("/test")
@@ -1193,14 +1219,20 @@ mod tests {
             .map(|k| DevSessionStore::with_key(k).mint("alice"))
             .chain(std::iter::once(DevSessionStore::new_random().mint("alice")));
         for token in tokens {
-            assert!(closed.verify(&token).is_none(), "closed store must verify nothing");
+            assert!(
+                closed.verify(&token).is_none(),
+                "closed store must verify nothing"
+            );
             assert!(closed.verify_str(token.as_str()).is_none());
         }
     }
 
     #[test]
     fn closed_store_reports_closed() {
-        assert_eq!(ClosedSessionStore.login_availability(), LoginAvailability::Closed);
+        assert_eq!(
+            ClosedSessionStore.login_availability(),
+            LoginAvailability::Closed
+        );
     }
 
     #[test]
@@ -1228,7 +1260,9 @@ mod tests {
 
         let app = Router::new()
             .route("/test", get(handler))
-            .with_state(TestState { session_store: store });
+            .with_state(TestState {
+                session_store: store,
+            });
 
         let mut builder = axum::http::Request::builder().uri("/test");
         if let Some(c) = cookie {
@@ -1246,7 +1280,11 @@ mod tests {
             .await
             .unwrap()
             .to_bytes();
-        (status, content_type, String::from_utf8_lossy(&bytes).into_owned())
+        (
+            status,
+            content_type,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
     }
 
     #[tokio::test]
@@ -1277,15 +1315,24 @@ mod tests {
             extractor_response(store, Some("presemble_session=secret-garbage-xyz")).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(body.contains("Not logged in"), "body: {body}");
-        assert!(!body.contains("secret-garbage-xyz"), "body must not echo cookie: {body}");
+        assert!(
+            !body.contains("secret-garbage-xyz"),
+            "body must not echo cookie: {body}"
+        );
     }
 
     #[test]
     fn authenticate_invalid_cookie_returns_not_logged_in() {
         let store = DevSessionStore::with_key(key("k-auth-inv"));
         let mut headers = HeaderMap::new();
-        headers.insert("cookie", "presemble_session=secret-garbage-xyz".parse().unwrap());
-        assert_eq!(authenticate(&store, &headers).err(), Some(Unauthorized::NotLoggedIn));
+        headers.insert(
+            "cookie",
+            "presemble_session=secret-garbage-xyz".parse().unwrap(),
+        );
+        assert_eq!(
+            authenticate(&store, &headers).err(),
+            Some(Unauthorized::NotLoggedIn)
+        );
     }
 
     #[test]
@@ -1305,7 +1352,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "cookie",
-            format!("presemble_session={}", token.as_str()).parse().unwrap(),
+            format!("presemble_session={}", token.as_str())
+                .parse()
+                .unwrap(),
         );
         let session = authenticate(&store, &headers).expect("valid cookie must authenticate");
         assert!(matches!(session.principal(), Principal::Dev { label } if label == "carol"));
@@ -1415,7 +1464,11 @@ mod tests {
         let account_id = AccountId::generate();
         let token = store.issue_login_token(&account_id);
         let result = store.verify_login_token(&token);
-        assert_eq!(result.as_ref(), Some(&account_id), "fresh login token must verify");
+        assert_eq!(
+            result.as_ref(),
+            Some(&account_id),
+            "fresh login token must verify"
+        );
     }
 
     #[test]
@@ -1424,7 +1477,10 @@ mod tests {
         let account_id = AccountId::generate();
         let token = store.issue_login_token(&account_id);
         // First use succeeds
-        assert!(store.verify_login_token(&token).is_some(), "first use must succeed");
+        assert!(
+            store.verify_login_token(&token).is_some(),
+            "first use must succeed"
+        );
         // Second use must fail
         assert!(
             store.verify_login_token(&token).is_none(),
@@ -1473,7 +1529,10 @@ mod tests {
         let verified_id = login_store
             .verify_login_token(&login_token)
             .expect("login token must verify");
-        assert_eq!(verified_id, account.id, "verified id must match original account");
+        assert_eq!(
+            verified_id, account.id,
+            "verified id must match original account"
+        );
 
         // Mint session
         let session_token = session_store.mint(&verified_id);
@@ -1483,7 +1542,10 @@ mod tests {
 
         match session.principal() {
             Principal::Account { account: a } => {
-                assert_eq!(a, &account.id, "session principal must match original account id");
+                assert_eq!(
+                    a, &account.id,
+                    "session principal must match original account id"
+                );
             }
             other => panic!("expected Principal::Account, got {other:?}"),
         }
@@ -1512,7 +1574,10 @@ mod tests {
         let store = InMemoryAccountStore::new();
         let a = store.find_or_create("alice@example.com");
         let b = store.find_or_create("bob@example.com");
-        assert_ne!(a.id, b.id, "different emails must get different account ids");
+        assert_ne!(
+            a.id, b.id,
+            "different emails must get different account ids"
+        );
     }
 
     // ── ConsoleMailSender tests ───────────────────────────────────────────────

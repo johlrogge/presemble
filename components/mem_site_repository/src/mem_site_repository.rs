@@ -13,8 +13,8 @@ pub struct SiteRepository {
     schemas: HashMap<String, SchemaEntry>,
     content: HashMap<String, HashMap<String, String>>, // stem → {slug → source}
     templates: HashMap<String, (String, bool)>,        // stem → (source, is_hiccup)
-    collection_content: HashMap<String, String>,          // stem → source (key "" = root)
-    collection_schemas: HashMap<String, String>,          // stem → source (key "" = root)
+    collection_content: HashMap<String, String>,       // stem → source (key "" = root)
+    collection_schemas: HashMap<String, String>,       // stem → source (key "" = root)
     collection_templates: HashMap<String, (String, bool)>, // stem → (source, is_hiccup) (key "" = root)
     partial_templates: HashMap<String, (String, bool)>,
     /// When set, path accessors return real filesystem paths under this directory.
@@ -31,7 +31,9 @@ impl SiteRepository {
 
     /// Primary construction method for tests.
     pub fn builder() -> SiteRepositoryBuilder {
-        SiteRepositoryBuilder { repo: SiteRepository::default() }
+        SiteRepositoryBuilder {
+            repo: SiteRepository::default(),
+        }
     }
 
     /// Returns the real site directory when set via `from_dir`, otherwise a dummy path.
@@ -44,11 +46,8 @@ impl SiteRepository {
     // ---------------------------------------------------------------------------
 
     pub fn schema_stems(&self) -> Vec<SchemaStem> {
-        let mut stem_set: std::collections::HashSet<String> = self
-            .schemas
-            .keys()
-            .cloned()
-            .collect();
+        let mut stem_set: std::collections::HashSet<String> =
+            self.schemas.keys().cloned().collect();
         // Include root collection stem "" if it has a collection schema or content
         if self.collection_schemas.contains_key("") || self.schemas.contains_key("") {
             stem_set.insert(String::new());
@@ -140,7 +139,9 @@ impl SiteRepository {
             if stem.as_str().is_empty() {
                 dir.join("content").join(format!("{slug}.md"))
             } else {
-                dir.join("content").join(stem.as_str()).join(format!("{slug}.md"))
+                dir.join("content")
+                    .join(stem.as_str())
+                    .join(format!("{slug}.md"))
             }
         } else if stem.as_str().is_empty() {
             PathBuf::from(format!("memory://content/{slug}.md"))
@@ -233,7 +234,11 @@ impl SiteRepositoryBuilder {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    let stem = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
                     if stem == "index" {
                         continue;
                     }
@@ -246,19 +251,30 @@ impl SiteRepositoryBuilder {
                     let index_path = path.join("index.md");
                     if let Ok(src) = std::fs::read_to_string(&index_path) {
                         self.repo.collection_schemas.insert(
-                            path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string(),
+                            path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string(),
                             src,
                         );
                     }
                 } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
                     if let Ok(src) = std::fs::read_to_string(&path) {
                         if stem == "index" {
                             // schemas/index.md → root collection schema (stem "")
                             self.repo.collection_schemas.insert(String::new(), src);
                         } else if stem == "item" {
                             // schemas/item.md → root item schema (stem "")
-                            self.repo.schemas.entry(String::new()).or_default().item_source = Some(src);
+                            self.repo
+                                .schemas
+                                .entry(String::new())
+                                .or_default()
+                                .item_source = Some(src);
                         } else {
                             self.repo.schemas.entry(stem).or_default().item_source = Some(src);
                         }
@@ -273,21 +289,30 @@ impl SiteRepositoryBuilder {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    let stem = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
                     if let Ok(slugs) = std::fs::read_dir(&path) {
                         for slug_entry in slugs.flatten() {
                             let slug_path = slug_entry.path();
                             if slug_path.extension().and_then(|e| e.to_str()) != Some("md") {
                                 continue;
                             }
-                            let slug = slug_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                            let slug = slug_path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("")
+                                .to_string();
                             if slug == "index" {
                                 // Collection content
                                 if let Ok(src) = std::fs::read_to_string(&slug_path) {
                                     self.repo.collection_content.insert(stem.clone(), src);
                                 }
                             } else if let Ok(src) = std::fs::read_to_string(&slug_path) {
-                                self.repo.content
+                                self.repo
+                                    .content
                                     .entry(stem.clone())
                                     .or_default()
                                     .insert(slug, src);
@@ -295,7 +320,11 @@ impl SiteRepositoryBuilder {
                         }
                     }
                 } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
                     if stem == "index" {
                         // content/index.md → root collection content (stem "")
                         if let Ok(src) = std::fs::read_to_string(&path) {
@@ -304,7 +333,8 @@ impl SiteRepositoryBuilder {
                     } else {
                         // content/{slug}.md → root item content (stem "")
                         if let Ok(src) = std::fs::read_to_string(&path) {
-                            self.repo.content
+                            self.repo
+                                .content
                                 .entry(String::new())
                                 .or_default()
                                 .insert(stem, src);
@@ -320,7 +350,11 @@ impl SiteRepositoryBuilder {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    let stem = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
                     if stem == "index" {
                         continue;
                     }
@@ -336,7 +370,9 @@ impl SiteRepositoryBuilder {
                     for (ext, is_hiccup) in &[("html", false), ("hiccup", true)] {
                         let idx_path = path.join(format!("index.{ext}"));
                         if let Ok(src) = std::fs::read_to_string(&idx_path) {
-                            self.repo.collection_templates.insert(stem.clone(), (src, *is_hiccup));
+                            self.repo
+                                .collection_templates
+                                .insert(stem.clone(), (src, *is_hiccup));
                             break;
                         }
                     }
@@ -345,11 +381,17 @@ impl SiteRepositoryBuilder {
                     if ext != "html" && ext != "hiccup" {
                         continue;
                     }
-                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
                     if stem == "index" {
                         // templates/index.{ext} → root collection template (stem "")
                         if let Ok(src) = std::fs::read_to_string(&path) {
-                            self.repo.collection_templates.insert(String::new(), (src, is_hiccup));
+                            self.repo
+                                .collection_templates
+                                .insert(String::new(), (src, is_hiccup));
                         }
                     } else {
                         // Partial template
@@ -420,21 +462,27 @@ impl SiteRepositoryBuilder {
     /// Store the root collection schema (served at `/`).
     /// Stored under stem "" in collection_schemas.
     pub fn index_schema(mut self, source: &str) -> Self {
-        self.repo.collection_schemas.insert(String::new(), source.to_string());
+        self.repo
+            .collection_schemas
+            .insert(String::new(), source.to_string());
         self
     }
 
     /// Store the root collection content (served at `/`).
     /// Stored under stem "" in collection_content.
     pub fn index_content(mut self, source: &str) -> Self {
-        self.repo.collection_content.insert(String::new(), source.to_string());
+        self.repo
+            .collection_content
+            .insert(String::new(), source.to_string());
         self
     }
 
     /// Store the root collection template (served at `/`).
     /// Stored under stem "" in collection_templates.
     pub fn index_template(mut self, source: &str, is_hiccup: bool) -> Self {
-        self.repo.collection_templates.insert(String::new(), (source.to_string(), is_hiccup));
+        self.repo
+            .collection_templates
+            .insert(String::new(), (source.to_string(), is_hiccup));
         self
     }
 
@@ -501,7 +549,10 @@ mod tests {
     #[test]
     fn missing_schema_returns_none() {
         let repo = make_repo();
-        assert!(repo.schema_source(&SchemaStem::new("nonexistent")).is_none());
+        assert!(
+            repo.schema_source(&SchemaStem::new("nonexistent"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -529,7 +580,10 @@ mod tests {
     #[test]
     fn missing_content_returns_none() {
         let repo = make_repo();
-        assert!(repo.content_source(&SchemaStem::new("post"), "nonexistent").is_none());
+        assert!(
+            repo.content_source(&SchemaStem::new("post"), "nonexistent")
+                .is_none()
+        );
     }
 
     #[test]

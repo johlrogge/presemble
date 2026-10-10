@@ -1,8 +1,8 @@
+use crate::env::{Env, RootEnv};
+use forms::Form;
 use std::any::Any;
 use std::sync::Arc;
-use forms::Form;
 use template::{Callable, Value};
-use crate::env::{Env, RootEnv};
 
 // ---------------------------------------------------------------------------
 // FnArity
@@ -72,10 +72,7 @@ impl Closure {
     }
 
     /// Apply the closure with the given arguments.
-    pub fn apply(
-        &self,
-        args: Vec<Value>,
-    ) -> Result<Value, String> {
+    pub fn apply(&self, args: Vec<Value>) -> Result<Value, String> {
         let arity = self.match_arity(args.len())?;
 
         // Build a new local env with the captured env as parent.

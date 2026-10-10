@@ -75,7 +75,10 @@ mod tests {
     #[test]
     fn nodes_value_is_a_vector_of_hiccup_forms() {
         let nodes = template::parse_template_xml("<p>hi</p><hr />").unwrap();
-        assert_eq!(value_to_edn(&Value::Nodes(nodes.into())), "[[:p \"hi\"] [:hr]]");
+        assert_eq!(
+            value_to_edn(&Value::Nodes(nodes.into())),
+            "[[:p \"hi\"] [:hr]]"
+        );
         assert_eq!(value_to_edn(&Value::Nodes(Vec::new().into())), "[]");
     }
 

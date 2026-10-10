@@ -48,7 +48,11 @@ fn collect(dir: &Path, base: &Path, out: &mut BTreeMap<String, u64>) {
         if entry.file_type().unwrap().is_dir() {
             collect(&path, base, out);
         } else {
-            let rel = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+            let rel = path
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
             out.insert(rel, fnv1a(&fs::read(&path).unwrap()));
         }
     }
@@ -90,8 +94,15 @@ fn site_templates_render_unchanged() {
     let root = repo_root();
     let mut actual: Vec<String> = render("site", &root.join("site"), false);
     for example in ["blog", "personal", "portfolio"] {
-        actual.extend(render(example, &root.join("example-sites").join(example), true));
+        actual.extend(render(
+            example,
+            &root.join("example-sites").join(example),
+            true,
+        ));
     }
     let actual = actual.join("\n") + "\n";
-    assert_eq!(actual, EXPECTED, "rendered output changed; the new hashes:\n{actual}");
+    assert_eq!(
+        actual, EXPECTED,
+        "rendered output changed; the new hashes:\n{actual}"
+    );
 }

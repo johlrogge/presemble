@@ -117,7 +117,12 @@ impl NreplClient {
             Some(err_parts.join(""))
         };
 
-        Ok(EvalResponse { value, out, err, is_error })
+        Ok(EvalResponse {
+            value,
+            out,
+            err,
+            is_error,
+        })
     }
 
     /// Request completions for `prefix`. Returns a list of candidates.
@@ -140,13 +145,12 @@ impl NreplClient {
         for resp in &responses {
             if let Some(list) = resp.get("completions").and_then(|v| v.as_list()) {
                 for item in list {
-                    if let Some(candidate) =
-                        item.get("candidate").and_then(|v| v.as_str()).map(str::to_string)
+                    if let Some(candidate) = item
+                        .get("candidate")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
                     {
-                        let doc = item
-                            .get("doc")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
+                        let doc = item.get("doc").and_then(|v| v.as_str()).map(str::to_string);
                         let arglists = item
                             .get("arglists")
                             .and_then(|v| v.as_list())
@@ -154,7 +158,11 @@ impl NreplClient {
                             .iter()
                             .filter_map(|v| v.as_str().map(str::to_string))
                             .collect();
-                        entries.push(CompletionEntry { candidate, doc, arglists });
+                        entries.push(CompletionEntry {
+                            candidate,
+                            doc,
+                            arglists,
+                        });
                     }
                 }
             }
@@ -193,7 +201,11 @@ impl NreplClient {
                     .iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect();
-                return Some(DocInfo { name: name.to_string(), doc, arglists });
+                return Some(DocInfo {
+                    name: name.to_string(),
+                    doc,
+                    arglists,
+                });
             }
         }
         None
@@ -212,10 +224,7 @@ impl NreplClient {
     }
 
     /// Send a bencode message and collect all responses until `status: ["done"]`.
-    fn send_and_recv(
-        &mut self,
-        msg: bencode::Value,
-    ) -> Result<Vec<bencode::Value>, String> {
+    fn send_and_recv(&mut self, msg: bencode::Value) -> Result<Vec<bencode::Value>, String> {
         let encoded = bencode::encode(&msg);
         self.stream
             .write_all(&encoded)

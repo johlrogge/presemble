@@ -48,9 +48,18 @@ mod tests {
     #[test]
     fn first_inline_html_finds_tags() {
         assert_eq!(first_inline_html("a <b>x</b> b").as_deref(), Some("<b>"));
-        assert_eq!(first_inline_html("<img src=a> <img src=b>").as_deref(), Some("<img src=a>"));
-        assert_eq!(first_inline_html("- item <span>x</span>").as_deref(), Some("<span>"));
-        assert_eq!(first_inline_html("x <!-- c --> and <i>").as_deref(), Some("<i>"));
+        assert_eq!(
+            first_inline_html("<img src=a> <img src=b>").as_deref(),
+            Some("<img src=a>")
+        );
+        assert_eq!(
+            first_inline_html("- item <span>x</span>").as_deref(),
+            Some("<span>")
+        );
+        assert_eq!(
+            first_inline_html("x <!-- c --> and <i>").as_deref(),
+            Some("<i>")
+        );
         // A line that starts with `<!--` is an HTML block: the whole line.
         assert_eq!(
             first_inline_html("<!-- c --> and <i>").as_deref(),

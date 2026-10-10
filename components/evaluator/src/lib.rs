@@ -1,15 +1,15 @@
-mod env;
 mod closure;
-pub mod primitives;
 pub mod doc_registry;
+mod env;
 pub mod ned_primitives;
+pub mod primitives;
 
-pub use env::{Env, RootEnv};
 pub use closure::{Closure, FnArity, PrimitiveFn};
 pub use doc_registry::{DocEntry, DocRegistry, DocSource};
+pub use env::{Env, RootEnv};
 
-use std::sync::Arc;
 use forms::Form;
+use std::sync::Arc;
 
 /// The core.clj prelude — embedded at compile time.
 const PRELUDE: &str = include_str!("core.clj");
@@ -20,8 +20,7 @@ const NED_PRELUDE: &str = include_str!("ned.clj");
 /// Load the core.clj prelude into the root environment.
 /// Called once after `register_builtins`, before any user evaluation.
 fn load_prelude(root: &RootEnv) -> Result<(), String> {
-    let forms = reader::read_all(PRELUDE)
-        .map_err(|e| format!("prelude read error: {e}"))?;
+    let forms = reader::read_all(PRELUDE).map_err(|e| format!("prelude read error: {e}"))?;
     let env = root.snapshot();
     for form in forms {
         let expanded = macros::macroexpand(form);
@@ -33,8 +32,8 @@ fn load_prelude(root: &RootEnv) -> Result<(), String> {
 /// Load the ned.clj prelude into the root environment.
 /// Called after `register_ned_builtins`, before any user evaluation.
 pub fn load_ned_prelude(root: &RootEnv) -> Result<(), String> {
-    let forms = reader::read_all(NED_PRELUDE)
-        .map_err(|e| format!("ned prelude read error: {e}"))?;
+    let forms =
+        reader::read_all(NED_PRELUDE).map_err(|e| format!("ned prelude read error: {e}"))?;
     let env = root.snapshot();
     for form in forms {
         let expanded = macros::macroexpand(form);
@@ -68,10 +67,7 @@ pub fn eval_str(code: &str) -> Result<template::Value, String> {
 /// Used by the REPL so that `def` forms accumulate across evaluations.
 /// The caller is responsible for initializing `root` with `init_root`
 /// (and optionally `register_conductor_builtins`) before the first call.
-pub fn eval_str_with_root(
-    code: &str,
-    root: &RootEnv,
-) -> Result<template::Value, String> {
+pub fn eval_str_with_root(code: &str, root: &RootEnv) -> Result<template::Value, String> {
     let form = reader::read(code).map_err(|e| format!("read error: {e}"))?;
     let expanded = macros::macroexpand(form);
     let env = root.snapshot();
@@ -135,20 +131,25 @@ pub(crate) fn eval_in_env(
         }
 
         // Symbols: check lexical env, then root env, then error
-        Form::Symbol(name) => {
-            env.get(name)
-                .or_else(|| root.get(name))
-                .ok_or_else(|| format!("unbound symbol: {name}"))
-        }
+        Form::Symbol(name) => env
+            .get(name)
+            .or_else(|| root.get(name))
+            .ok_or_else(|| format!("unbound symbol: {name}")),
 
         // Lists: special forms and function calls
         Form::List(items) if !items.is_empty() => {
             let func_form = &items[0];
 
             // Keywords in function position: (:title record) → (get record :title)
-            if let Form::Keyword { namespace: None, name } = func_form {
+            if let Form::Keyword {
+                namespace: None,
+                name,
+            } = func_form
+            {
                 if items.len() < 2 {
-                    return Err(format!("keyword as function requires an argument: (:{name} map)"));
+                    return Err(format!(
+                        "keyword as function requires an argument: (:{name} map)"
+                    ));
                 }
                 let map_val = eval_in_env(&items[1], env, root)?;
                 let default = if items.len() > 2 {
@@ -170,10 +171,15 @@ pub(crate) fn eval_in_env(
                     // ── (if test then [else]) ────────────────────────────────
                     "if" => {
                         if items.len() < 3 {
-                            return Err("if requires at least 2 arguments: test and then-branch".into());
+                            return Err(
+                                "if requires at least 2 arguments: test and then-branch".into()
+                            );
                         }
                         let test = eval_in_env(&items[1], env, root)?;
-                        let is_truthy = !matches!(&test, template::Value::Bool(false) | template::Value::Absent);
+                        let is_truthy = !matches!(
+                            &test,
+                            template::Value::Bool(false) | template::Value::Absent
+                        );
                         if is_truthy {
                             return eval_in_env(&items[2], env, root);
                         } else if items.len() > 3 {
@@ -216,7 +222,9 @@ pub(crate) fn eval_in_env(
                             _ => return Err("let: first argument must be a binding vector".into()),
                         };
                         if bindings.len() % 2 != 0 {
-                            return Err("let: binding vector must have an even number of forms".into());
+                            return Err(
+                                "let: binding vector must have an even number of forms".into()
+                            );
                         }
 
                         let mut local = Env::with_parent(env.clone());
@@ -256,7 +264,9 @@ pub(crate) fn eval_in_env(
                     // ── (recur args...) ──────────────────────────────────────
                     // TODO(ADR-036): implement tail-call recur in Phase 3
                     "recur" => {
-                        return Err("recur is not yet implemented — use named recursion via def".into());
+                        return Err(
+                            "recur is not yet implemented — use named recursion via def".into()
+                        );
                     }
 
                     // ── (def-doc! name "docstring" "[args]" ...) ─────────────
@@ -264,9 +274,9 @@ pub(crate) fn eval_in_env(
                         if items.len() < 3 {
                             return Err("def-doc! requires at least name and docstring".into());
                         }
-                        let name = items[1]
-                            .as_symbol()
-                            .ok_or_else(|| "def-doc!: first argument must be a symbol".to_string())?;
+                        let name = items[1].as_symbol().ok_or_else(|| {
+                            "def-doc!: first argument must be a symbol".to_string()
+                        })?;
                         let doc = match &items[2] {
                             Form::Str(s) => s.clone(),
                             _ => return Err("def-doc!: second argument must be a docstring".into()),
@@ -352,11 +362,7 @@ pub(crate) fn eval_in_env(
 // ---------------------------------------------------------------------------
 
 /// Parse and construct a `fn` closure from the remaining items after the `fn` symbol.
-fn eval_fn_form(
-    items: &[Form],
-    env: &Arc<Env>,
-    root: &RootEnv,
-) -> Result<template::Value, String> {
+fn eval_fn_form(items: &[Form], env: &Arc<Env>, root: &RootEnv) -> Result<template::Value, String> {
     if items.is_empty() {
         return Err("fn requires at least a parameter vector".into());
     }
@@ -379,17 +385,16 @@ fn eval_fn_form(
             vec![arity]
         }
         // Multi-arity: (fn ([params] body...) ([params] body...) ...)
-        Form::List(_) => {
-            rest.iter()
-                .map(|clause| {
-                    let inner = match clause {
-                        Form::List(items) => items.as_slice(),
-                        _ => return Err("fn multi-arity clause must be a list".into()),
-                    };
-                    parse_fn_arity(inner)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        }
+        Form::List(_) => rest
+            .iter()
+            .map(|clause| {
+                let inner = match clause {
+                    Form::List(items) => items.as_slice(),
+                    _ => return Err("fn multi-arity clause must be a list".into()),
+                };
+                parse_fn_arity(inner)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         other => return Err(format!("fn: expected parameter vector, got: {other}")),
     };
 
@@ -406,7 +411,11 @@ fn eval_fn_form(
 fn parse_fn_arity(items: &[Form]) -> Result<FnArity, String> {
     let param_vec = match items.first() {
         Some(Form::Vector(v)) => v,
-        other => return Err(format!("fn arity must start with a parameter vector, got: {other:?}")),
+        other => {
+            return Err(format!(
+                "fn arity must start with a parameter vector, got: {other:?}"
+            ));
+        }
     };
 
     let mut params = Vec::new();
@@ -431,7 +440,11 @@ fn parse_fn_arity(items: &[Form]) -> Result<FnArity, String> {
     }
 
     let body = items[1..].to_vec();
-    Ok(FnArity { params, rest_param, body })
+    Ok(FnArity {
+        params,
+        rest_param,
+        body,
+    })
 }
 
 /// Convert a `Form` to a `Value` for `quote`.
@@ -447,17 +460,13 @@ fn form_to_value(form: &Form) -> Result<template::Value, String> {
             name: name.clone(),
         }),
         Form::Vector(items) => {
-            let values: Vec<template::Value> = items
-                .iter()
-                .map(form_to_value)
-                .collect::<Result<_, _>>()?;
+            let values: Vec<template::Value> =
+                items.iter().map(form_to_value).collect::<Result<_, _>>()?;
             Ok(template::Value::List(values))
         }
         Form::List(items) => {
-            let values: Vec<template::Value> = items
-                .iter()
-                .map(form_to_value)
-                .collect::<Result<_, _>>()?;
+            let values: Vec<template::Value> =
+                items.iter().map(form_to_value).collect::<Result<_, _>>()?;
             Ok(template::Value::List(values))
         }
         Form::Map(pairs) => {
@@ -481,21 +490,32 @@ fn form_to_value(form: &Form) -> Result<template::Value, String> {
 
 /// Apply a `Value` (keyword or callable) to a single item value.
 /// This is the core helper for map, filter, sort-by, every?, some.
-fn apply_value_to_value(func: &template::Value, val: &template::Value) -> Result<template::Value, String> {
+fn apply_value_to_value(
+    func: &template::Value,
+    val: &template::Value,
+) -> Result<template::Value, String> {
     match func {
-        template::Value::Keyword { namespace: None, name } => {
-            match val {
-                template::Value::Record(r) => Ok(r.resolve(&[name.as_str()]).cloned().unwrap_or(template::Value::Absent)),
-                _ => Ok(template::Value::Absent),
-            }
-        }
+        template::Value::Keyword {
+            namespace: None,
+            name,
+        } => match val {
+            template::Value::Record(r) => Ok(r
+                .resolve(&[name.as_str()])
+                .cloned()
+                .unwrap_or(template::Value::Absent)),
+            _ => Ok(template::Value::Absent),
+        },
         template::Value::Fn(callable) => callable.call(vec![val.clone()]),
         other => Err(format!("not a function: {other:?}")),
     }
 }
 
 /// Apply a `Value` (keyword or callable) to two args (for reduce).
-fn apply_value_to_two(func: &template::Value, a: template::Value, b: template::Value) -> Result<template::Value, String> {
+fn apply_value_to_two(
+    func: &template::Value,
+    a: template::Value,
+    b: template::Value,
+) -> Result<template::Value, String> {
     match func {
         template::Value::Fn(callable) => callable.call(vec![a, b]),
         other => Err(format!("reduce: not a function: {other:?}")),
@@ -503,14 +523,18 @@ fn apply_value_to_two(func: &template::Value, a: template::Value, b: template::V
 }
 
 /// Apply a `Value` (keyword or callable) to a list of args.
-fn call_value(func: &template::Value, args: Vec<template::Value>) -> Result<template::Value, String> {
+fn call_value(
+    func: &template::Value,
+    args: Vec<template::Value>,
+) -> Result<template::Value, String> {
     match func {
-        template::Value::Keyword { name, .. } => {
-            match args.first() {
-                Some(template::Value::Record(r)) => Ok(r.resolve(&[name.as_str()]).cloned().unwrap_or(template::Value::Absent)),
-                _ => Ok(template::Value::Absent),
-            }
-        }
+        template::Value::Keyword { name, .. } => match args.first() {
+            Some(template::Value::Record(r)) => Ok(r
+                .resolve(&[name.as_str()])
+                .cloned()
+                .unwrap_or(template::Value::Absent)),
+            _ => Ok(template::Value::Absent),
+        },
         template::Value::Fn(callable) => callable.call(args),
         other => Err(format!("not a function: {other:?}")),
     }
@@ -540,192 +564,250 @@ fn prim_reg(
 /// println, doc) as PrimitiveFn entries in the root environment.
 /// These do not need conductor access.
 pub fn register_higher_order_builtins(root: &RootEnv) {
-    prim_reg(root, "map", "(map f coll)", "Apply f to each item in coll.", |args: Vec<template::Value>| {
-        if args.len() < 2 {
-            return Err("map requires 2 arguments: function and collection".into());
-        }
-        let func = &args[0];
-        let items = match &args[args.len() - 1] {
-            template::Value::List(items) => items.clone(),
-            _ => return Err("map expects a list as the last argument".into()),
-        };
-        let results: Vec<template::Value> = items
-            .into_iter()
-            .map(|item| apply_value_to_value(func, &item))
-            .collect::<Result<_, _>>()?;
-        Ok(template::Value::List(results))
-    });
+    prim_reg(
+        root,
+        "map",
+        "(map f coll)",
+        "Apply f to each item in coll.",
+        |args: Vec<template::Value>| {
+            if args.len() < 2 {
+                return Err("map requires 2 arguments: function and collection".into());
+            }
+            let func = &args[0];
+            let items = match &args[args.len() - 1] {
+                template::Value::List(items) => items.clone(),
+                _ => return Err("map expects a list as the last argument".into()),
+            };
+            let results: Vec<template::Value> = items
+                .into_iter()
+                .map(|item| apply_value_to_value(func, &item))
+                .collect::<Result<_, _>>()?;
+            Ok(template::Value::List(results))
+        },
+    );
 
-    prim_reg(root, "filter", "(filter pred coll) or (filter :field val coll)", "Filter items by predicate or field value.", |args: Vec<template::Value>| {
-        if args.len() < 2 {
-            return Err("filter requires at least 2 arguments".into());
-        }
-        // 2-arg form: (filter pred coll)
-        if args.len() == 2 {
-            let pred = &args[0];
-            let items = match &args[1] {
+    prim_reg(
+        root,
+        "filter",
+        "(filter pred coll) or (filter :field val coll)",
+        "Filter items by predicate or field value.",
+        |args: Vec<template::Value>| {
+            if args.len() < 2 {
+                return Err("filter requires at least 2 arguments".into());
+            }
+            // 2-arg form: (filter pred coll)
+            if args.len() == 2 {
+                let pred = &args[0];
+                let items = match &args[1] {
+                    template::Value::List(items) => items.clone(),
+                    _ => return Err("filter expects a list".into()),
+                };
+                let filtered: Vec<template::Value> = items
+                    .into_iter()
+                    .filter_map(|item| {
+                        let result = apply_value_to_value(pred, &item).ok()?;
+                        match result {
+                            template::Value::Bool(false) | template::Value::Absent => None,
+                            _ => Some(item),
+                        }
+                    })
+                    .collect();
+                return Ok(template::Value::List(filtered));
+            }
+            // 3-arg form: (filter :field value coll)
+            let field = match &args[0] {
+                template::Value::Keyword { name, .. } => name.clone(),
+                _ => return Err("filter: 3-arg form requires a keyword as first argument".into()),
+            };
+            let target_str = primitives::value_to_string(&args[1]);
+            let items = match &args[2] {
                 template::Value::List(items) => items.clone(),
                 _ => return Err("filter expects a list".into()),
             };
-            let filtered: Vec<template::Value> = items
+            let filtered = items
                 .into_iter()
-                .filter_map(|item| {
-                    let result = apply_value_to_value(pred, &item).ok()?;
-                    match result {
-                        template::Value::Bool(false) | template::Value::Absent => None,
-                        _ => Some(item),
+                .filter(|item| {
+                    if let template::Value::Record(r) = item {
+                        r.resolve(&[field.as_str()])
+                            .and_then(|v| v.display_text())
+                            .map(|t| t == target_str)
+                            .unwrap_or(false)
+                    } else {
+                        false
                     }
                 })
                 .collect();
-            return Ok(template::Value::List(filtered));
-        }
-        // 3-arg form: (filter :field value coll)
-        let field = match &args[0] {
-            template::Value::Keyword { name, .. } => name.clone(),
-            _ => return Err("filter: 3-arg form requires a keyword as first argument".into()),
-        };
-        let target_str = primitives::value_to_string(&args[1]);
-        let items = match &args[2] {
-            template::Value::List(items) => items.clone(),
-            _ => return Err("filter expects a list".into()),
-        };
-        let filtered = items
-            .into_iter()
-            .filter(|item| {
-                if let template::Value::Record(r) = item {
+            Ok(template::Value::List(filtered))
+        },
+    );
+
+    prim_reg(
+        root,
+        "reduce",
+        "(reduce f coll) or (reduce f init coll)",
+        "Fold over a collection.",
+        |args: Vec<template::Value>| {
+            if args.len() < 2 {
+                return Err("reduce requires at least 2 arguments: fn and collection".into());
+            }
+            let func = &args[0];
+            let (init, items) = if args.len() == 2 {
+                let items = match &args[1] {
+                    template::Value::List(items) => items.clone(),
+                    _ => return Err("reduce expects a list".into()),
+                };
+                (None, items)
+            } else {
+                let items = match &args[2] {
+                    template::Value::List(items) => items.clone(),
+                    _ => return Err("reduce expects a list".into()),
+                };
+                (Some(args[1].clone()), items)
+            };
+            let mut iter = items.into_iter();
+            let mut acc = match init {
+                Some(v) => v,
+                None => iter.next().unwrap_or(template::Value::Absent),
+            };
+            for item in iter {
+                acc = apply_value_to_two(func, acc, item)?;
+            }
+            Ok(acc)
+        },
+    );
+
+    prim_reg(
+        root,
+        "apply",
+        "(apply f arg1 ... args-list)",
+        "Apply function to list of arguments.",
+        |args: Vec<template::Value>| {
+            if args.len() < 2 {
+                return Err("apply requires at least 2 arguments: fn and args-list".into());
+            }
+            let func = &args[0];
+            let last = args.last().unwrap();
+            let coll_args = match last {
+                template::Value::List(items) => items.clone(),
+                _ => return Err("apply: last argument must be a list".into()),
+            };
+            let mut all_args: Vec<template::Value> = args[1..args.len() - 1].to_vec();
+            all_args.extend(coll_args);
+            call_value(func, all_args)
+        },
+    );
+
+    prim_reg(
+        root,
+        "every?",
+        "(every? pred coll)",
+        "True if pred returns truthy for all items.",
+        |args: Vec<template::Value>| {
+            if args.len() != 2 {
+                return Err("every? requires 2 arguments: pred and coll".into());
+            }
+            let func = &args[0];
+            match &args[1] {
+                template::Value::List(items) => {
+                    for item in items {
+                        let result = apply_value_to_value(func, item)?;
+                        if matches!(
+                            result,
+                            template::Value::Bool(false) | template::Value::Absent
+                        ) {
+                            return Ok(template::Value::Bool(false));
+                        }
+                    }
+                    Ok(template::Value::Bool(true))
+                }
+                _ => Err("every? expects a list as second argument".into()),
+            }
+        },
+    );
+
+    prim_reg(
+        root,
+        "some",
+        "(some pred coll)",
+        "First truthy result of pred applied to items, or nil.",
+        |args: Vec<template::Value>| {
+            if args.len() != 2 {
+                return Err("some requires 2 arguments: pred and coll".into());
+            }
+            let func = &args[0];
+            match &args[1] {
+                template::Value::List(items) => {
+                    for item in items {
+                        let result = apply_value_to_value(func, item)?;
+                        if !matches!(
+                            result,
+                            template::Value::Bool(false) | template::Value::Absent
+                        ) {
+                            return Ok(result);
+                        }
+                    }
+                    Ok(template::Value::Absent)
+                }
+                _ => Err("some requires a list as second argument".into()),
+            }
+        },
+    );
+
+    prim_reg(
+        root,
+        "sort-by",
+        "(sort-by :field coll) or (sort-by :field :desc coll)",
+        "Sort list by keyword field.",
+        |args: Vec<template::Value>| {
+            if args.len() < 2 {
+                return Err("sort-by requires at least 2 arguments: field and collection".into());
+            }
+            let field = match &args[0] {
+                template::Value::Keyword { name, .. } => name.clone(),
+                _ => return Err("sort-by field must be a keyword".into()),
+            };
+            let descending = args.len() > 2
+                && matches!(&args[1], template::Value::Keyword { name, .. } if name == "desc");
+            let mut items = match &args[args.len() - 1] {
+                template::Value::List(items) => items.clone(),
+                _ => return Err("sort-by expects a list".into()),
+            };
+            items.sort_by(|a, b| {
+                let a_val = if let template::Value::Record(r) = a {
                     r.resolve(&[field.as_str()])
                         .and_then(|v| v.display_text())
-                        .map(|t| t == target_str)
-                        .unwrap_or(false)
+                        .unwrap_or_default()
                 } else {
-                    false
+                    String::new()
+                };
+                let b_val = if let template::Value::Record(r) = b {
+                    r.resolve(&[field.as_str()])
+                        .and_then(|v| v.display_text())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                if descending {
+                    b_val.cmp(&a_val)
+                } else {
+                    a_val.cmp(&b_val)
                 }
-            })
-            .collect();
-        Ok(template::Value::List(filtered))
-    });
+            });
+            Ok(template::Value::List(items))
+        },
+    );
 
-    prim_reg(root, "reduce", "(reduce f coll) or (reduce f init coll)", "Fold over a collection.", |args: Vec<template::Value>| {
-        if args.len() < 2 {
-            return Err("reduce requires at least 2 arguments: fn and collection".into());
-        }
-        let func = &args[0];
-        let (init, items) = if args.len() == 2 {
-            let items = match &args[1] {
-                template::Value::List(items) => items.clone(),
-                _ => return Err("reduce expects a list".into()),
-            };
-            (None, items)
-        } else {
-            let items = match &args[2] {
-                template::Value::List(items) => items.clone(),
-                _ => return Err("reduce expects a list".into()),
-            };
-            (Some(args[1].clone()), items)
-        };
-        let mut iter = items.into_iter();
-        let mut acc = match init {
-            Some(v) => v,
-            None => iter.next().unwrap_or(template::Value::Absent),
-        };
-        for item in iter {
-            acc = apply_value_to_two(func, acc, item)?;
-        }
-        Ok(acc)
-    });
-
-    prim_reg(root, "apply", "(apply f arg1 ... args-list)", "Apply function to list of arguments.", |args: Vec<template::Value>| {
-        if args.len() < 2 {
-            return Err("apply requires at least 2 arguments: fn and args-list".into());
-        }
-        let func = &args[0];
-        let last = args.last().unwrap();
-        let coll_args = match last {
-            template::Value::List(items) => items.clone(),
-            _ => return Err("apply: last argument must be a list".into()),
-        };
-        let mut all_args: Vec<template::Value> = args[1..args.len() - 1].to_vec();
-        all_args.extend(coll_args);
-        call_value(func, all_args)
-    });
-
-    prim_reg(root, "every?", "(every? pred coll)", "True if pred returns truthy for all items.", |args: Vec<template::Value>| {
-        if args.len() != 2 {
-            return Err("every? requires 2 arguments: pred and coll".into());
-        }
-        let func = &args[0];
-        match &args[1] {
-            template::Value::List(items) => {
-                for item in items {
-                    let result = apply_value_to_value(func, item)?;
-                    if matches!(result, template::Value::Bool(false) | template::Value::Absent) {
-                        return Ok(template::Value::Bool(false));
-                    }
-                }
-                Ok(template::Value::Bool(true))
-            }
-            _ => Err("every? expects a list as second argument".into()),
-        }
-    });
-
-    prim_reg(root, "some", "(some pred coll)", "First truthy result of pred applied to items, or nil.", |args: Vec<template::Value>| {
-        if args.len() != 2 {
-            return Err("some requires 2 arguments: pred and coll".into());
-        }
-        let func = &args[0];
-        match &args[1] {
-            template::Value::List(items) => {
-                for item in items {
-                    let result = apply_value_to_value(func, item)?;
-                    if !matches!(result, template::Value::Bool(false) | template::Value::Absent) {
-                        return Ok(result);
-                    }
-                }
-                Ok(template::Value::Absent)
-            }
-            _ => Err("some requires a list as second argument".into()),
-        }
-    });
-
-    prim_reg(root, "sort-by", "(sort-by :field coll) or (sort-by :field :desc coll)", "Sort list by keyword field.", |args: Vec<template::Value>| {
-        if args.len() < 2 {
-            return Err("sort-by requires at least 2 arguments: field and collection".into());
-        }
-        let field = match &args[0] {
-            template::Value::Keyword { name, .. } => name.clone(),
-            _ => return Err("sort-by field must be a keyword".into()),
-        };
-        let descending = args.len() > 2
-            && matches!(&args[1], template::Value::Keyword { name, .. } if name == "desc");
-        let mut items = match &args[args.len() - 1] {
-            template::Value::List(items) => items.clone(),
-            _ => return Err("sort-by expects a list".into()),
-        };
-        items.sort_by(|a, b| {
-            let a_val = if let template::Value::Record(r) = a {
-                r.resolve(&[field.as_str()])
-                    .and_then(|v| v.display_text())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let b_val = if let template::Value::Record(r) = b {
-                r.resolve(&[field.as_str()])
-                    .and_then(|v| v.display_text())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            if descending { b_val.cmp(&a_val) } else { a_val.cmp(&b_val) }
-        });
-        Ok(template::Value::List(items))
-    });
-
-    prim_reg(root, "println", "(println val ...)", "Print values to stderr, separated by spaces.", |args: Vec<template::Value>| {
-        let parts: Vec<String> = args.iter().map(primitives::value_to_string).collect();
-        eprintln!("{}", parts.join(" "));
-        Ok(template::Value::Absent)
-    });
+    prim_reg(
+        root,
+        "println",
+        "(println val ...)",
+        "Print values to stderr, separated by spaces.",
+        |args: Vec<template::Value>| {
+            let parts: Vec<String> = args.iter().map(primitives::value_to_string).collect();
+            eprintln!("{}", parts.join(" "));
+            Ok(template::Value::Absent)
+        },
+    );
 
     // Register `doc` capturing the doc_registry (Arc-backed, so clone shares state).
     let doc_reg = root.doc_registry.clone();
@@ -775,12 +857,10 @@ pub fn register_higher_order_builtins(root: &RootEnv) {
                 template::Value::Keyword { name, .. } => name.clone(),
                 // When a symbol like `+` is evaluated it becomes a Value::Fn;
                 // extract the function name to look up docs.
-                template::Value::Fn(callable) => {
-                    match callable.name() {
-                        Some(n) => n.to_string(),
-                        None => return Err("doc: anonymous function has no documentation".into()),
-                    }
-                }
+                template::Value::Fn(callable) => match callable.name() {
+                    Some(n) => n.to_string(),
+                    None => return Err("doc: anonymous function has no documentation".into()),
+                },
                 other => return Err(format!("doc expects a symbol or string, got: {other:?}")),
             };
             match doc_reg_clone.lookup(&name) {
@@ -799,7 +879,8 @@ pub fn register_higher_order_builtins(root: &RootEnv) {
         root.def("doc".to_string(), prim.into_value());
         root.doc_registry.register(DocEntry {
             name: "doc".to_string(),
-            doc: "Show documentation for a function. With no args, lists all functions.".to_string(),
+            doc: "Show documentation for a function. With no args, lists all functions."
+                .to_string(),
             arglists: vec!["(doc name)".to_string(), "(doc)".to_string()],
             source: DocSource::Primitive,
         });
@@ -817,30 +898,114 @@ pub fn register_macro_docs(registry: &crate::doc_registry::DocRegistry) {
     use crate::doc_registry::{DocEntry, DocSource};
 
     let macros: &[(&str, &str, &str)] = &[
-        ("->",      "(-> x (f a) (g b) ...)",      "Thread-first: insert x as first arg of each form left-to-right."),
-        ("->>",     "(->> x (f a) (g b) ...)",     "Thread-last: insert x as last arg of each form left-to-right."),
-        ("as->",    "(as-> expr name form ...)",    "Thread expr as name through each form."),
-        ("some->",  "(some-> x (f a) ...)",         "Thread-first, short-circuiting on nil."),
-        ("some->>", "(some->> x (f a) ...)",        "Thread-last, short-circuiting on nil."),
-        ("cond->",  "(cond-> x test (f a) ...)",    "Thread-first conditionally; does not short-circuit."),
-        ("cond->>", "(cond->> x test (f a) ...)",   "Thread-last conditionally; does not short-circuit."),
-        ("when",    "(when test body ...)",          "Evaluate body forms when test is truthy, else nil."),
-        ("when-not","(when-not test body ...)",      "Evaluate body forms when test is falsy, else nil."),
-        ("if-not",  "(if-not test then else?)",      "If test is falsy, evaluate then; otherwise else."),
-        ("if-let",  "(if-let [x expr] then else?)", "Bind expr to x; if truthy evaluate then, else else."),
-        ("when-let","(when-let [x expr] body ...)", "Bind expr to x; if truthy evaluate body forms."),
-        ("cond",    "(cond test expr ... :else expr)", "Evaluate first expr whose test is truthy."),
-        ("and",     "(and x y ...)",                 "Short-circuit logical and; returns last truthy value or false."),
-        ("or",      "(or x y ...)",                  "Short-circuit logical or; returns first truthy value or nil."),
-        ("defn",    "(defn name \"doc?\" [args] body ...)", "Define a named function, optionally with a docstring."),
+        (
+            "->",
+            "(-> x (f a) (g b) ...)",
+            "Thread-first: insert x as first arg of each form left-to-right.",
+        ),
+        (
+            "->>",
+            "(->> x (f a) (g b) ...)",
+            "Thread-last: insert x as last arg of each form left-to-right.",
+        ),
+        (
+            "as->",
+            "(as-> expr name form ...)",
+            "Thread expr as name through each form.",
+        ),
+        (
+            "some->",
+            "(some-> x (f a) ...)",
+            "Thread-first, short-circuiting on nil.",
+        ),
+        (
+            "some->>",
+            "(some->> x (f a) ...)",
+            "Thread-last, short-circuiting on nil.",
+        ),
+        (
+            "cond->",
+            "(cond-> x test (f a) ...)",
+            "Thread-first conditionally; does not short-circuit.",
+        ),
+        (
+            "cond->>",
+            "(cond->> x test (f a) ...)",
+            "Thread-last conditionally; does not short-circuit.",
+        ),
+        (
+            "when",
+            "(when test body ...)",
+            "Evaluate body forms when test is truthy, else nil.",
+        ),
+        (
+            "when-not",
+            "(when-not test body ...)",
+            "Evaluate body forms when test is falsy, else nil.",
+        ),
+        (
+            "if-not",
+            "(if-not test then else?)",
+            "If test is falsy, evaluate then; otherwise else.",
+        ),
+        (
+            "if-let",
+            "(if-let [x expr] then else?)",
+            "Bind expr to x; if truthy evaluate then, else else.",
+        ),
+        (
+            "when-let",
+            "(when-let [x expr] body ...)",
+            "Bind expr to x; if truthy evaluate body forms.",
+        ),
+        (
+            "cond",
+            "(cond test expr ... :else expr)",
+            "Evaluate first expr whose test is truthy.",
+        ),
+        (
+            "and",
+            "(and x y ...)",
+            "Short-circuit logical and; returns last truthy value or false.",
+        ),
+        (
+            "or",
+            "(or x y ...)",
+            "Short-circuit logical or; returns first truthy value or nil.",
+        ),
+        (
+            "defn",
+            "(defn name \"doc?\" [args] body ...)",
+            "Define a named function, optionally with a docstring.",
+        ),
         // Special forms
-        ("if",      "(if test then else?)",          "If test is truthy evaluate then, otherwise else or nil."),
-        ("let",     "(let [x v ...] body ...)",      "Bind names to values in local scope."),
-        ("do",      "(do form ...)",                 "Evaluate forms in sequence; return last value."),
-        ("def",     "(def name value)",              "Define a global binding."),
-        ("fn",      "(fn [args] body ...)",          "Create an anonymous function."),
-        ("quote",   "(quote form)",                  "Return form unevaluated."),
-        ("query",   "(query :stem)",                 "Query all content items for the given schema stem."),
+        (
+            "if",
+            "(if test then else?)",
+            "If test is truthy evaluate then, otherwise else or nil.",
+        ),
+        (
+            "let",
+            "(let [x v ...] body ...)",
+            "Bind names to values in local scope.",
+        ),
+        (
+            "do",
+            "(do form ...)",
+            "Evaluate forms in sequence; return last value.",
+        ),
+        ("def", "(def name value)", "Define a global binding."),
+        (
+            "fn",
+            "(fn [args] body ...)",
+            "Create an anonymous function.",
+        ),
+        ("quote", "(quote form)", "Return form unevaluated."),
+        (
+            "query",
+            "(query :stem)",
+            "Query all content items for the given schema stem.",
+        ),
     ];
 
     for (name, sig, doc) in macros {
@@ -892,23 +1057,32 @@ mod tests {
         {
             let cond = Arc::clone(conductor);
             prim_reg(root, "query", move |args| {
-                if args.is_empty() { return Err("query requires 1 argument".into()); }
+                if args.is_empty() {
+                    return Err("query requires 1 argument".into());
+                }
                 let stem = match &args[0] {
                     template::Value::Keyword { name, .. } => name.clone(),
                     template::Value::Text(s) => s.clone(),
                     _ => return Err("query expects a keyword or string".into()),
                 };
                 let items = cond.query_items_for_stem(&stem);
-                Ok(template::Value::List(items.into_iter().map(|(url, mut g)| {
-                    g.insert("url", template::Value::Text(url));
-                    template::Value::Record(g)
-                }).collect()))
+                Ok(template::Value::List(
+                    items
+                        .into_iter()
+                        .map(|(url, mut g)| {
+                            g.insert("url", template::Value::Text(url));
+                            template::Value::Record(g)
+                        })
+                        .collect(),
+                ))
             });
         }
         {
             let cond = Arc::clone(conductor);
             prim_reg(root, "get-content", move |args| {
-                if args.is_empty() { return Err("get-content requires 1 argument".into()); }
+                if args.is_empty() {
+                    return Err("get-content requires 1 argument".into());
+                }
                 let path_str = match &args[0] {
                     template::Value::Text(s) => s.clone(),
                     _ => return Err("get-content path must be a string".into()),
@@ -924,7 +1098,9 @@ mod tests {
         {
             let cond = Arc::clone(conductor);
             prim_reg(root, "get-schema", move |args| {
-                if args.is_empty() { return Err("get-schema requires 1 argument".into()); }
+                if args.is_empty() {
+                    return Err("get-schema requires 1 argument".into());
+                }
                 let stem = match &args[0] {
                     template::Value::Keyword { name, .. } => name.clone(),
                     template::Value::Text(s) => s.clone(),
@@ -939,7 +1115,12 @@ mod tests {
         {
             let cond = Arc::clone(conductor);
             prim_reg(root, "list-content", move |_args| {
-                Ok(template::Value::List(cond.list_content_urls().into_iter().map(template::Value::Text).collect()))
+                Ok(template::Value::List(
+                    cond.list_content_urls()
+                        .into_iter()
+                        .map(template::Value::Text)
+                        .collect(),
+                ))
             });
         }
         {
@@ -947,41 +1128,69 @@ mod tests {
             prim_reg(root, "list-schemas", move |_args| {
                 let mut stems = cond.list_schemas();
                 stems.sort();
-                Ok(template::Value::List(stems.into_iter().map(template::Value::Text).collect()))
+                Ok(template::Value::List(
+                    stems.into_iter().map(template::Value::Text).collect(),
+                ))
             });
         }
         {
             let cond = Arc::clone(conductor);
             prim_reg(root, "refs-to", move |args| {
-                if args.is_empty() { return Err("refs-to requires 1 argument: a URL path string".into()); }
+                if args.is_empty() {
+                    return Err("refs-to requires 1 argument: a URL path string".into());
+                }
                 let url_str = match &args[0] {
                     template::Value::Text(s) => s.clone(),
                     _ => return Err("refs-to: argument must be a string URL path".into()),
                 };
                 let edges = cond.query_edges_to(&url_str);
-                Ok(template::Value::List(edges.iter().map(|e| {
-                    let mut r = template::DataGraph::new();
-                    r.insert("source", template::Value::Text(e.source.as_str().to_string()));
-                    r.insert("target", template::Value::Text(e.target.as_str().to_string()));
-                    template::Value::Record(r)
-                }).collect()))
+                Ok(template::Value::List(
+                    edges
+                        .iter()
+                        .map(|e| {
+                            let mut r = template::DataGraph::new();
+                            r.insert(
+                                "source",
+                                template::Value::Text(e.source.as_str().to_string()),
+                            );
+                            r.insert(
+                                "target",
+                                template::Value::Text(e.target.as_str().to_string()),
+                            );
+                            template::Value::Record(r)
+                        })
+                        .collect(),
+                ))
             });
         }
         {
             let cond = Arc::clone(conductor);
             prim_reg(root, "refs-from", move |args| {
-                if args.is_empty() { return Err("refs-from requires 1 argument: a URL path string".into()); }
+                if args.is_empty() {
+                    return Err("refs-from requires 1 argument: a URL path string".into());
+                }
                 let url_str = match &args[0] {
                     template::Value::Text(s) => s.clone(),
                     _ => return Err("refs-from: argument must be a string URL path".into()),
                 };
                 let edges = cond.query_edges_from(&url_str);
-                Ok(template::Value::List(edges.iter().map(|e| {
-                    let mut r = template::DataGraph::new();
-                    r.insert("source", template::Value::Text(e.source.as_str().to_string()));
-                    r.insert("target", template::Value::Text(e.target.as_str().to_string()));
-                    template::Value::Record(r)
-                }).collect()))
+                Ok(template::Value::List(
+                    edges
+                        .iter()
+                        .map(|e| {
+                            let mut r = template::DataGraph::new();
+                            r.insert(
+                                "source",
+                                template::Value::Text(e.source.as_str().to_string()),
+                            );
+                            r.insert(
+                                "target",
+                                template::Value::Text(e.target.as_str().to_string()),
+                            );
+                            template::Value::Record(r)
+                        })
+                        .collect(),
+                ))
             });
         }
     }
@@ -996,19 +1205,30 @@ mod tests {
         if code.starts_with(':') && !code.contains(' ') {
             let stem = &code[1..];
             let items = conductor.query_items_for_stem(stem);
-            return Ok(template::Value::List(items.into_iter().map(|(url, mut g)| {
-                g.insert("url", template::Value::Text(url));
-                template::Value::Record(g)
-            }).collect()));
+            return Ok(template::Value::List(
+                items
+                    .into_iter()
+                    .map(|(url, mut g)| {
+                        g.insert("url", template::Value::Text(url));
+                        template::Value::Record(g)
+                    })
+                    .collect(),
+            ));
         }
         if code.starts_with("(->>") || code.starts_with("(->") {
-            let target = content::parse_link_target(code)
-                .map_err(|e| format!("parse error: {e}"))?;
+            let target =
+                content::parse_link_target(code).map_err(|e| format!("parse error: {e}"))?;
             let text = content::LinkText::Empty;
-            let (url_index, stem_index, links_to) = conductor.build_expression_indexes_from_store_pub();
+            let (url_index, stem_index, links_to) =
+                conductor.build_expression_indexes_from_store_pub();
             let current_url = site_index::UrlPath::new("/");
             return Ok(expressions::evaluate_link_expression(
-                &text, &target, &url_index, &stem_index, &current_url, &links_to,
+                &text,
+                &target,
+                &url_index,
+                &stem_index,
+                &current_url,
+                &links_to,
             ));
         }
         if code.starts_with("(get-content") {
@@ -1025,7 +1245,9 @@ mod tests {
         if code.starts_with("(get-schema") {
             let start = code.find(':').ok_or("expected keyword argument")?;
             let rest = &code[start + 1..];
-            let end = rest.find(|c: char| c == ')' || c.is_whitespace()).unwrap_or(rest.len());
+            let end = rest
+                .find(|c: char| c == ')' || c.is_whitespace())
+                .unwrap_or(rest.len());
             let stem = &rest[..end];
             return match conductor.schema_source(stem) {
                 Some(src) => Ok(template::Value::Text(src)),
@@ -1033,18 +1255,29 @@ mod tests {
             };
         }
         if code.starts_with("(list-content") {
-            return Ok(template::Value::List(conductor.list_content_urls().into_iter().map(template::Value::Text).collect()));
+            return Ok(template::Value::List(
+                conductor
+                    .list_content_urls()
+                    .into_iter()
+                    .map(template::Value::Text)
+                    .collect(),
+            ));
         }
         if code.starts_with("(list-schemas") {
             let mut stems = conductor.list_schemas();
             stems.sort();
-            return Ok(template::Value::List(stems.into_iter().map(template::Value::Text).collect()));
+            return Ok(template::Value::List(
+                stems.into_iter().map(template::Value::Text).collect(),
+            ));
         }
         Err(format!("unknown expression: {code}"))
     }
 
     /// Evaluate a string expression with a conductor's builtins registered.
-    fn eval_with_conductor(code: &str, cond: &Arc<conductor::Conductor>) -> Result<template::Value, String> {
+    fn eval_with_conductor(
+        code: &str,
+        cond: &Arc<conductor::Conductor>,
+    ) -> Result<template::Value, String> {
         let root = RootEnv::new();
         init_root(&root)?;
         register_conductor_builtins(&root, cond);
@@ -1391,7 +1624,9 @@ mod tests {
     #[test]
     fn keyword_evaluates_to_keyword_value() {
         let result = eval_str(":post").unwrap();
-        assert!(matches!(&result, template::Value::Keyword { namespace: None, name } if name == "post"));
+        assert!(
+            matches!(&result, template::Value::Keyword { namespace: None, name } if name == "post")
+        );
     }
 
     #[test]
@@ -1448,7 +1683,8 @@ mod tests {
         let repo = site_repository::SiteRepository::builder()
             .schema("post", POST_SCHEMA_SRC)
             .build();
-        let cond = Arc::new(conductor::Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap());
+        let cond =
+            Arc::new(conductor::Conductor::with_repo(PathBuf::from("/test-site"), repo).unwrap());
 
         // Build document with a link-expression targeting /author/alice in a
         // preamble slot (a declared reference), and one targeting
@@ -1503,10 +1739,14 @@ mod tests {
             let node_store_arc = cond.node_store();
             let mut store = node_store_arc.write().unwrap();
             let root_with_link = node_store_bridge::content_bridge::document_to_store(
-                &doc_with_link, &mut store, Some(&meta_with_link),
+                &doc_with_link,
+                &mut store,
+                Some(&meta_with_link),
             );
             let root_no_link = node_store_bridge::content_bridge::document_to_store(
-                &doc_no_link, &mut store, Some(&meta_no_link),
+                &doc_no_link,
+                &mut store,
+                Some(&meta_no_link),
             );
             drop(store);
 
@@ -1602,7 +1842,11 @@ mod tests {
         let cond = empty_conductor();
         let result = eval_with_conductor("(refs-from)", &cond);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("refs-from requires 1 argument"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("refs-from requires 1 argument")
+        );
     }
 
     // ── eval_repl tests ──────────────────────────────────────────────────────
@@ -1650,7 +1894,10 @@ mod tests {
         let result = eval_repl("(get-schema :post)", &conductor).unwrap();
         assert!(matches!(result, template::Value::Text(_)));
         if let template::Value::Text(src) = result {
-            assert!(src.contains("Post title"), "schema text should contain 'Post title'");
+            assert!(
+                src.contains("Post title"),
+                "schema text should contain 'Post title'"
+            );
         }
     }
 
@@ -1691,7 +1938,10 @@ mod tests {
         let result = eval_repl("(frobnicate :foo)", &conductor);
         assert!(result.is_err(), "expected error for unknown expression");
         let msg = result.unwrap_err();
-        assert!(msg.contains("unknown expression"), "error should mention 'unknown expression'");
+        assert!(
+            msg.contains("unknown expression"),
+            "error should mention 'unknown expression'"
+        );
     }
 
     #[test]
@@ -2014,7 +2264,10 @@ mod tests {
 
     #[test]
     fn filter_with_pred_fn() {
-        let result = eval_str(r#"(filter :title "Alpha Post" [{:title "Alpha Post"} {:title "Beta Post"}])"#).unwrap();
+        let result = eval_str(
+            r#"(filter :title "Alpha Post" [{:title "Alpha Post"} {:title "Beta Post"}])"#,
+        )
+        .unwrap();
         assert!(matches!(&result, template::Value::List(items) if items.len() == 1));
     }
 
@@ -2028,17 +2281,38 @@ mod tests {
 
     #[test]
     fn prelude_inc_dec() {
-        assert!(matches!(eval_str("(inc 5)").unwrap(), template::Value::Integer(6)));
-        assert!(matches!(eval_str("(dec 5)").unwrap(), template::Value::Integer(4)));
+        assert!(matches!(
+            eval_str("(inc 5)").unwrap(),
+            template::Value::Integer(6)
+        ));
+        assert!(matches!(
+            eval_str("(dec 5)").unwrap(),
+            template::Value::Integer(4)
+        ));
     }
 
     #[test]
     fn prelude_predicates() {
-        assert!(matches!(eval_str("(nil? nil)").unwrap(), template::Value::Bool(true)));
-        assert!(matches!(eval_str("(nil? 1)").unwrap(), template::Value::Bool(false)));
-        assert!(matches!(eval_str("(zero? 0)").unwrap(), template::Value::Bool(true)));
-        assert!(matches!(eval_str("(even? 4)").unwrap(), template::Value::Bool(true)));
-        assert!(matches!(eval_str("(odd? 3)").unwrap(), template::Value::Bool(true)));
+        assert!(matches!(
+            eval_str("(nil? nil)").unwrap(),
+            template::Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_str("(nil? 1)").unwrap(),
+            template::Value::Bool(false)
+        ));
+        assert!(matches!(
+            eval_str("(zero? 0)").unwrap(),
+            template::Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_str("(even? 4)").unwrap(),
+            template::Value::Bool(true)
+        ));
+        assert!(matches!(
+            eval_str("(odd? 3)").unwrap(),
+            template::Value::Bool(true)
+        ));
     }
 
     #[test]
@@ -2079,8 +2353,14 @@ mod tests {
 
     #[test]
     fn prelude_max_min() {
-        assert!(matches!(eval_str("(max 3 7)").unwrap(), template::Value::Integer(7)));
-        assert!(matches!(eval_str("(min 3 7)").unwrap(), template::Value::Integer(3)));
+        assert!(matches!(
+            eval_str("(max 3 7)").unwrap(),
+            template::Value::Integer(7)
+        ));
+        assert!(matches!(
+            eval_str("(min 3 7)").unwrap(),
+            template::Value::Integer(3)
+        ));
     }
 
     // ── DocRegistry and doc special form tests (ADR-039 Phase A) ─────────────
@@ -2091,7 +2371,10 @@ mod tests {
         let result = eval_str("(doc +)").unwrap();
         if let template::Value::Text(s) = result {
             assert!(s.contains('+'), "doc output should contain the symbol name");
-            assert!(s.contains("Add numbers"), "doc output should contain the description");
+            assert!(
+                s.contains("Add numbers"),
+                "doc output should contain the description"
+            );
         } else {
             panic!("expected Text from (doc +), got {result:?}");
         }
@@ -2102,8 +2385,14 @@ mod tests {
         // (doc identity) should return text with the docstring
         let result = eval_str("(doc identity)").unwrap();
         if let template::Value::Text(s) = result {
-            assert!(s.contains("identity"), "doc output should contain 'identity'");
-            assert!(s.contains("unchanged") || s.contains("argument"), "doc should contain the docstring");
+            assert!(
+                s.contains("identity"),
+                "doc output should contain 'identity'"
+            );
+            assert!(
+                s.contains("unchanged") || s.contains("argument"),
+                "doc should contain the docstring"
+            );
         } else {
             panic!("expected Text from (doc identity), got {result:?}");
         }
@@ -2113,10 +2402,19 @@ mod tests {
     fn doc_no_args_lists_all_functions() {
         let result = eval_str("(doc)").unwrap();
         if let template::Value::Text(s) = result {
-            assert!(s.contains("Primitives"), "doc() should list Primitives section");
-            assert!(s.contains("Core library"), "doc() should list Core library section");
+            assert!(
+                s.contains("Primitives"),
+                "doc() should list Primitives section"
+            );
+            assert!(
+                s.contains("Core library"),
+                "doc() should list Core library section"
+            );
             assert!(s.contains('+'), "doc() should list '+' primitive");
-            assert!(s.contains("identity"), "doc() should list 'identity' from prelude");
+            assert!(
+                s.contains("identity"),
+                "doc() should list 'identity' from prelude"
+            );
         } else {
             panic!("expected Text from (doc), got {result:?}");
         }
@@ -2126,7 +2424,10 @@ mod tests {
     fn doc_threading_macro_shows_documentation() {
         let result = eval_str("(doc ->)").unwrap();
         if let template::Value::Text(s) = result {
-            assert!(s.contains("->") || s.contains("Thread"), "doc should mention threading");
+            assert!(
+                s.contains("->") || s.contains("Thread"),
+                "doc should mention threading"
+            );
         } else {
             panic!("expected Text from (doc ->), got {result:?}");
         }
@@ -2135,12 +2436,13 @@ mod tests {
     #[test]
     fn defn_with_docstring_registers_in_doc_registry() {
         // Define a function with a docstring, then doc it
-        let result = eval_str(
-            r#"(do (defn my-fn "does the thing" [x] x) (doc my-fn))"#,
-        ).unwrap();
+        let result = eval_str(r#"(do (defn my-fn "does the thing" [x] x) (doc my-fn))"#).unwrap();
         if let template::Value::Text(s) = result {
             assert!(s.contains("my-fn"), "doc should contain function name");
-            assert!(s.contains("does the thing"), "doc should contain the docstring");
+            assert!(
+                s.contains("does the thing"),
+                "doc should contain the docstring"
+            );
         } else {
             panic!("expected Text from (doc my-fn), got {result:?}");
         }
@@ -2177,10 +2479,22 @@ mod tests {
 
         let matches = registry.completions("ma");
         let names: Vec<&str> = matches.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"map"), "completions('ma') should include 'map'");
-        assert!(names.contains(&"mapcat"), "completions('ma') should include 'mapcat'");
-        assert!(names.contains(&"max"), "completions('ma') should include 'max'");
-        assert!(!names.contains(&"filter"), "completions('ma') should not include 'filter'");
+        assert!(
+            names.contains(&"map"),
+            "completions('ma') should include 'map'"
+        );
+        assert!(
+            names.contains(&"mapcat"),
+            "completions('ma') should include 'mapcat'"
+        );
+        assert!(
+            names.contains(&"max"),
+            "completions('ma') should include 'max'"
+        );
+        assert!(
+            !names.contains(&"filter"),
+            "completions('ma') should not include 'filter'"
+        );
     }
 
     #[test]

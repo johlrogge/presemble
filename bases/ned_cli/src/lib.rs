@@ -2,18 +2,17 @@ use content::{ContentElement, Document, parse_and_assign, parse_document, serial
 use evaluator::{RootEnv, ned_primitives};
 use ned::selection::{self, Selection};
 use node_store::NodeStore;
-use std::sync::{Arc, RwLock};
 use node_store_bridge::{
-    content_bridge::{document_to_store, store_to_document, DocumentMeta},
+    content_bridge::{DocumentMeta, document_to_store, store_to_document},
     schema_bridge::{grammar_to_store, store_to_grammar},
     template_bridge::{store_to_template, template_to_store},
 };
 use schema::{Grammar, parse_schema};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use template::{
-    dom::serialize_nodes,
-    parse_template_hiccup, parse_template_xml, serialize_to_hiccup,
+    dom::serialize_nodes, parse_template_hiccup, parse_template_xml, serialize_to_hiccup,
 };
 
 // ---------------------------------------------------------------------------
@@ -239,7 +238,12 @@ fn round_trip_content(
                     .comments
                     .iter()
                     .map(|(host, comment)| {
-                        let at = flat.elements.iter().take(*host).filter(|e| !is_separator(e)).count();
+                        let at = flat
+                            .elements
+                            .iter()
+                            .take(*host)
+                            .filter(|e| !is_separator(e))
+                            .count();
                         content::AnchoredComment {
                             anchor: content::CommentAnchor::Before(content::Container::Body, at),
                             comment: comment.clone(),
@@ -397,9 +401,7 @@ fn round_trip_template(path: &Path, store: &mut NodeStore) -> TemplateResult {
                 .zip(rec_lines.iter())
                 .enumerate()
                 .filter(|(_, (a, b))| a != b)
-                .map(|(i, (a, b))| {
-                    format!("line {} differs: expected {:?}, got {:?}", i + 1, a, b)
-                })
+                .map(|(i, (a, b))| format!("line {} differs: expected {:?}, got {:?}", i + 1, a, b))
                 .take(3)
                 .collect()
         }
@@ -450,10 +452,7 @@ pub fn run() {
             && let Ok(grammar) = parse_schema(&src)
             && let Ok(rel) = path.strip_prefix(&schemas_dir)
         {
-            let stem_key = rel
-                .with_extension("")
-                .to_string_lossy()
-                .replace('\\', "/");
+            let stem_key = rel.with_extension("").to_string_lossy().replace('\\', "/");
             grammars.insert(stem_key, grammar);
         }
     }
@@ -469,10 +468,7 @@ pub fn run() {
         // e.g. site/content/post/hello.md -> stem "post", file name "hello"
         // -> look for grammar key "post/item" (most specific) or "post/index"
         let grammar = if let Some(stem) = content_stem(&content_dir, path) {
-            let file_stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("item");
+            let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("item");
 
             // Try matching: <stem>/<file_stem>, then <stem>/item, then <stem>/index
             let candidates = [
@@ -481,9 +477,7 @@ pub fn run() {
                 format!("{stem}/index"),
             ];
 
-            candidates
-                .iter()
-                .find_map(|key| grammars.get(key.as_str()))
+            candidates.iter().find_map(|key| grammars.get(key.as_str()))
         } else {
             // Top-level content file (e.g., site/content/index.md)
             grammars.get("index")
@@ -500,7 +494,10 @@ pub fn run() {
         } else {
             format!("/{stem}/{file_stem_str}")
         };
-        let file_display = path.strip_prefix(site_dir).map(|p| p.display().to_string()).unwrap_or_else(|_| path.display().to_string());
+        let file_display = path
+            .strip_prefix(site_dir)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string());
         let page_kind = if is_index { "collection" } else { "item" };
         let meta = DocumentMeta {
             url,
@@ -549,10 +546,22 @@ pub fn run() {
 
     // ---- Memory analysis ----------------------------------------------------
     println!("\nMemory layout:");
-    println!("  size_of::<Node>()   = {} bytes", std::mem::size_of::<node_store::Node>());
-    println!("  size_of::<NodeId>() = {} bytes", std::mem::size_of::<node_store::NodeId>());
-    println!("  size_of::<Edge>()   = {} bytes", std::mem::size_of::<node_store::Edge>());
-    println!("  size_of::<Name>()   = {} bytes", std::mem::size_of::<node_store::Name>());
+    println!(
+        "  size_of::<Node>()   = {} bytes",
+        std::mem::size_of::<node_store::Node>()
+    );
+    println!(
+        "  size_of::<NodeId>() = {} bytes",
+        std::mem::size_of::<node_store::NodeId>()
+    );
+    println!(
+        "  size_of::<Edge>()   = {} bytes",
+        std::mem::size_of::<node_store::Edge>()
+    );
+    println!(
+        "  size_of::<Name>()   = {} bytes",
+        std::mem::size_of::<node_store::Name>()
+    );
 
     // Estimate raw content size (sum of all source file bytes)
     let mut raw_bytes = 0usize;
@@ -578,15 +587,29 @@ pub fn run() {
     }
     // im::HashMap overhead: ~2x node storage for HAMT tree nodes
     let im_overhead_estimate = (node_struct_bytes + edge_struct_bytes) * 2;
-    let total_estimate = node_struct_bytes + edge_struct_bytes + text_heap_bytes + im_overhead_estimate;
+    let total_estimate =
+        node_struct_bytes + edge_struct_bytes + text_heap_bytes + im_overhead_estimate;
 
     println!("\n  Raw source files:    {:>7} bytes", raw_bytes);
-    println!("  Node structs:        {:>7} bytes ({} nodes x {} B)", node_struct_bytes, store.node_count(), std::mem::size_of::<node_store::Node>());
-    println!("  Edge structs:        {:>7} bytes ({} edges x {} B)", edge_struct_bytes, store.edge_count(), std::mem::size_of::<node_store::Edge>());
+    println!(
+        "  Node structs:        {:>7} bytes ({} nodes x {} B)",
+        node_struct_bytes,
+        store.node_count(),
+        std::mem::size_of::<node_store::Node>()
+    );
+    println!(
+        "  Edge structs:        {:>7} bytes ({} edges x {} B)",
+        edge_struct_bytes,
+        store.edge_count(),
+        std::mem::size_of::<node_store::Edge>()
+    );
     println!("  Text heap:           {:>7} bytes", text_heap_bytes);
     println!("  im overhead (~2x):   {:>7} bytes", im_overhead_estimate);
     println!("  Estimated total:     {:>7} bytes", total_estimate);
-    println!("  Ratio to raw:        {:.1}x", total_estimate as f64 / raw_bytes as f64);
+    println!(
+        "  Ratio to raw:        {:.1}x",
+        total_estimate as f64 / raw_bytes as f64
+    );
 
     // ---- Duplicate analysis -------------------------------------------------
     println!("\nDuplicate analysis:");
@@ -612,7 +635,9 @@ pub fn run() {
 
     let unique_texts = text_values.len();
     let duplicate_texts = text_count - unique_texts;
-    println!("  Text nodes: {text_count} total, {unique_texts} unique, {duplicate_texts} could be shared");
+    println!(
+        "  Text nodes: {text_count} total, {unique_texts} unique, {duplicate_texts} could be shared"
+    );
 
     // Top duplicated text values
     let mut top_dupes: Vec<_> = text_values.iter().filter(|(_, c)| **c > 1).collect();
@@ -657,17 +682,15 @@ pub fn run() {
                 for root_id in &roots {
                     if let Some(node_store::Node::Element(name)) = store.get(*root_id) {
                         // Find the document name by looking for a "name" attribute
-                        let doc_name = store.attributes(*root_id)
-                            .iter()
-                            .find_map(|(n, vid)| {
-                                if matches!(store.resolve_name(*n), "name" | "text")
-                                    && let Some(node_store::Node::Text(s)) = store.get(*vid)
-                                {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            });
+                        let doc_name = store.attributes(*root_id).iter().find_map(|(n, vid)| {
+                            if matches!(store.resolve_name(*n), "name" | "text")
+                                && let Some(node_store::Node::Text(s)) = store.get(*vid)
+                            {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        });
                         if let Some(name_val) = doc_name {
                             println!("    -> {}(\"{}\")", store.resolve_name(*name), name_val);
                         } else {
@@ -708,17 +731,23 @@ pub fn run() {
     println!("  Documents: {}", documents.len());
 
     let doc_children = documents.children(&store);
-    println!("  Document children (preambles + bodies): {}", doc_children.len());
+    println!(
+        "  Document children (preambles + bodies): {}",
+        doc_children.len()
+    );
 
     // Threading example: all paragraphs inside documents
-    let paragraphs = documents.descendants(&store)
+    let paragraphs = documents
+        .descendants(&store)
         .filter(&store, selection::is_element("paragraph"));
     println!("  Paragraphs (via descendants): {}", paragraphs.len());
 
     // Ancestors from a heading back to root
-    let first_heading_ancestors = Selection::from_ids(headings.iter().take(1))
-        .ancestors(&store);
-    println!("  Ancestors of first heading: {}", first_heading_ancestors.len());
+    let first_heading_ancestors = Selection::from_ids(headings.iter().take(1)).ancestors(&store);
+    println!(
+        "  Ancestors of first heading: {}",
+        first_heading_ancestors.len()
+    );
 
     // ---- NED Evaluator test -------------------------------------------------
     println!("\nNED Evaluator:");
@@ -730,7 +759,11 @@ pub fn run() {
     let root = RootEnv::new();
     evaluator::init_root(&root).expect("failed to init evaluator");
     // The demo runs queries only; nothing it records is ever applied.
-    ned_primitives::register_ned_builtins(&root, store.clone(), &ned_primitives::PlanRecorder::new());
+    ned_primitives::register_ned_builtins(
+        &root,
+        store.clone(),
+        &ned_primitives::PlanRecorder::new(),
+    );
     evaluator::load_ned_prelude(&root).expect("failed to load ned.clj");
 
     // Test expressions
@@ -739,24 +772,51 @@ pub fn run() {
         ("(ned/edge-count)", "edge count"),
         ("(ned/count (ned/all))", "all nodes"),
         ("(ned/count (ned/roots))", "root nodes"),
-        ("(ned/count (ned/all-headings))", "all headings (via ned.clj)"),
+        (
+            "(ned/count (ned/all-headings))",
+            "all headings (via ned.clj)",
+        ),
         ("(ned/count (ned/all-h2s))", "all h2s (via ned.clj)"),
-        ("(ned/count (ned/all-documents))", "all documents (via ned.clj)"),
+        (
+            "(ned/count (ned/all-documents))",
+            "all documents (via ned.clj)",
+        ),
         // Threading test
-        ("(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 2)))", "h2s via threading"),
+        (
+            "(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 2)))",
+            "h2s via threading",
+        ),
         // Children of h2s
-        ("(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 2) (ned/children)))", "children of h2s"),
+        (
+            "(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 2) (ned/children)))",
+            "children of h2s",
+        ),
         // Text content
-        ("(count (ned/text-of (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 1) (ned/children))))", "h1 text nodes count"),
+        (
+            "(count (ned/text-of (-> (ned/all) (ned/filter :kind \"heading\") (ned/filter :attr \"level\" 1) (ned/children))))",
+            "h1 text nodes count",
+        ),
         // Ancestors
-        ("(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/ancestors)))", "heading ancestors"),
+        (
+            "(ned/count (-> (ned/all) (ned/filter :kind \"heading\") (ned/ancestors)))",
+            "heading ancestors",
+        ),
         // Documents -> descendants -> paragraphs
-        ("(ned/count (-> (ned/all-documents) (ned/descendants) (ned/filter :kind \"paragraph\")))", "paragraphs via descendants"),
+        (
+            "(ned/count (-> (ned/all-documents) (ned/descendants) (ned/filter :kind \"paragraph\")))",
+            "paragraphs via descendants",
+        ),
         // Metadata queries
         ("(ned/count (ned/posts))", "post documents (via ned.clj)"),
-        ("(ned/count (ned/features))", "feature documents (via ned.clj)"),
+        (
+            "(ned/count (ned/features))",
+            "feature documents (via ned.clj)",
+        ),
         ("(ned/url-of (ned/posts))", "post URLs"),
-        ("(ned/count (-> (ned/posts) (ned/descendants) (ned/filter :kind \"heading\")))", "headings in posts"),
+        (
+            "(ned/count (-> (ned/posts) (ned/descendants) (ned/filter :kind \"heading\")))",
+            "headings in posts",
+        ),
     ];
 
     for (expr, label) in &tests {

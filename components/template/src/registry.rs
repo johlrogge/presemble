@@ -59,7 +59,13 @@ impl<'a> RenderContext<'a> {
         local_defs: Option<&'a HashMap<String, Vec<Node>>>,
         output: OutputMode,
     ) -> Self {
-        Self { registry, depth: 0, max_depth: 32, local_defs, output }
+        Self {
+            registry,
+            depth: 0,
+            max_depth: 32,
+            local_defs,
+            output,
+        }
     }
 
     /// Returns a new context with depth incremented by 1.
@@ -118,7 +124,8 @@ pub fn extract_definitions(nodes: Vec<Node>) -> (Vec<Node>, HashMap<String, Vec<
         match node {
             Node::Element(el)
                 if el.name == "template"
-                    && (el.attr(crate::constants::ELEM_DEFINE).is_some() || el.attr("name").is_some()) =>
+                    && (el.attr(crate::constants::ELEM_DEFINE).is_some()
+                        || el.attr("name").is_some()) =>
             {
                 // This is a callable template definition — extract it.
                 // presemble:define takes precedence over the legacy name attribute.
@@ -183,11 +190,15 @@ mod tests {
     #[test]
     fn extract_definitions_finds_named_templates() {
         use crate::dom::parse_template_xml;
-        let src = r#"<div>before</div><template name="card"><p>card</p></template><div>after</div>"#;
+        let src =
+            r#"<div>before</div><template name="card"><p>card</p></template><div>after</div>"#;
         let nodes = parse_template_xml(src).unwrap();
         let (stripped, defs) = extract_definitions(nodes);
         assert_eq!(stripped.len(), 2, "stripped should have 2 nodes (two divs)");
-        assert!(defs.contains_key("card"), "definitions should contain 'card'");
+        assert!(
+            defs.contains_key("card"),
+            "definitions should contain 'card'"
+        );
         assert_eq!(defs["card"].len(), 1);
     }
 
@@ -215,7 +226,10 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let (stripped, defs) = extract_definitions(nodes);
         assert_eq!(stripped.len(), 2, "stripped should have 2 nodes (two divs)");
-        assert!(defs.contains_key("feature-card"), "definitions should contain 'feature-card'");
+        assert!(
+            defs.contains_key("feature-card"),
+            "definitions should contain 'feature-card'"
+        );
         assert_eq!(defs["feature-card"].len(), 1);
     }
 
@@ -226,7 +240,10 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let (stripped, defs) = extract_definitions(nodes);
         assert!(stripped.is_empty(), "all definitions stripped from tree");
-        assert!(defs.contains_key("new-style"), "new-style via presemble:define");
+        assert!(
+            defs.contains_key("new-style"),
+            "new-style via presemble:define"
+        );
         assert!(defs.contains_key("old-style"), "old-style via name attr");
     }
 
@@ -239,20 +256,29 @@ mod tests {
         }
         impl TemplateRegistry for RecordingRegistry {
             fn resolve(&self, _name: &str) -> Option<Vec<crate::dom::Node>> {
-                self.resolved.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.resolved
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }
         }
 
         let mut defs = HashMap::new();
-        defs.insert("local-card".to_string(), parse_template_xml("<p>local</p>").unwrap());
+        defs.insert(
+            "local-card".to_string(),
+            parse_template_xml("<p>local</p>").unwrap(),
+        );
 
-        let reg = RecordingRegistry { resolved: std::sync::atomic::AtomicBool::new(false) };
+        let reg = RecordingRegistry {
+            resolved: std::sync::atomic::AtomicBool::new(false),
+        };
         let ctx = RenderContext::with_local_defs(&reg, &defs, OutputMode::Editorial);
 
         let result = ctx.resolve_callable("local-card");
         assert!(result.is_some(), "local def should be found");
-        assert!(!reg.resolved.load(std::sync::atomic::Ordering::SeqCst), "registry should not have been consulted");
+        assert!(
+            !reg.resolved.load(std::sync::atomic::Ordering::SeqCst),
+            "registry should not have been consulted"
+        );
     }
 
     #[test]

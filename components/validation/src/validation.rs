@@ -116,10 +116,7 @@ fn find_separator_span(src: &str) -> Option<Range<usize>> {
 }
 
 /// Find the byte range of the first element in a named slot.
-fn find_span_for_diagnostic(
-    slot_name: Option<&SlotName>,
-    doc: &Document,
-) -> Option<Range<usize>> {
+fn find_span_for_diagnostic(slot_name: Option<&SlotName>, doc: &Document) -> Option<Range<usize>> {
     let slot_name = slot_name?;
     let slot = doc.preamble.iter().find(|s| &s.name == slot_name)?;
     slot.elements.front().map(|e| Range::from(e.span))
@@ -198,12 +195,15 @@ impl ValidationReport {
     /// diagnostics first within a file. The sort is stable, so diagnostics
     /// at the same position keep their insertion order.
     pub fn sorted(mut self) -> Self {
-        self.diagnostics.sort_by(|a, b| (&a.file, a.at).cmp(&(&b.file, b.at)));
+        self.diagnostics
+            .sort_by(|a, b| (&a.file, a.at).cmp(&(&b.file, b.at)));
         self
     }
 
     pub fn has_errors(&self) -> bool {
-        self.diagnostics.iter().any(|d| d.severity == Severity::Error)
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error)
     }
 
     pub fn error_count(&self) -> usize {
@@ -232,7 +232,10 @@ impl ValidationReport {
     }
 
     fn count(&self, severity: Severity) -> usize {
-        self.diagnostics.iter().filter(|d| d.severity == severity).count()
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == severity)
+            .count()
     }
 }
 
@@ -273,7 +276,9 @@ pub fn validate_template(
     template::check::check_template(src, grammar, stem, templates)
         .into_iter()
         .map(|found| {
-            let span = src.find(&found.snippet).map(|start| start..start + found.snippet.len());
+            let span = src
+                .find(&found.snippet)
+                .map(|start| start..start + found.snippet.len());
             Diagnostic {
                 severity: match found.level {
                     template::check::Level::Error => Severity::Error,
@@ -353,7 +358,10 @@ mod tests {
             diagnostics
         );
         let diag = missing_sep.unwrap();
-        let span = diag.span.clone().expect("expected a span on the diagnostic");
+        let span = diag
+            .span
+            .clone()
+            .expect("expected a span on the diagnostic");
         // The span must be strictly before end-of-file (src.len()) since there are preamble elements.
         assert!(
             span.start < src.len(),
@@ -379,7 +387,10 @@ mod tests {
             diagnostics
         );
         let diag = empty_body.unwrap();
-        let span = diag.span.clone().expect("expected a span on the diagnostic");
+        let span = diag
+            .span
+            .clone()
+            .expect("expected a span on the diagnostic");
         // The span should be a zero-width range (start == end) just after the separator.
         // The separator "----\n" ends before src.len(), so span.start must be < src.len().
         assert_eq!(
@@ -421,8 +432,14 @@ mod tests {
         let grammar = article_grammar();
         let doc = content::parse_and_assign(src, &grammar).expect("parses");
         let from_doc = validate_document(src, &doc, &grammar);
-        assert!(!from_doc.is_empty(), "expected diagnostics for invalid source");
-        assert_eq!(messages(&from_doc), messages(&validate_content(src, &grammar)));
+        assert!(
+            !from_doc.is_empty(),
+            "expected diagnostics for invalid source"
+        );
+        assert_eq!(
+            messages(&from_doc),
+            messages(&validate_content(src, &grammar))
+        );
     }
 
     // ── line_col ────────────────────────────────────────────────────────────
@@ -456,7 +473,12 @@ mod tests {
 
     // ── SourceDiagnostic / ValidationReport ─────────────────────────────────
 
-    fn diag(file: &str, at: Option<(usize, usize)>, severity: Severity, msg: &str) -> SourceDiagnostic {
+    fn diag(
+        file: &str,
+        at: Option<(usize, usize)>,
+        severity: Severity,
+        msg: &str,
+    ) -> SourceDiagnostic {
         SourceDiagnostic {
             file: std::path::PathBuf::from(file),
             at: at.map(|(line, col)| LineCol { line, col }),
@@ -482,7 +504,12 @@ mod tests {
         let mut report = ValidationReport::default();
         report.push(diag("content/b.md", Some((1, 1)), Severity::Error, "b1"));
         report.push(diag("content/a.md", Some((3, 2)), Severity::Error, "a3:2"));
-        report.push(diag("content/a.md", Some((3, 1)), Severity::Warning, "a3:1"));
+        report.push(diag(
+            "content/a.md",
+            Some((3, 1)),
+            Severity::Warning,
+            "a3:1",
+        ));
         report.push(diag("content/a.md", None, Severity::Error, "a-none"));
         report.push(diag("content/a.md", Some((1, 5)), Severity::Error, "a1:5"));
         let report = report.sorted();

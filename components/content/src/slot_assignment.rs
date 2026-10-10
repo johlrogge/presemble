@@ -32,18 +32,23 @@ pub enum UnassignedReason {
 /// Why `el`, an element of [`Document::unassigned`], fills no slot.
 pub fn unassigned_reason(el: &ContentElement, grammar: &Grammar) -> UnassignedReason {
     match el {
-        ContentElement::LinkExpression { slot: Some(name), .. }
-            if bound_slot_index(el, grammar).is_none() =>
-        {
-            if grammar.preamble.iter().any(|s| s.name.as_str() == name.as_str()) {
+        ContentElement::LinkExpression {
+            slot: Some(name), ..
+        } if bound_slot_index(el, grammar).is_none() => {
+            if grammar
+                .preamble
+                .iter()
+                .any(|s| s.name.as_str() == name.as_str())
+            {
                 UnassignedReason::MarkerNamesNonLinkSlot(name.clone())
             } else {
                 UnassignedReason::MarkerNamesNoSlot(name.clone())
             }
         }
-        ContentElement::Paragraph { content, marker: Some(marker) } => {
-            UnassignedReason::MisplacedMarker(diagnose_paragraph_marker(content, marker))
-        }
+        ContentElement::Paragraph {
+            content,
+            marker: Some(marker),
+        } => UnassignedReason::MisplacedMarker(diagnose_paragraph_marker(content, marker)),
         ContentElement::HtmlBlock { .. } => UnassignedReason::Html,
         _ => UnassignedReason::NotAllowedHere,
     }
@@ -157,8 +162,7 @@ pub fn assign_slots(flat: &FlatDocument, grammar: &Grammar) -> Document {
         }
     }
 
-    let positional =
-        assign_positionally(&remaining, grammar, |slot_index| bound[slot_index].len());
+    let positional = assign_positionally(&remaining, grammar, |slot_index| bound[slot_index].len());
     let mut document = positional.document;
     // Where each element of `elements` ends up: (container, index).
     let mut location: std::collections::HashMap<usize, (Container, usize)> =
@@ -182,7 +186,10 @@ pub fn assign_slots(flat: &FlatDocument, grammar: &Grammar) -> Document {
         .slot_positions
         .iter()
         .map(|positions| {
-            positions.iter().map(|&p| (remaining_index[p], remaining[p].clone())).collect()
+            positions
+                .iter()
+                .map(|&p| (remaining_index[p], remaining[p].clone()))
+                .collect()
         })
         .collect();
 
@@ -215,7 +222,11 @@ pub fn assign_slots(flat: &FlatDocument, grammar: &Grammar) -> Document {
     }
 
     // Body elements.
-    for (at, &i) in remaining_index.iter().skip(positional.body_start).enumerate() {
+    for (at, &i) in remaining_index
+        .iter()
+        .skip(positional.body_start)
+        .enumerate()
+    {
         location.insert(i, (Container::Body, at));
     }
 
@@ -231,7 +242,10 @@ pub fn assign_slots(flat: &FlatDocument, grammar: &Grammar) -> Document {
                 }
                 None => CommentAnchor::End(Container::Body),
             };
-            AnchoredComment { anchor, comment: comment.clone() }
+            AnchoredComment {
+                anchor,
+                comment: comment.clone(),
+            }
         })
         .collect();
 
@@ -248,12 +262,16 @@ pub fn assign_slots(flat: &FlatDocument, grammar: &Grammar) -> Document {
 /// never be bound: no marker can spell them. This is not an error; such slots
 /// are filled by position only.
 pub(crate) fn bound_slot_index(element: &ContentElement, grammar: &Grammar) -> Option<usize> {
-    let ContentElement::LinkExpression { slot: Some(name), .. } = element else {
+    let ContentElement::LinkExpression {
+        slot: Some(name), ..
+    } = element
+    else {
         return None;
     };
-    grammar.preamble.iter().position(|s| {
-        s.name.as_str() == name.as_str() && matches!(s.element, Element::Link { .. })
-    })
+    grammar
+        .preamble
+        .iter()
+        .position(|s| s.name.as_str() == name.as_str() && matches!(s.element, Element::Link { .. }))
 }
 
 /// Positional slot assignment. `bound_count(i)` is the number of bound
@@ -366,7 +384,12 @@ fn assign_positionally(
         separator_span,
         comments: im::Vector::new(),
     };
-    Positional { document, slot_positions, unplaced, body_start: cursor }
+    Positional {
+        document,
+        slot_positions,
+        unplaced,
+        body_start: cursor,
+    }
 }
 
 /// The result of [`assign_positionally`]; positions index its `elements`.
@@ -416,7 +439,7 @@ mod tests {
     use crate::document::{ContentElement, LinkText};
     use crate::inline::AsPlainText;
     use crate::parser::parse_document;
-    use schema::{parse_schema, Span};
+    use schema::{Span, parse_schema};
 
     // ── Grammar helpers ──────────────────────────────────────────────────────
 
@@ -476,15 +499,17 @@ headings
     // ── Article grammar (full) ───────────────────────────────────────────────
 
     fn article_grammar() -> Grammar {
-        let schema_input =
-            include_str!("../../../fixtures/blog-site/schemas/article/item.md");
+        let schema_input = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
         parse_schema(schema_input).expect("article schema should parse")
     }
 
     // ── Helper: build a Spanned<ContentElement> with a zero span ────────────
 
     fn spanned(node: ContentElement) -> Spanned<ContentElement> {
-        Spanned { node, span: Span { start: 0, end: 0 } }
+        Spanned {
+            node,
+            span: Span { start: 0, end: 0 },
+        }
     }
 
     fn heading(level: u8, text: &str) -> Spanned<ContentElement> {
@@ -565,10 +590,7 @@ headings
     #[test]
     fn assign_no_separator_puts_everything_in_preamble() {
         let grammar = no_body_grammar();
-        let elements = im::vector![
-            heading(1, "Title"),
-            paragraph("Summary text."),
-        ];
+        let elements = im::vector![heading(1, "Title"), paragraph("Summary text."),];
         let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
 
         assert!(!slotted.has_separator, "no separator present");
@@ -593,7 +615,11 @@ headings
         assert!(slotted.has_separator);
         let summary_slot = &slotted.preamble[1];
         assert_eq!(summary_slot.name.as_str(), "summary");
-        assert_eq!(summary_slot.elements.len(), 3, "should consume all 3 paragraphs");
+        assert_eq!(
+            summary_slot.elements.len(),
+            3,
+            "should consume all 3 paragraphs"
+        );
         assert!(slotted.body.is_empty());
     }
 
@@ -627,7 +653,10 @@ headings
             slotted.unassigned[0].node,
             ContentElement::paragraph_from_markdown("Para 4 - extra.")
         );
-        assert!(slotted.has_separator, "separator should be found by forward scan");
+        assert!(
+            slotted.has_separator,
+            "separator should be found by forward scan"
+        );
         assert!(slotted.body.is_empty(), "nothing after separator");
     }
 
@@ -674,7 +703,11 @@ headings
             ContentElement::Heading { .. }
         ));
         assert_eq!(
-            slotted.unassigned.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
+            slotted
+                .unassigned
+                .iter()
+                .map(|e| e.node.clone())
+                .collect::<Vec<_>>(),
             vec![ContentElement::paragraph_from_markdown("{#title}")]
         );
     }
@@ -712,10 +745,23 @@ headings
         };
         let all = vec!["title".to_string(), "summary".to_string()];
         assert_eq!(names(im::Vector::new()), all, "an empty file");
-        assert_eq!(names(im::vector![separator()]), all, "a file that starts at the separator");
-        assert_eq!(names(im::vector![heading(1, "T"), separator()]), all, "a separator after the first slot");
         assert_eq!(
-            names(im::vector![heading(1, "T"), paragraph("S."), separator(), paragraph("B.")]),
+            names(im::vector![separator()]),
+            all,
+            "a file that starts at the separator"
+        );
+        assert_eq!(
+            names(im::vector![heading(1, "T"), separator()]),
+            all,
+            "a separator after the first slot"
+        );
+        assert_eq!(
+            names(im::vector![
+                heading(1, "T"),
+                paragraph("S."),
+                separator(),
+                paragraph("B.")
+            ]),
             all,
             "a full preamble"
         );
@@ -729,7 +775,11 @@ headings
 
         assert!(!slotted.has_separator);
         // All grammar slots are processed but produce empty DocumentSlots.
-        assert_eq!(slotted.preamble.len(), 2, "empty doc still produces a slot per grammar entry");
+        assert_eq!(
+            slotted.preamble.len(),
+            2,
+            "empty doc still produces a slot per grammar entry"
+        );
         for slot in &slotted.preamble {
             assert!(slot.elements.is_empty(), "all slots should be empty");
         }
@@ -751,19 +801,20 @@ headings
         let flat = slotted.flat_elements();
 
         assert_eq!(flat.len(), 4);
-        assert!(matches!(&flat[0].node, ContentElement::Heading { level, .. } if level.value() == 1));
+        assert!(
+            matches!(&flat[0].node, ContentElement::Heading { level, .. } if level.value() == 1)
+        );
         assert!(matches!(&flat[1].node, ContentElement::Paragraph { .. }));
         assert!(matches!(&flat[2].node, ContentElement::Separator));
-        assert!(matches!(&flat[3].node, ContentElement::Heading { level, .. } if level.value() == 3));
+        assert!(
+            matches!(&flat[3].node, ContentElement::Heading { level, .. } if level.value() == 3)
+        );
     }
 
     #[test]
     fn flat_elements_no_separator_roundtrip() {
         let grammar = no_body_grammar();
-        let elements = im::vector![
-            heading(1, "Title"),
-            paragraph("Summary."),
-        ];
+        let elements = im::vector![heading(1, "Title"), paragraph("Summary."),];
         let slotted = assign_slots(&FlatDocument::from_elements(elements), &grammar);
         let flat = slotted.flat_elements();
 
@@ -786,14 +837,16 @@ headings
 
     #[test]
     fn assign_slots_hello_world_fixture() {
-        let doc_input =
-            include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+        let doc_input = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let doc = parse_document(doc_input).expect("hello-world.md should parse");
         let grammar = article_grammar();
 
         let slotted = assign_slots(&doc, &grammar);
 
-        assert!(slotted.has_separator, "hello-world.md should have a separator");
+        assert!(
+            slotted.has_separator,
+            "hello-world.md should have a separator"
+        );
         // Must have at least one preamble slot filled.
         assert!(
             slotted.preamble.iter().any(|s| !s.elements.is_empty()),
@@ -813,8 +866,7 @@ headings
 
     #[test]
     fn flat_elements_roundtrip_hello_world_same_element_types() {
-        let doc_input =
-            include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+        let doc_input = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let doc = parse_document(doc_input).expect("hello-world.md should parse");
         let grammar = article_grammar();
 
@@ -849,7 +901,7 @@ headings
 
     fn assign_page(src: &str, news_occurs: &str) -> Document {
         let flat = parse_document(src).expect("document should parse");
-        assign_slots(&flat,&page_grammar(news_occurs))
+        assign_slots(&flat, &page_grammar(news_occurs))
     }
 
     fn slot_counts(doc: &Document) -> Vec<(String, usize)> {
@@ -870,9 +922,18 @@ headings
         slot.elements
             .iter()
             .map(|e| match &e.node {
-                ContentElement::LinkExpression { text: LinkText::Label(b), .. } => b.clone(),
-                ContentElement::LinkExpression { text: LinkText::Static(s), .. } => s.clone(),
-                ContentElement::LinkExpression { text: LinkText::Empty, .. } => String::new(),
+                ContentElement::LinkExpression {
+                    text: LinkText::Label(b),
+                    ..
+                } => b.clone(),
+                ContentElement::LinkExpression {
+                    text: LinkText::Static(s),
+                    ..
+                } => s.clone(),
+                ContentElement::LinkExpression {
+                    text: LinkText::Empty,
+                    ..
+                } => String::new(),
                 other => match other.sole_link() {
                     Some(link) => link.text.plain_text(),
                     None => format!("{other:?}"),
@@ -892,7 +953,10 @@ headings
              [In the news](->> :post) {#news}\n\n----\n\nBody.\n",
             "*",
         );
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1), ("news", 1)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 1), ("news", 1)])
+        );
         assert_eq!(slot_labels(&doc, "latest"), vec!["Latest posts"]);
         assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
     }
@@ -904,7 +968,10 @@ headings
              [Latest posts](->> :post (take 2)) {#latest}\n\n----\n\nBody.\n",
             "*",
         );
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1), ("news", 1)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 1), ("news", 1)])
+        );
         assert_eq!(slot_labels(&doc, "latest"), vec!["Latest posts"]);
         assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
         assert_eq!(doc.body.len(), 1);
@@ -917,7 +984,10 @@ headings
              [Latest posts](->> :post (take 2)) {#latest}\n\n----\n\nBody.\n",
             "*",
         );
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1), ("news", 1)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 1), ("news", 1)])
+        );
         assert_eq!(slot_labels(&doc, "latest"), vec!["Latest posts"]);
         assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
         assert_eq!(doc.body.len(), 1);
@@ -954,7 +1024,10 @@ headings
         assert_eq!(slot_labels(&doc, "news"), vec!["One", "Two"]);
         // The separator directly after the title ends positional assignment,
         // so `latest` is an empty slot.
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 2)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 0), ("news", 2)])
+        );
     }
 
     #[test]
@@ -974,7 +1047,7 @@ headings
              [<name>](/post/<name>) {#news}\noccurs\n: 0..1\n\n----\n\nBody.\n",
         )
         .unwrap();
-        let doc = assign_slots(&flat,&grammar);
+        let doc = assign_slots(&flat, &grammar);
         assert_eq!(slot_labels(&doc, "latest"), vec!["a"]);
         assert_eq!(slot_labels(&doc, "news"), vec!["In the news"]);
     }
@@ -984,31 +1057,54 @@ headings
     }
 
     fn reasons(doc: &Document, grammar: &Grammar) -> Vec<UnassignedReason> {
-        doc.unassigned.iter().map(|e| unassigned_reason(&e.node, grammar)).collect()
+        doc.unassigned
+            .iter()
+            .map(|e| unassigned_reason(&e.node, grammar))
+            .collect()
     }
 
     #[test]
     fn marker_naming_no_slot_is_unassigned() {
-        let doc = assign_page("# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n", "*");
+        let doc = assign_page(
+            "# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n",
+            "*",
+        );
         // The separator directly after the title ends positional assignment;
         // the other slots are empty.
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 0)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 0), ("news", 0)])
+        );
         assert_eq!(doc.unassigned.len(), 1);
         assert_eq!(
             reasons(&doc, &page_grammar("*")),
-            vec![UnassignedReason::MarkerNamesNoSlot(Keyword::new("newz").unwrap())]
+            vec![UnassignedReason::MarkerNamesNoSlot(
+                Keyword::new("newz").unwrap()
+            )]
         );
         assert_eq!(doc.body.len(), 1);
     }
 
     #[test]
     fn marker_naming_a_non_link_slot_is_unassigned() {
-        let doc = assign_page("# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n", "*");
-        assert_eq!(slot_labels(&doc, "title").len(), 1, "title keeps its heading");
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 0)]));
+        let doc = assign_page(
+            "# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n",
+            "*",
+        );
+        assert_eq!(
+            slot_labels(&doc, "title").len(),
+            1,
+            "title keeps its heading"
+        );
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 0), ("news", 0)])
+        );
         assert_eq!(
             reasons(&doc, &page_grammar("*")),
-            vec![UnassignedReason::MarkerNamesNonLinkSlot(Keyword::new("title").unwrap())]
+            vec![UnassignedReason::MarkerNamesNonLinkSlot(
+                Keyword::new("title").unwrap()
+            )]
         );
     }
 
@@ -1028,7 +1124,10 @@ headings
         );
         assert_eq!(
             reasons(&doc, &page_grammar("*")),
-            vec![UnassignedReason::NotAllowedHere, UnassignedReason::NotAllowedHere]
+            vec![
+                UnassignedReason::NotAllowedHere,
+                UnassignedReason::NotAllowedHere
+            ]
         );
         assert_eq!(doc.body.len(), 1);
     }
@@ -1036,7 +1135,11 @@ headings
     #[test]
     fn html_blocks_are_never_slotted_and_do_not_stop_positional_assignment() {
         let grammar = simple_grammar();
-        let html = |s: &str| spanned(ContentElement::HtmlBlock { source: s.to_string() });
+        let html = |s: &str| {
+            spanned(ContentElement::HtmlBlock {
+                source: s.to_string(),
+            })
+        };
         let elements = im::vector![
             html("<div>a</div>"),
             heading(1, "Title"),
@@ -1047,15 +1150,26 @@ headings
         ];
         let doc = assign_slots(&FlatDocument::from_elements(elements), &grammar);
         assert_eq!(doc.preamble[0].elements.len(), 1, "title is still assigned");
-        assert_eq!(doc.preamble[1].elements.len(), 1, "summary is still assigned");
+        assert_eq!(
+            doc.preamble[1].elements.len(),
+            1,
+            "summary is still assigned"
+        );
         assert_eq!(
             unassigned_nodes(&doc),
             vec![
-                ContentElement::HtmlBlock { source: "<div>a</div>".to_string() },
-                ContentElement::HtmlBlock { source: "<b>x</b>".to_string() },
+                ContentElement::HtmlBlock {
+                    source: "<div>a</div>".to_string()
+                },
+                ContentElement::HtmlBlock {
+                    source: "<b>x</b>".to_string()
+                },
             ]
         );
-        assert_eq!(reasons(&doc, &grammar), vec![UnassignedReason::Html, UnassignedReason::Html]);
+        assert_eq!(
+            reasons(&doc, &grammar),
+            vec![UnassignedReason::Html, UnassignedReason::Html]
+        );
         assert_eq!(doc.body.len(), 1, "body HTML stays in the body");
     }
 
@@ -1064,16 +1178,31 @@ headings
         use crate::link_expression::LinkExpressionDiagnostic as D;
         let cases = [
             ("{#news}", D::StrayMarker("news".to_string())),
-            ("[a](/x) {#news}", D::MarkerNotOnLinkExpression("news".to_string())),
-            ("![c](i.jpg) {#news}", D::MarkerNotOnLinkExpression("news".to_string())),
-            ("[x](->> :post) {#a b}", D::InvalidSlotMarker("a b".to_string())),
-            ("[x](->> :post)\n{#news}", D::MarkerOnOwnLine("news".to_string())),
-            ("[x\ny](:p) {#news}", D::MarkedExpressionSpansLines("news".to_string())),
+            (
+                "[a](/x) {#news}",
+                D::MarkerNotOnLinkExpression("news".to_string()),
+            ),
+            (
+                "![c](i.jpg) {#news}",
+                D::MarkerNotOnLinkExpression("news".to_string()),
+            ),
+            (
+                "[x](->> :post) {#a b}",
+                D::InvalidSlotMarker("a b".to_string()),
+            ),
+            (
+                "[x](->> :post)\n{#news}",
+                D::MarkerOnOwnLine("news".to_string()),
+            ),
+            (
+                "[x\ny](:p) {#news}",
+                D::MarkedExpressionSpansLines("news".to_string()),
+            ),
             (
                 "[p]((->>%20:post%20(map%20:x))) {#news}",
-                D::Malformed(crate::link_expression::LinkExpressionError::ExpectedWhitespace {
-                    at: 3,
-                }),
+                D::Malformed(
+                    crate::link_expression::LinkExpressionError::ExpectedWhitespace { at: 3 },
+                ),
             ),
         ];
         for (md, expected) in cases {
@@ -1138,7 +1267,8 @@ headings
     #[test]
     fn flat_elements_puts_unassigned_between_slots_and_separator() {
         let doc = assign_page("# Home\n\n## H\n\n----\n\nBody.\n", "*");
-        let flat: Vec<ContentElement> = doc.flat_elements().iter().map(|e| e.node.clone()).collect();
+        let flat: Vec<ContentElement> =
+            doc.flat_elements().iter().map(|e| e.node.clone()).collect();
         assert!(matches!(flat[0], ContentElement::Heading { .. }));
         assert!(
             matches!(&flat[1], ContentElement::Heading { content, .. } if content.plain_text() == "H")
@@ -1156,7 +1286,10 @@ headings
             "*",
         );
         assert_eq!(slot_labels(&doc, "latest"), vec!["news", "latest"]);
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 2), ("news", 0)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 2), ("news", 0)])
+        );
     }
 
     #[test]
@@ -1182,19 +1315,31 @@ headings
         assert!(doc.has_separator);
         // The separator right after the title ends the preamble; the other
         // slots are empty.
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 0)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 0), ("news", 0)])
+        );
         assert_eq!(doc.body.len(), 1);
-        assert!(matches!(doc.body[0].node, ContentElement::LinkExpression { .. }));
+        assert!(matches!(
+            doc.body[0].node,
+            ContentElement::LinkExpression { .. }
+        ));
     }
 
     #[test]
     fn bound_slot_after_early_separator_is_in_schema_order() {
         // Positional assignment stops at the separator after `title`: `latest`
         // is empty, and the bound expression is in `news`, in schema order.
-        let doc = assign_page("# Home\n\n[In the news](->> :post) {#news}\n\n----\n\nBody.\n", "*");
+        let doc = assign_page(
+            "# Home\n\n[In the news](->> :post) {#news}\n\n----\n\nBody.\n",
+            "*",
+        );
         assert!(doc.has_separator);
         assert!(doc.separator_span.is_some());
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 0), ("news", 1)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 0), ("news", 1)])
+        );
         assert_eq!(doc.body.len(), 1);
     }
 
@@ -1202,7 +1347,10 @@ headings
     fn separator_handling_is_unchanged_without_bindings() {
         let doc = assign_page("# Home\n\n[a](/post/a)\n\n----\n\nBody.\n\nMore.\n", "*");
         assert!(doc.has_separator);
-        assert_eq!(slot_counts(&doc), counts(&[("title", 1), ("latest", 1), ("news", 0)]));
+        assert_eq!(
+            slot_counts(&doc),
+            counts(&[("title", 1), ("latest", 1), ("news", 0)])
+        );
         assert_eq!(doc.body.len(), 2);
     }
 
@@ -1221,7 +1369,10 @@ headings
 
         // Find the cover slot (image slot in the article grammar).
         let cover_slot = slotted.preamble.iter().find(|s| s.name.as_str() == "cover");
-        assert!(cover_slot.is_some(), "article grammar should have a cover slot");
+        assert!(
+            cover_slot.is_some(),
+            "article grammar should have a cover slot"
+        );
         let cover_slot = cover_slot.unwrap();
         assert_eq!(cover_slot.elements.len(), 1);
         assert!(cover_slot.elements[0].node.is_sole_image());

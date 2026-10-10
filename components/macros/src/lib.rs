@@ -96,9 +96,7 @@ fn expand_thread_last(mut args: Vec<Form>) -> Form {
                 // Bare symbol: (->> x f) → (f x)
                 Form::List(vec![Form::Symbol(s), result])
             }
-            other => {
-                Form::List(vec![other, result])
-            }
+            other => Form::List(vec![other, result]),
         };
     }
     result
@@ -184,12 +182,7 @@ fn expand_some_thread(args: Vec<Form>, last: bool) -> Form {
         result = Form::List(vec![
             Form::Symbol("let".into()),
             Form::Vector(vec![step_sym.clone(), call]),
-            Form::List(vec![
-                Form::Symbol("if".into()),
-                step_sym,
-                result,
-                Form::Nil,
-            ]),
+            Form::List(vec![Form::Symbol("if".into()), step_sym, result, Form::Nil]),
         ]);
     }
 
@@ -240,12 +233,7 @@ fn expand_cond_thread(args: Vec<Form>, last: bool) -> Form {
         let prev = Form::Symbol(prev_sym.clone());
         let call = thread_into(prev.clone(), form, last);
         // (if test call prev)
-        let branch = Form::List(vec![
-            Form::Symbol("if".into()),
-            test,
-            call,
-            prev,
-        ]);
+        let branch = Form::List(vec![Form::Symbol("if".into()), test, call, prev]);
         bindings.push(Form::Symbol(new_sym.clone()));
         bindings.push(branch);
         prev_sym = new_sym;
@@ -264,7 +252,10 @@ fn expand_when(args: Vec<Form>) -> Form {
         return Form::Nil;
     }
     let test = macroexpand(args[0].clone());
-    let body = args[1..].iter().map(|f| macroexpand(f.clone())).collect::<Vec<_>>();
+    let body = args[1..]
+        .iter()
+        .map(|f| macroexpand(f.clone()))
+        .collect::<Vec<_>>();
     let do_form = if body.len() == 1 {
         body.into_iter().next().unwrap()
     } else {
@@ -272,12 +263,7 @@ fn expand_when(args: Vec<Form>) -> Form {
         do_items.extend(body);
         Form::List(do_items)
     };
-    Form::List(vec![
-        Form::Symbol("if".into()),
-        test,
-        do_form,
-        Form::Nil,
-    ])
+    Form::List(vec![Form::Symbol("if".into()), test, do_form, Form::Nil])
 }
 
 /// `(when-not test body...)` → `(if test nil (do body...))`
@@ -286,7 +272,10 @@ fn expand_when_not(args: Vec<Form>) -> Form {
         return Form::Nil;
     }
     let test = macroexpand(args[0].clone());
-    let body = args[1..].iter().map(|f| macroexpand(f.clone())).collect::<Vec<_>>();
+    let body = args[1..]
+        .iter()
+        .map(|f| macroexpand(f.clone()))
+        .collect::<Vec<_>>();
     let do_form = if body.len() == 1 {
         body.into_iter().next().unwrap()
     } else {
@@ -294,12 +283,7 @@ fn expand_when_not(args: Vec<Form>) -> Form {
         do_items.extend(body);
         Form::List(do_items)
     };
-    Form::List(vec![
-        Form::Symbol("if".into()),
-        test,
-        Form::Nil,
-        do_form,
-    ])
+    Form::List(vec![Form::Symbol("if".into()), test, Form::Nil, do_form])
 }
 
 /// `(if-not test then else)` → `(if test else then)`
@@ -314,12 +298,7 @@ fn expand_if_not(args: Vec<Form>) -> Form {
     } else {
         Form::Nil
     };
-    Form::List(vec![
-        Form::Symbol("if".into()),
-        test,
-        else_form,
-        then,
-    ])
+    Form::List(vec![Form::Symbol("if".into()), test, else_form, then])
 }
 
 /// `(if-let [x expr] then else)` → `(let [x expr] (if x then else))`
@@ -342,12 +321,7 @@ fn expand_if_let(args: Vec<Form>) -> Form {
     Form::List(vec![
         Form::Symbol("let".into()),
         Form::Vector(vec![bind_sym.clone(), bind_expr]),
-        Form::List(vec![
-            Form::Symbol("if".into()),
-            bind_sym,
-            then,
-            else_form,
-        ]),
+        Form::List(vec![Form::Symbol("if".into()), bind_sym, then, else_form]),
     ])
 }
 
@@ -362,7 +336,10 @@ fn expand_when_let(args: Vec<Form>) -> Form {
     };
     let bind_sym = macroexpand(binding[0].clone());
     let bind_expr = macroexpand(binding[1].clone());
-    let body = args[1..].iter().map(|f| macroexpand(f.clone())).collect::<Vec<_>>();
+    let body = args[1..]
+        .iter()
+        .map(|f| macroexpand(f.clone()))
+        .collect::<Vec<_>>();
     let do_form = if body.len() == 1 {
         body.into_iter().next().unwrap()
     } else {
@@ -409,12 +386,7 @@ fn expand_cond(args: Vec<Form>) -> Form {
             // This branch always taken — use expr directly as the else of what comes before
             result = expr;
         } else {
-            result = Form::List(vec![
-                Form::Symbol("if".into()),
-                test,
-                expr,
-                result,
-            ]);
+            result = Form::List(vec![Form::Symbol("if".into()), test, expr, result]);
         }
     }
 
@@ -506,27 +478,23 @@ fn expand_defn(args: Vec<Form>) -> Form {
 
     let body_forms = &args[params_idx..];
     let params = body_forms[0].clone();
-    let body: Vec<Form> = body_forms[1..].iter().map(|f| macroexpand(f.clone())).collect();
+    let body: Vec<Form> = body_forms[1..]
+        .iter()
+        .map(|f| macroexpand(f.clone()))
+        .collect();
 
     // Build (fn name [args] body...) — for single arity
     // or (fn name ([args1] body1) ([args2] body2) ...) for multi-arity
     let fn_form = match &params {
         Form::Vector(_) => {
             // Single-arity
-            let mut parts = vec![
-                Form::Symbol("fn".into()),
-                name.clone(),
-                params,
-            ];
+            let mut parts = vec![Form::Symbol("fn".into()), name.clone(), params];
             parts.extend(body);
             Form::List(parts)
         }
         Form::List(_) => {
             // Multi-arity: params is actually the first clause, body_forms has all clauses
-            let mut parts = vec![
-                Form::Symbol("fn".into()),
-                name.clone(),
-            ];
+            let mut parts = vec![Form::Symbol("fn".into()), name.clone()];
             for clause in body_forms {
                 parts.push(macroexpand(clause.clone()));
             }
@@ -534,22 +502,14 @@ fn expand_defn(args: Vec<Form>) -> Form {
         }
         _ => {
             // Malformed — pass through
-            let mut parts = vec![
-                Form::Symbol("fn".into()),
-                name.clone(),
-                params,
-            ];
+            let mut parts = vec![Form::Symbol("fn".into()), name.clone(), params];
             parts.extend(body);
             Form::List(parts)
         }
     };
 
     // Build (def name (fn name ...))
-    let def_form = Form::List(vec![
-        Form::Symbol("def".into()),
-        name.clone(),
-        fn_form,
-    ]);
+    let def_form = Form::List(vec![Form::Symbol("def".into()), name.clone(), fn_form]);
 
     if has_doc {
         let doc = doc_str.unwrap();
@@ -557,11 +517,7 @@ fn expand_defn(args: Vec<Form>) -> Form {
         let arglists = extract_arglists(body_forms);
 
         // Build (def-doc! name "doc" "[args]" ...)
-        let mut doc_form_items = vec![
-            Form::Symbol("def-doc!".into()),
-            name,
-            Form::Str(doc),
-        ];
+        let mut doc_form_items = vec![Form::Symbol("def-doc!".into()), name, Form::Str(doc)];
         for arglist in arglists {
             doc_form_items.push(Form::Str(arglist));
         }
@@ -796,7 +752,10 @@ mod tests {
     fn if_let_without_else() {
         let form = read("(if-let [x (f)] (do-thing x))").unwrap();
         let expanded = macroexpand(form);
-        assert_eq!(expanded.to_string(), "(let [x (f)] (if x (do-thing x) nil))");
+        assert_eq!(
+            expanded.to_string(),
+            "(let [x (f)] (if x (do-thing x) nil))"
+        );
     }
 
     // ── when-let ────────────────────────────────────────────────────────────
@@ -881,7 +840,10 @@ mod tests {
         let form = read("(and x y)").unwrap();
         let expanded = macroexpand(form);
         let s = expanded.to_string();
-        assert!(s.starts_with("(let [and__"), "expected let with gensym, got: {s}");
+        assert!(
+            s.starts_with("(let [and__"),
+            "expected let with gensym, got: {s}"
+        );
         assert!(s.contains("(if and__"), "expected if with gensym, got: {s}");
         assert!(s.contains(" y "), "expected y in then branch, got: {s}");
     }
@@ -894,8 +856,15 @@ mod tests {
         let s = expanded.to_string();
         assert!(s.starts_with("(let [and__"), "expected outer let, got: {s}");
         // Should have two nested let bindings (one per and level)
-        assert_eq!(s.matches("(let [and__").count(), 2, "expected 2 nested lets, got: {s}");
-        assert!(s.contains(" z "), "expected z in innermost branch, got: {s}");
+        assert_eq!(
+            s.matches("(let [and__").count(),
+            2,
+            "expected 2 nested lets, got: {s}"
+        );
+        assert!(
+            s.contains(" z "),
+            "expected z in innermost branch, got: {s}"
+        );
     }
 
     // ── or ──────────────────────────────────────────────────────────────────
@@ -920,7 +889,10 @@ mod tests {
         let form = read("(or x y)").unwrap();
         let expanded = macroexpand(form);
         let s = expanded.to_string();
-        assert!(s.starts_with("(let [or__"), "expected let with gensym, got: {s}");
+        assert!(
+            s.starts_with("(let [or__"),
+            "expected let with gensym, got: {s}"
+        );
         assert!(s.contains("(if or__"), "expected if with gensym, got: {s}");
         assert!(s.contains(" y)"), "expected y as else branch, got: {s}");
     }
@@ -932,7 +904,11 @@ mod tests {
         let expanded = macroexpand(form);
         let s = expanded.to_string();
         assert!(s.starts_with("(let [or__"), "expected outer let, got: {s}");
-        assert_eq!(s.matches("(let [or__").count(), 2, "expected 2 nested lets, got: {s}");
+        assert_eq!(
+            s.matches("(let [or__").count(),
+            2,
+            "expected 2 nested lets, got: {s}"
+        );
         assert!(s.contains(" z)"), "expected z in innermost else, got: {s}");
     }
 
@@ -1012,8 +988,14 @@ mod tests {
         let s = expanded.to_string();
         // Verify structure: let with conditional branches
         assert!(s.starts_with("(let ["), "expected let form, got: {s}");
-        assert!(s.contains("(if true (f "), "expected true branch with thread-first: {s}");
-        assert!(s.contains("(if false (g "), "expected false branch with thread-first: {s}");
+        assert!(
+            s.contains("(if true (f "),
+            "expected true branch with thread-first: {s}"
+        );
+        assert!(
+            s.contains("(if false (g "),
+            "expected false branch with thread-first: {s}"
+        );
     }
 
     #[test]
@@ -1024,7 +1006,10 @@ mod tests {
         let s = expanded.to_string();
         assert!(s.starts_with("(let ["), "expected let form, got: {s}");
         // In thread-last, value comes after args: (f a value)
-        assert!(s.contains("(if true (f a "), "expected thread-last position: {s}");
+        assert!(
+            s.contains("(if true (f a "),
+            "expected thread-last position: {s}"
+        );
     }
 
     #[test]
@@ -1063,7 +1048,10 @@ mod tests {
         let form = read("(when (and a b) body)").unwrap();
         let expanded = macroexpand(form);
         let s = expanded.to_string();
-        assert!(s.starts_with("(if (let [and__"), "expected if wrapping and-let, got: {s}");
+        assert!(
+            s.starts_with("(if (let [and__"),
+            "expected if wrapping and-let, got: {s}"
+        );
         assert!(s.ends_with(" body nil)"), "expected body and nil, got: {s}");
     }
 
@@ -1073,7 +1061,10 @@ mod tests {
         let form = read("(cond (or a b) :yes :else :no)").unwrap();
         let expanded = macroexpand(form);
         let s = expanded.to_string();
-        assert!(s.starts_with("(if (let [or__"), "expected if wrapping or-let, got: {s}");
+        assert!(
+            s.starts_with("(if (let [or__"),
+            "expected if wrapping or-let, got: {s}"
+        );
         assert!(s.contains(":yes"), "expected :yes branch, got: {s}");
         assert!(s.contains(":no"), "expected :no branch, got: {s}");
     }

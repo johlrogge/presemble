@@ -4,7 +4,9 @@
 /// in serde derives; deserialized `Existing` ids are only meaningful if the
 /// receiving store still holds the original node. Use `NodeTree::Element` /
 /// `NodeTree::Text` for cross-session payloads (e.g. NedMutation in suggestions).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct NodeId(pub u64);
 

@@ -14,7 +14,11 @@ pub struct BenchSiteConfig {
 pub fn generate_site(config: &BenchSiteConfig) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "presemble-bench-{}-{}-{}-{}-{}",
-        config.pages, config.schemas, config.links_per_page, config.link_expressions, config.body_bytes
+        config.pages,
+        config.schemas,
+        config.links_per_page,
+        config.link_expressions,
+        config.body_bytes
     ));
 
     // Clean up from previous runs
@@ -45,7 +49,11 @@ pub fn generate_site(config: &BenchSiteConfig) -> PathBuf {
     // Minimal assets
     let assets_dir = dir.join("assets");
     fs::create_dir_all(&assets_dir).unwrap();
-    fs::write(assets_dir.join("style.css"), "body { font-family: sans-serif; }\n").unwrap();
+    fs::write(
+        assets_dir.join("style.css"),
+        "body { font-family: sans-serif; }\n",
+    )
+    .unwrap();
 
     dir
 }
@@ -60,8 +68,12 @@ fn generate_schema(dir: &Path, schema_idx: usize, config: &BenchSiteConfig) {
     fs::create_dir_all(&schema_dir).unwrap();
 
     let mut content = String::new();
-    content.push_str(&format!("# {stem} title {{#title}}\noccurs\n: exactly once\n\n"));
-    content.push_str(&format!("Summary for {stem}. {{#summary}}\noccurs\n: 1..3\n\n"));
+    content.push_str(&format!(
+        "# {stem} title {{#title}}\noccurs\n: exactly once\n\n"
+    ));
+    content.push_str(&format!(
+        "Summary for {stem}. {{#summary}}\noccurs\n: 1..3\n\n"
+    ));
 
     // Link slots pointing to other types (round-robin)
     for l in 0..config.links_per_page {
@@ -115,7 +127,9 @@ fn generate_content(
         // Use a prime multiplier for spread
         let target_idx = (item_idx * 7 + l * 13 + 3) % items_per_schema.max(1);
         let target_slug = format!("item-{target_idx:04}");
-        content.push_str(&format!("[Link to {target_stem}](/{target_stem}/{target_slug})\n\n"));
+        content.push_str(&format!(
+            "[Link to {target_stem}](/{target_stem}/{target_slug})\n\n"
+        ));
     }
 
     // Link expression slots (each queries a different target collection)
@@ -168,7 +182,9 @@ fn generate_template(dir: &Path, schema_idx: usize, config: &BenchSiteConfig) {
     content.push_str("  <presemble:insert data=\"(ref input.summary)\" as=\"p\" />\n");
 
     for l in 0..config.links_per_page {
-        content.push_str(&format!("  <presemble:insert data=\"(ref input.link{l})\" />\n"));
+        content.push_str(&format!(
+            "  <presemble:insert data=\"(ref input.link{l})\" />\n"
+        ));
     }
 
     for e in 0..config.link_expressions {

@@ -12,7 +12,9 @@ const SITE_NAME: &str = "blog-site";
 /// Copy `fixtures/blog-site` (without its `output/`) to `<tmp>/blog-site`, so
 /// the build output lands in `<tmp>/output/blog-site`.
 fn copy_fixture_site() -> (TempDir, PathBuf) {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures").join(SITE_NAME);
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures")
+        .join(SITE_NAME);
     let tmp = TempDir::new().expect("tempdir");
     let dest = tmp.path().join(SITE_NAME);
     copy_dir_excluding(&src, &dest, "output");
@@ -55,7 +57,10 @@ fn build_refuses_invalid_site_and_writes_nothing() {
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
-    assert!(stderr.contains("content/article/invalid-post.md:"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("content/article/invalid-post.md:"),
+        "stderr:\n{stderr}"
+    );
     assert!(stderr.contains(": error: "), "stderr:\n{stderr}");
     assert!(stderr.contains("site not published"), "stderr:\n{stderr}");
     assert!(!index_html(&tmp).exists(), "no page should be written");
@@ -94,16 +99,24 @@ fn valid_site_with_body_appended(extra: &str) -> (TempDir, PathBuf) {
 
 #[test]
 fn html_block_fails_the_build() {
-    let (tmp, site) =
-        valid_site_with_body_appended("\n<div class=\"note\">\n<p>raw</p>\n</div>\n");
+    let (tmp, site) = valid_site_with_body_appended("\n<div class=\"note\">\n<p>raw</p>\n</div>\n");
 
     let out = presemble_build(&site);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
-    assert!(stderr.contains("content/article/hello-world.md:"), "stderr:\n{stderr}");
-    assert!(stderr.contains("error: HTML block `<div class=\"note\">"), "stderr:\n{stderr}");
-    assert!(stderr.contains("raw HTML is not allowed in content"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("content/article/hello-world.md:"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("error: HTML block `<div class=\"note\">"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("raw HTML is not allowed in content"),
+        "stderr:\n{stderr}"
+    );
     assert!(!index_html(&tmp).exists(), "no page should be written");
 }
 
@@ -115,8 +128,14 @@ fn inline_html_fails_the_build() {
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
-    assert!(stderr.contains("content/article/hello-world.md:"), "stderr:\n{stderr}");
-    assert!(stderr.contains("inline HTML `<b>` is not allowed in content"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("content/article/hello-world.md:"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("inline HTML `<b>` is not allowed in content"),
+        "stderr:\n{stderr}"
+    );
     assert!(!index_html(&tmp).exists(), "no page should be written");
 }
 
@@ -130,8 +149,14 @@ fn heading_inline_html_makes_page_unpublishable() {
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
-    assert!(stderr.contains("content/article/hello-world.md:"), "stderr:\n{stderr}");
-    assert!(stderr.contains("heading `### a <b>x</b>`: inline HTML `<b>`"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("content/article/hello-world.md:"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("heading `### a <b>x</b>`: inline HTML `<b>`"),
+        "stderr:\n{stderr}"
+    );
     assert!(!index_html(&tmp).exists(), "no page should be written");
 }
 

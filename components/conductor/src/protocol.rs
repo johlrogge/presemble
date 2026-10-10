@@ -57,16 +57,25 @@ pub enum PathStep {
     /// Into a blockquote.
     Quote { base: usize, new: usize },
     /// Into item `item` of a list.
-    Item { base: usize, new: usize, item: usize },
+    Item {
+        base: usize,
+        new: usize,
+        item: usize,
+    },
 }
 
 impl From<&content::sync::Step> for PathStep {
     fn from(step: &content::sync::Step) -> PathStep {
         match step {
-            content::sync::Step::Quote { base, new } => PathStep::Quote { base: *base, new: *new },
-            content::sync::Step::Item { base, new, item } => {
-                PathStep::Item { base: *base, new: *new, item: *item }
-            }
+            content::sync::Step::Quote { base, new } => PathStep::Quote {
+                base: *base,
+                new: *new,
+            },
+            content::sync::Step::Item { base, new, item } => PathStep::Item {
+                base: *base,
+                new: *new,
+                item: *item,
+            },
         }
     }
 }
@@ -114,22 +123,33 @@ pub struct HeldRegion {
 pub enum Command {
     /// An editor opened a document with this text. N is not changed; the text
     /// is what later changes are compared with.
-    EditorOpened { path: editorial_types::ContentPath, text: String },
+    EditorOpened {
+        path: editorial_types::ContentPath,
+        text: String,
+    },
     /// The editor's text changed. Every region that differs from what the
     /// editor started from is lowered into N at once, block by block (LSP-2).
     /// Does NOT write to disk. Answered with [`Response::EditorSynced`].
-    EditorChanged { path: editorial_types::ContentPath, text: String },
+    EditorChanged {
+        path: editorial_types::ContentPath,
+        text: String,
+    },
     /// The editor closed the document. N is unchanged.
     EditorClosed { path: editorial_types::ContentPath },
     /// Take the editor's version of a region N did not take (a drift that
     /// still exists), over N's.
-    KeepMine { path: editorial_types::ContentPath, drift_id: DriftId },
+    KeepMine {
+        path: editorial_types::ContentPath,
+        drift_id: DriftId,
+    },
     /// Editor saved a document (from LSP did_save). When the file holds the
     /// editor's latest text this is a flush of N (held regions are lowered as
     /// they stand; N's text is written if it holds others' changes).
     DocumentSaved { path: editorial_types::SitePath },
     /// Files changed on disk (from file watcher).
-    FileChanged { paths: Vec<editorial_types::SitePath> },
+    FileChanged {
+        paths: Vec<editorial_types::SitePath>,
+    },
     /// Throw away the unsaved edits of one document and load it from disk
     /// (`presemble reload`). Other documents keep their unsaved edits.
     ReloadDocument { path: editorial_types::ContentPath },
@@ -144,17 +164,17 @@ pub enum Command {
     /// Request conductor shutdown.
     Shutdown,
     /// Editor cursor moved to a new position.
-    CursorMoved { path: editorial_types::SitePath, line: u32 },
+    CursorMoved {
+        path: editorial_types::SitePath,
+        line: u32,
+    },
     /// Apply a NED program string (Clojure source) to the conductor's NodeStore.
     /// The program is evaluated in a NED-enabled root environment and may
     /// mutate the store. Return: `Response::Ok` on success, `Response::Error(msg)`
     /// on eval or apply failure.
     ApplyNedProgram { program: String },
     /// Create a new empty content file.
-    CreateContent {
-        stem: String,
-        slug: String,
-    },
+    CreateContent { stem: String, slug: String },
     /// List all dirty (unsaved) buffers.
     GetDirtyBuffers,
     /// List distinct file paths that have at least one pending NED suggestion.
@@ -220,17 +240,11 @@ pub enum Command {
     /// lowering is the same. Responds with [`Response::BlockEdited`].
     BlockEdit(editorial_types::BlockEditRequest),
     /// Accept a NED-based suggestion: apply the mutation and mark as accepted.
-    AcceptNedSuggestion {
-        id: editorial_types::SuggestionId,
-    },
+    AcceptNedSuggestion { id: editorial_types::SuggestionId },
     /// Reject a NED-based suggestion: dismiss without applying.
-    RejectNedSuggestion {
-        id: editorial_types::SuggestionId,
-    },
+    RejectNedSuggestion { id: editorial_types::SuggestionId },
     /// Query all NED suggestions for a file (all statuses).
-    GetNedSuggestions {
-        file: editorial_types::ContentPath,
-    },
+    GetNedSuggestions { file: editorial_types::ContentPath },
     /// Resolve the canonical schema URL for a given content page URL.
     /// Returns `Response::SchemaUrl(Some(url))` when the page is known,
     /// `Response::SchemaUrl(None)` otherwise.
@@ -257,7 +271,9 @@ pub enum Response {
     AlreadyInPlace,
     /// A document was reloaded from disk. `discarded`: it had unsaved edits in
     /// the conductor, now gone.
-    Reloaded { discarded: bool },
+    Reloaded {
+        discarded: bool,
+    },
     /// A save would overwrite files that changed on disk while they have
     /// unsaved edits, and the consent does not name them. Nothing was written.
     /// Sorted site-relative paths.
@@ -290,7 +306,9 @@ pub enum Response {
     /// List of NED suggestions for a file (all statuses).
     NedSuggestions(Vec<editorial_types::NedSuggestion>),
     /// HTML string for a rendered page (response to `Command::RenderPage`).
-    PageRendered { html: String },
+    PageRendered {
+        html: String,
+    },
     /// Canonical schema URL for a content page (response to `Command::SchemaUrlForPage`).
     SchemaUrl(Option<String>),
     /// Best-effort representative content page URL for a schema (response to `Command::PageUrlForSchema`).
@@ -299,7 +317,10 @@ pub enum Response {
     BlockEdited(editorial_types::BlockEditResponse),
     /// Answer to an editor command: the regions N did not take (drifts) and
     /// the regions held back until their construct is closed.
-    EditorSynced { drifts: Vec<Drift>, held: Vec<HeldRegion> },
+    EditorSynced {
+        drifts: Vec<Drift>,
+        held: Vec<HeldRegion>,
+    },
     /// Result of applying a NED program: counts of dirty paths and rebuilt/failed pages.
     Applied {
         rebuilt_pages: Vec<String>,
@@ -321,15 +342,15 @@ pub enum ConductorEvent {
         anchor: Option<editorial_types::StructuralAnchor>,
     },
     /// Build failed for some pages.
-    BuildFailed {
-        error_pages: Vec<String>,
-    },
+    BuildFailed { error_pages: Vec<String> },
     /// Browser should scroll to follow the editor cursor. `anchor` is the
     /// `StructuralAnchor` of the body element under or nearest to the
     /// cursor's line, derived by `body_element_anchor_at_line`. Sent on
     /// cursor movement from LSP/Helix; the browser locates the DOM target
     /// via `_findByStructuralAnchor` in `inject.js`.
-    CursorScrollTo { anchor: editorial_types::StructuralAnchor },
+    CursorScrollTo {
+        anchor: editorial_types::StructuralAnchor,
+    },
     /// A NED-based editorial suggestion was created.
     NedSuggestionCreated {
         // Boxed: `NedSuggestion` is much larger than the other events.
@@ -422,7 +443,9 @@ mod protocol_tests {
 
     #[test]
     fn schema_url_for_page_command_roundtrips_through_json() {
-        let cmd = Command::SchemaUrlForPage { page_url: "/post/hello".to_string() };
+        let cmd = Command::SchemaUrlForPage {
+            page_url: "/post/hello".to_string(),
+        };
         let json = serde_json::to_string(&cmd).expect("serialize");
         let decoded: Command = serde_json::from_str(&json).expect("deserialize");
         match decoded {
@@ -433,11 +456,15 @@ mod protocol_tests {
 
     #[test]
     fn page_url_for_schema_command_roundtrips_through_json() {
-        let cmd = Command::PageUrlForSchema { schema_url: "/_schema/post/item".to_string() };
+        let cmd = Command::PageUrlForSchema {
+            schema_url: "/_schema/post/item".to_string(),
+        };
         let json = serde_json::to_string(&cmd).expect("serialize");
         let decoded: Command = serde_json::from_str(&json).expect("deserialize");
         match decoded {
-            Command::PageUrlForSchema { schema_url } => assert_eq!(schema_url, "/_schema/post/item"),
+            Command::PageUrlForSchema { schema_url } => {
+                assert_eq!(schema_url, "/_schema/post/item")
+            }
             other => panic!("unexpected variant: {other:?}"),
         }
     }
@@ -490,7 +517,10 @@ mod protocol_tests {
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
         match decoded {
-            ConductorEvent::PagesRebuilt { pages, anchor: Some(a) } => {
+            ConductorEvent::PagesRebuilt {
+                pages,
+                anchor: Some(a),
+            } => {
                 assert_eq!(pages, vec!["/post/hello".to_string()]);
                 assert_eq!(a.file, "content/post/hello.md");
                 assert_eq!(a.slot, "body");
@@ -510,7 +540,10 @@ mod protocol_tests {
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(decoded, ConductorEvent::PagesRebuilt { anchor: None, .. }));
+        assert!(matches!(
+            decoded,
+            ConductorEvent::PagesRebuilt { anchor: None, .. }
+        ));
     }
 
     #[test]
@@ -522,7 +555,9 @@ mod protocol_tests {
             node_kind: "paragraph".to_string(),
             offset: 0,
         };
-        let event = ConductorEvent::CursorScrollTo { anchor: anchor.clone() };
+        let event = ConductorEvent::CursorScrollTo {
+            anchor: anchor.clone(),
+        };
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
         match decoded {
@@ -550,10 +585,17 @@ mod protocol_tests {
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
         match decoded {
-            ConductorEvent::NedSuggestionAccepted { id: d_id, file: d_file, pages } => {
+            ConductorEvent::NedSuggestionAccepted {
+                id: d_id,
+                file: d_file,
+                pages,
+            } => {
                 assert_eq!(d_id, id);
                 assert_eq!(d_file, file);
-                assert_eq!(pages, vec!["/post/hello".to_string(), "/post/world".to_string()]);
+                assert_eq!(
+                    pages,
+                    vec!["/post/hello".to_string(), "/post/world".to_string()]
+                );
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -571,7 +613,10 @@ mod protocol_tests {
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
         match decoded {
-            ConductorEvent::NedSuggestionRejected { id: d_id, file: d_file } => {
+            ConductorEvent::NedSuggestionRejected {
+                id: d_id,
+                file: d_file,
+            } => {
                 assert_eq!(d_id, id);
                 assert_eq!(d_file, file);
             }

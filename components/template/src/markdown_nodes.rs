@@ -132,7 +132,11 @@ struct ImageState {
 
 #[cfg(test)]
 fn element(name: &str, attrs: Vec<(String, Form)>) -> Element {
-    Element { name: name.to_string(), attrs, children: Vec::new() }
+    Element {
+        name: name.to_string(),
+        attrs,
+        children: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -185,7 +189,12 @@ impl Builder {
     fn start(&mut self, tag: Tag<'_>) {
         let pushed = match tag {
             Tag::Paragraph => self.open_el(element("p", Vec::new())),
-            Tag::Heading { level, id, classes, attrs } => {
+            Tag::Heading {
+                level,
+                id,
+                classes,
+                attrs,
+            } => {
                 let mut el_attrs = Vec::new();
                 if let Some(id) = id {
                     el_attrs.push(attr("id", id.into_string()));
@@ -242,7 +251,11 @@ impl Builder {
             Tag::DefinitionListTitle => self.open_el(element("dt", Vec::new())),
             Tag::DefinitionListDefinition => self.open_el(element("dd", Vec::new())),
             Tag::Table(alignments) => {
-                self.tables.push(TableState { alignments, in_head: false, cell: 0 });
+                self.tables.push(TableState {
+                    alignments,
+                    in_head: false,
+                    cell: 0,
+                });
                 self.open_el(element("table", Vec::new()))
             }
             Tag::TableHead => {
@@ -279,7 +292,12 @@ impl Builder {
             Tag::Emphasis => self.open_el(element("em", Vec::new())),
             Tag::Strong => self.open_el(element("strong", Vec::new())),
             Tag::Strikethrough => self.open_el(element("del", Vec::new())),
-            Tag::Link { link_type, dest_url, title, .. } => {
+            Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                ..
+            } => {
                 let href = match link_type {
                     LinkType::Email => format!("mailto:{}", percent_encode_url(&dest_url)),
                     _ => percent_encode_url(&dest_url),
@@ -290,7 +308,9 @@ impl Builder {
                 }
                 self.open_el(element("a", attrs))
             }
-            Tag::Image { dest_url, title, .. } => {
+            Tag::Image {
+                dest_url, title, ..
+            } => {
                 // No tag is recorded: the image's events are consumed by
                 // `image_event` up to and including its end.
                 self.image = Some(ImageState {
@@ -340,7 +360,9 @@ impl Builder {
     /// Events inside an image: text becomes the `alt` text; nothing else is
     /// kept.
     fn image_event(&mut self, event: Event<'_>) {
-        let Some(image) = self.image.as_mut() else { return };
+        let Some(image) = self.image.as_mut() else {
+            return;
+        };
         match event {
             Event::Start(_) => image.depth += 1,
             Event::End(_) if image.depth > 0 => image.depth -= 1,
@@ -484,7 +506,9 @@ fn neutralise_html<'a>(input: impl IntoIterator<Item = Event<'a>>) -> Vec<Event<
                 Some(buffer) => buffer.push_str(&s),
                 None => push_neutralised(&mut events, s),
             },
-            Event::InlineHtml(s) if opens_unclosed_comment(&s) => open_comment = Some(s.to_string()),
+            Event::InlineHtml(s) if opens_unclosed_comment(&s) => {
+                open_comment = Some(s.to_string())
+            }
             Event::InlineHtml(s) => push_neutralised(&mut events, s),
             other => events.push(other),
         }
@@ -513,7 +537,7 @@ fn push_neutralised<'a>(events: &mut Vec<Event<'a>>, source: CowStr<'a>) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::dom::{parse_template_xml, serialize_nodes, Element, Form};
+    use crate::dom::{Element, Form, parse_template_xml, serialize_nodes};
     use content::MARKDOWN_OPTIONS;
     use pulldown_cmark::Parser;
 
@@ -588,7 +612,10 @@ pub(crate) mod tests {
     #[test]
     fn pulldown_unclosed_inline_comment_is_plain_text() {
         let got = events("a <!-- one\ntwo b");
-        assert!(!got.iter().any(|e| matches!(e, Event::InlineHtml(_))), "{got:?}");
+        assert!(
+            !got.iter().any(|e| matches!(e, Event::InlineHtml(_))),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -630,7 +657,10 @@ pub(crate) mod tests {
             Event::InlineHtml("two -->".into()),
             Event::Text(" b".into()),
         ]));
-        assert_eq!(got, para(vec![Event::Text("a ".into()), Event::Text(" b".into())]));
+        assert_eq!(
+            got,
+            para(vec![Event::Text("a ".into()), Event::Text(" b".into())])
+        );
     }
 
     #[test]
@@ -684,7 +714,10 @@ pub(crate) mod tests {
         // An HTML block.
         let got = nodes("<script>alert(1)</script>\n");
         assert_eq!(got.len(), 1, "{got:?}");
-        assert!(matches!(&got[0], Node::Text(t) if t == "<script>alert(1)</script>\n"), "{got:?}");
+        assert!(
+            matches!(&got[0], Node::Text(t) if t == "<script>alert(1)</script>\n"),
+            "{got:?}"
+        );
 
         // Serialized, the tag is escaped.
         let html = serialize_nodes(&nodes("a <script>x</script> b"));
@@ -707,7 +740,10 @@ pub(crate) mod tests {
     fn events_to_nodes_drops_comments_without_caller_neutralising() {
         let got = events_to_nodes(Parser::new_ext("a <!-- secret --> b", MARKDOWN_OPTIONS));
         let text = text_content(&got);
-        assert!(!text.contains("secret"), "comment text must not survive: {text:?}");
+        assert!(
+            !text.contains("secret"),
+            "comment text must not survive: {text:?}"
+        );
         assert_eq!(text, "a  b");
 
         let got = events_to_nodes(Parser::new_ext("<!--\nsecret\n-->\n", MARKDOWN_OPTIONS));
@@ -721,7 +757,13 @@ pub(crate) mod tests {
         let elems: Vec<&Element> = p
             .children
             .iter()
-            .filter_map(|c| if let Node::Element(e) = c { Some(e) } else { None })
+            .filter_map(|c| {
+                if let Node::Element(e) = c {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(elems.len(), 4, "{:?}", p.children);
 
@@ -759,7 +801,10 @@ pub(crate) mod tests {
 
         let got = nodes("3. a\n4. b\n");
         let ol = el(&got[0]);
-        assert_eq!(ol.attr_form("start").map(Form::to_html_value), Some("3".to_string()));
+        assert_eq!(
+            ol.attr_form("start").map(Form::to_html_value),
+            Some("3".to_string())
+        );
 
         let got = nodes("- a\n- b\n");
         let ul = el(&got[0]);
@@ -835,7 +880,15 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             kinds,
-            ["strong", "\" \"", "em", "\" \"", "code", "br", "\"next\\nline\""]
+            [
+                "strong",
+                "\" \"",
+                "em",
+                "\" \"",
+                "code",
+                "br",
+                "\"next\\nline\""
+            ]
         );
         assert_eq!(text_content(&el(&got[2]).children), "H e");
         assert_eq!(el(&el(&got[3]).children[0]).name, "p");
@@ -846,7 +899,11 @@ pub(crate) mod tests {
     }
 
     fn elem(name: &str, children: Vec<Node>) -> Node {
-        Node::Element(Element { name: name.to_string(), attrs: vec![], children })
+        Node::Element(Element {
+            name: name.to_string(),
+            attrs: vec![],
+            children,
+        })
     }
 
     #[test]
@@ -858,7 +915,10 @@ pub(crate) mod tests {
             [Node::Element(p)] if p.name == "p" => p.children.clone(),
             other => panic!("expected one paragraph, got {other:?}"),
         };
-        assert_eq!(paragraph("a &lt;script&gt; &amp; b"), vec![text("a <script> & b")]);
+        assert_eq!(
+            paragraph("a &lt;script&gt; &amp; b"),
+            vec![text("a <script> & b")]
+        );
         assert_eq!(
             paragraph("*a* &lt;script&gt; b"),
             vec![elem("em", vec![text("a")]), text(" <script> b")]
@@ -878,7 +938,11 @@ pub(crate) mod tests {
                 attrs: vec![],
                 children: vec![
                     Node::Text("b".into()),
-                    Node::Element(Element { name: "br".into(), attrs: vec![], children: vec![] }),
+                    Node::Element(Element {
+                        name: "br".into(),
+                        attrs: vec![],
+                        children: vec![],
+                    }),
                     Node::Text(" & c".into()),
                 ],
             }),
@@ -924,8 +988,25 @@ pub(crate) mod tests {
     }
 
     const BLOCK: &[&str] = &[
-        "p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "blockquote", "pre", "hr",
-        "table", "thead", "tbody", "tr", "th", "td",
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "ul",
+        "ol",
+        "li",
+        "blockquote",
+        "pre",
+        "hr",
+        "table",
+        "thead",
+        "tbody",
+        "tr",
+        "th",
+        "td",
     ];
     const CONTAINER: &[&str] = &["ul", "ol", "blockquote", "table", "thead", "tbody", "tr"];
 
@@ -947,7 +1028,9 @@ pub(crate) mod tests {
                     let newline_only = !t.is_empty() && t.chars().all(|c| c == '\n');
                     let after_block = i > 0 && is_block(&nodes[i - 1]);
                     let before_block = nodes.get(i + 1).is_some_and(is_block);
-                    if t.is_empty() || (newline_only && (in_container || after_block || before_block)) {
+                    if t.is_empty()
+                        || (newline_only && (in_container || after_block || before_block))
+                    {
                         continue;
                     }
                     if after_block {
@@ -964,8 +1047,11 @@ pub(crate) mod tests {
                 }
                 Node::Element(e) => {
                     after_br = e.name == "br";
-                    let mut attrs: Vec<(String, String)> =
-                        e.attrs.iter().map(|(k, v)| (k.clone(), v.to_html_value())).collect();
+                    let mut attrs: Vec<(String, String)> = e
+                        .attrs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_html_value()))
+                        .collect();
                     attrs.sort();
                     let container = CONTAINER.contains(&e.name.as_str())
                         || (e.name == "li" && e.children.iter().any(is_block));
@@ -1095,5 +1181,4 @@ pub(crate) mod tests {
             assert_eq!(got, expected, "source: {src:?}");
         }
     }
-
 }

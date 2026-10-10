@@ -6,15 +6,17 @@ pub(crate) mod self_write_tracker;
 pub(crate) mod site_resolve;
 pub(crate) mod suggestion_apply;
 
-pub use client::{ensure_conductor, socket_url, ConductorClient, ConductorSubscriber, SubscriberError};
+pub use client::{
+    ConductorClient, ConductorSubscriber, SubscriberError, ensure_conductor, socket_url,
+};
 pub use conductor::{CommandResult, Conductor, ProgramError, ProgramOutcome};
 pub use content_store::edit::Plan;
 pub use dirty::DirtyDocs;
-pub use protocol::{
-    Command, ConductorEvent, DependentFile, Drift, DriftId, DriftKind, FileClassification, HeldRegion, LinkOption,
-    PathStep, RenderMode, Response,
-};
 pub use editorial_types;
+pub use protocol::{
+    Command, ConductorEvent, DependentFile, Drift, DriftId, DriftKind, FileClassification,
+    HeldRegion, LinkOption, PathStep, RenderMode, Response,
+};
 
 #[cfg(test)]
 mod tests {
@@ -47,7 +49,10 @@ mod tests {
     #[test]
     fn socket_url_contains_ipc_prefix() {
         let url = socket_url(Path::new("/tmp/mysite"));
-        assert!(url.starts_with("ipc://"), "expected ipc:// prefix, got: {url}");
+        assert!(
+            url.starts_with("ipc://"),
+            "expected ipc:// prefix, got: {url}"
+        );
     }
 
     #[test]
@@ -133,16 +138,21 @@ mod tests {
 
         // Verify the NodeStore slot was updated
         let rel_path = std::path::Path::new("content/article/test.md");
-        let doc_root = conductor.doc_root_for_path(rel_path)
+        let doc_root = conductor
+            .doc_root_for_path(rel_path)
             .expect("document should exist in NodeStore after the block edit");
         let node_store_arc = conductor.node_store();
         let store = node_store_arc.read().unwrap();
         // Walk preamble → slot("title") → heading → text child
-        let preamble = node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
-            .expect("document should have a preamble");
+        let preamble =
+            node_store_bridge::content_bridge::find_child_by_name(&store, doc_root, "preamble")
+                .expect("document should have a preamble");
         let title_text = store.children(preamble).iter().find_map(|&slot_id| {
-            let name_attr = node_store_bridge::content_bridge::find_attr_text(&store, slot_id, "name")?;
-            if name_attr != "title" { return None; }
+            let name_attr =
+                node_store_bridge::content_bridge::find_attr_text(&store, slot_id, "name")?;
+            if name_attr != "title" {
+                return None;
+            }
             store.children(slot_id).iter().find_map(|&elem_id| {
                 store.children(elem_id).iter().find_map(|&text_id| {
                     if let Some(node_store::Node::Text(s)) = store.get(text_id) {
@@ -213,7 +223,10 @@ mod tests {
         match &result.events[0] {
             ConductorEvent::CursorScrollTo { anchor } => {
                 assert_eq!(anchor.node_kind, "paragraph", "expected paragraph kind");
-                assert_eq!(anchor.offset, 0, "expected offset 0 (first paragraph in section)");
+                assert_eq!(
+                    anchor.offset, 0,
+                    "expected offset 0 (first paragraph in section)"
+                );
                 assert_eq!(anchor.slot, "body", "expected body slot");
             }
             other => panic!("expected CursorScrollTo, got {other:?}"),
@@ -247,7 +260,10 @@ mod tests {
                 ConductorEvent::CursorScrollTo { anchor } => {
                     // Must be a structural anchor for a body element
                     assert_eq!(anchor.slot, "body", "expected body slot, got: {anchor:?}");
-                    assert!(!anchor.node_kind.is_empty(), "expected non-empty node_kind, got: {anchor:?}");
+                    assert!(
+                        !anchor.node_kind.is_empty(),
+                        "expected non-empty node_kind, got: {anchor:?}"
+                    );
                 }
                 other => panic!("expected CursorScrollTo, got {other:?}"),
             }
@@ -276,11 +292,17 @@ mod tests {
             "## Why\n\n",
             "Third.\n\n",
             "Fourth.\n",
-        ).to_string();
-        conductor.handle_command(Command::EditorOpened { path: cp("content/post/my-post.md"), text: text.clone() });
+        )
+        .to_string();
+        conductor.handle_command(Command::EditorOpened {
+            path: cp("content/post/my-post.md"),
+            text: text.clone(),
+        });
 
         // Count lines to the "Fourth." paragraph
-        let fourth_line = text.lines().enumerate()
+        let fourth_line = text
+            .lines()
+            .enumerate()
             .find(|(_, l)| l.trim() == "Fourth.")
             .map(|(i, _)| i as u32)
             .expect("Fourth. must exist");
@@ -300,12 +322,14 @@ mod tests {
                     Some("Why".to_string()),
                     "expected heading_text 'Why'"
                 );
-                assert_eq!(anchor.offset, 1, "expected offset 1 (second paragraph after 'Why')");
+                assert_eq!(
+                    anchor.offset, 1,
+                    "expected offset 1 (second paragraph after 'Why')"
+                );
             }
             other => panic!("expected CursorScrollTo, got {other:?}"),
         }
     }
-
 
     // ── SiteGraph ─────────────────────────────────────────────────────────────
 
@@ -333,10 +357,16 @@ mod tests {
         // Two content files
         let content_dir = dir.path().join("content/post");
         std::fs::create_dir_all(&content_dir).unwrap();
-        std::fs::write(content_dir.join("first.md"), "# First Post\n\n----\n\nBody of first.\n")
-            .unwrap();
-        std::fs::write(content_dir.join("second.md"), "# Second Post\n\n----\n\nBody of second.\n")
-            .unwrap();
+        std::fs::write(
+            content_dir.join("first.md"),
+            "# First Post\n\n----\n\nBody of first.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            content_dir.join("second.md"),
+            "# Second Post\n\n----\n\nBody of second.\n",
+        )
+        .unwrap();
 
         // Use builder().from_dir() so the mem repo reads schemas/content from the filesystem
         let repo = site_repository::SiteRepository::builder()
@@ -376,7 +406,10 @@ mod tests {
 
         let urls: Vec<&str> = items.iter().map(|(url, _)| url.as_str()).collect();
         assert!(urls.contains(&"/post/first"), "should contain /post/first");
-        assert!(urls.contains(&"/post/second"), "should contain /post/second");
+        assert!(
+            urls.contains(&"/post/second"),
+            "should contain /post/second"
+        );
 
         // Verify each item has a title field
         for (url, data) in &items {
@@ -391,7 +424,10 @@ mod tests {
     fn empty_conductor_has_empty_node_store() {
         let conductor = empty_conductor();
         let roots = conductor.documents_for_stem("post");
-        assert!(roots.is_empty(), "empty conductor should have no documents in NodeStore");
+        assert!(
+            roots.is_empty(),
+            "empty conductor should have no documents in NodeStore"
+        );
     }
 
     // ── New Command Handlers ──────────────────────────────────────────────────
@@ -457,7 +493,10 @@ mod tests {
         let result = conductor.handle_command(Command::ListSchemas);
         match result.response {
             Response::SchemaList(schemas) => {
-                assert!(schemas.is_empty(), "expected empty schema list for empty conductor");
+                assert!(
+                    schemas.is_empty(),
+                    "expected empty schema list for empty conductor"
+                );
             }
             other => panic!("expected SchemaList, got {other:?}"),
         }
@@ -473,8 +512,14 @@ mod tests {
             Response::LinkOptions(opts) => {
                 assert_eq!(opts.len(), 2, "expected 2 link options for 'post' stem");
                 let urls: Vec<&str> = opts.iter().map(|o| o.url.as_str()).collect();
-                assert!(urls.contains(&"/post/first"), "expected /post/first in options");
-                assert!(urls.contains(&"/post/second"), "expected /post/second in options");
+                assert!(
+                    urls.contains(&"/post/first"),
+                    "expected /post/first in options"
+                );
+                assert!(
+                    urls.contains(&"/post/second"),
+                    "expected /post/second in options"
+                );
             }
             other => panic!("expected LinkOptions, got {other:?}"),
         }
@@ -520,11 +565,19 @@ mod tests {
         // Templates
         let post_tpl_dir = dir.path().join("templates/post");
         std::fs::create_dir_all(&post_tpl_dir).unwrap();
-        std::fs::write(post_tpl_dir.join("item.hiccup"), "[:html [:body (get input :title)]]").unwrap();
+        std::fs::write(
+            post_tpl_dir.join("item.hiccup"),
+            "[:html [:body (get input :title)]]",
+        )
+        .unwrap();
 
         let author_tpl_dir = dir.path().join("templates/author");
         std::fs::create_dir_all(&author_tpl_dir).unwrap();
-        std::fs::write(author_tpl_dir.join("item.hiccup"), "[:html [:body (get input :name)]]").unwrap();
+        std::fs::write(
+            author_tpl_dir.join("item.hiccup"),
+            "[:html [:body (get input :name)]]",
+        )
+        .unwrap();
 
         // Post content
         let post_content_dir = dir.path().join("content/post");
@@ -532,7 +585,8 @@ mod tests {
         std::fs::write(
             post_content_dir.join("hello-world.md"),
             "# Hello World\n\n[Default Author](/author/default-author)\n\n----\n\nBody.\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Author content
         let author_content_dir = dir.path().join("content/author");
@@ -540,7 +594,8 @@ mod tests {
         std::fs::write(
             author_content_dir.join("default-author.md"),
             "# Default Author\n\n----\n\nBio.\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let repo = site_repository::SiteRepository::builder()
             .from_dir(dir.path())
@@ -553,8 +608,11 @@ mod tests {
     fn resolve_link_target_stem_for_post_author_returns_author() {
         let (_dir, conductor) = post_author_conductor();
         let result = conductor.resolve_link_target_stem("post", "author");
-        assert_eq!(result, Some("author".to_string()),
-            "author slot on post schema should resolve to 'author' stem");
+        assert_eq!(
+            result,
+            Some("author".to_string()),
+            "author slot on post schema should resolve to 'author' stem"
+        );
     }
 
     #[test]
@@ -562,16 +620,17 @@ mod tests {
         let (_dir, conductor) = post_author_conductor();
         // 'title' is a heading slot, not a link
         let result = conductor.resolve_link_target_stem("post", "title");
-        assert_eq!(result, None,
-            "title slot is a heading, not a link — should return None");
+        assert_eq!(
+            result, None,
+            "title slot is a heading, not a link — should return None"
+        );
     }
 
     #[test]
     fn resolve_link_target_stem_for_unknown_slot_returns_none() {
         let (_dir, conductor) = post_author_conductor();
         let result = conductor.resolve_link_target_stem("post", "nonexistent_slot");
-        assert_eq!(result, None,
-            "slot that doesn't exist should return None");
+        assert_eq!(result, None, "slot that doesn't exist should return None");
     }
 
     #[test]
@@ -584,9 +643,7 @@ mod tests {
             .expect("should resolve author slot to 'author' stem");
         assert_eq!(target_stem, "author");
 
-        let result = conductor.handle_command(Command::ListLinkOptions {
-            stem: target_stem,
-        });
+        let result = conductor.handle_command(Command::ListLinkOptions { stem: target_stem });
         match result.response {
             Response::LinkOptions(opts) => {
                 assert_eq!(opts.len(), 1, "expected 1 author option, got: {opts:?}");
@@ -632,7 +689,10 @@ mod tests {
 
         let repo = site_repository::SiteRepository::builder().build();
         let conductor = Conductor::with_repo(dir.path().to_path_buf(), repo).unwrap();
-        match conductor.handle_command(Command::ListTemplateNames).response {
+        match conductor
+            .handle_command(Command::ListTemplateNames)
+            .response
+        {
             Response::TemplateNames(names) => {
                 assert_eq!(names, vec!["footer", "header", "index", "post"]);
             }
@@ -650,9 +710,9 @@ mod tests {
             Response::Dependents(deps) => {
                 // Should include schema + template + content files
                 assert!(!deps.is_empty(), "expected dependents for 'post' stem");
-                let has_schema = deps.iter().any(|d| {
-                    matches!(&d.kind, FileClassification::Schema { stem } if stem == "post")
-                });
+                let has_schema = deps.iter().any(
+                    |d| matches!(&d.kind, FileClassification::Schema { stem } if stem == "post"),
+                );
                 let has_content = deps.iter().any(|d| {
                     matches!(&d.kind, FileClassification::Content { schema_stem } if schema_stem == "post")
                 });
@@ -671,7 +731,10 @@ mod tests {
         });
         match result.response {
             Response::Dependents(deps) => {
-                assert!(deps.is_empty(), "expected empty dependents for unknown stem");
+                assert!(
+                    deps.is_empty(),
+                    "expected empty dependents for unknown stem"
+                );
             }
             other => panic!("expected Dependents, got {other:?}"),
         }
@@ -699,7 +762,10 @@ mod tests {
         let result = conductor.handle_command(Command::ListContent);
         match result.response {
             Response::ContentList(paths) => {
-                assert!(paths.is_empty(), "expected empty content list for empty conductor");
+                assert!(
+                    paths.is_empty(),
+                    "expected empty content list for empty conductor"
+                );
             }
             other => panic!("expected ContentList, got {other:?}"),
         }
@@ -711,14 +777,20 @@ mod tests {
     fn doc_root_for_path_returns_some_for_known_file() {
         let (_dir, conductor) = two_post_conductor();
         let id = conductor.doc_root_for_path(Path::new("content/post/first.md"));
-        assert!(id.is_some(), "expected Some NodeId for content/post/first.md, got None");
+        assert!(
+            id.is_some(),
+            "expected Some NodeId for content/post/first.md, got None"
+        );
     }
 
     #[test]
     fn doc_root_for_path_returns_none_for_unknown_file() {
         let (_dir, conductor) = two_post_conductor();
         let id = conductor.doc_root_for_path(Path::new("content/post/nonexistent.md"));
-        assert!(id.is_none(), "expected None for nonexistent path, got {id:?}");
+        assert!(
+            id.is_none(),
+            "expected None for nonexistent path, got {id:?}"
+        );
     }
 
     #[test]
@@ -761,10 +833,16 @@ mod tests {
 
         let content_dir = dir.path().join("content/post");
         std::fs::create_dir_all(&content_dir).unwrap();
-        std::fs::write(content_dir.join("first.md"), "# First Post\n\n----\n\nBody of first.\n")
-            .unwrap();
-        std::fs::write(content_dir.join("second.md"), "# Second Post\n\n----\n\nBody of second.\n")
-            .unwrap();
+        std::fs::write(
+            content_dir.join("first.md"),
+            "# First Post\n\n----\n\nBody of first.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            content_dir.join("second.md"),
+            "# Second Post\n\n----\n\nBody of second.\n",
+        )
+        .unwrap();
 
         let repo = site_repository::SiteRepository::builder()
             .from_dir(dir.path())
@@ -817,8 +895,14 @@ mod tests {
         let (_dir, conductor) = two_post_conductor_html_template();
         let paths = vec![PathBuf::from("content/post/nonexistent.md")];
         let (rebuilt, failed) = conductor.rebuild_pages_for_modified_nodes(&paths);
-        assert!(rebuilt.is_empty(), "unknown path should be silently skipped, rebuilt: {rebuilt:?}");
-        assert!(failed.is_empty(), "unknown path should not appear in failed, failed: {failed:?}");
+        assert!(
+            rebuilt.is_empty(),
+            "unknown path should be silently skipped, rebuilt: {rebuilt:?}"
+        );
+        assert!(
+            failed.is_empty(),
+            "unknown path should not appear in failed, failed: {failed:?}"
+        );
     }
 
     /// Task B regression: `render_insert_native` must propagate constraint_attrs to the rendered
@@ -852,7 +936,13 @@ mod tests {
         let heading = store.add_node(Node::Element(heading_name));
         let text_node = store.add_node(Node::Text("My NodeStore Title".to_string()));
         store.add_edge(heading, Edge::Child(text_node));
-        store.add_edge(root, Edge::Reference { name: title_key, target: heading });
+        store.add_edge(
+            root,
+            Edge::Reference {
+                name: title_key,
+                target: heading,
+            },
+        );
 
         // Constraint record node: _presemble_schema_constraints_title → { occurs: "exactly-once" }
         let constraint_key_name = format!("{KEY_SCHEMA_CONSTRAINTS_PREFIX}title");
@@ -861,8 +951,20 @@ mod tests {
         let constraint_record = store.add_node(Node::Element(record_elem_name));
         let occurs_key = store.intern("occurs");
         let occurs_val = store.add_node(Node::Text("exactly-once".to_string()));
-        store.add_edge(constraint_record, Edge::Reference { name: occurs_key, target: occurs_val });
-        store.add_edge(root, Edge::Reference { name: constraint_record_key, target: constraint_record });
+        store.add_edge(
+            constraint_record,
+            Edge::Reference {
+                name: occurs_key,
+                target: occurs_val,
+            },
+        );
+        store.add_edge(
+            root,
+            Edge::Reference {
+                name: constraint_record_key,
+                target: constraint_record,
+            },
+        );
 
         // PrefixedGraphView — this implements resolve_node(), so render_insert_native is used
         let store_view = NodeStoreView::new(&store, root);
@@ -872,8 +974,8 @@ mod tests {
         let nodes = template::parse_template_xml(template_src).expect("template parse");
         let reg = template::NullRegistry;
         let ctx = template::RenderContext::editorial(&reg);
-        let transformed = template::transform(nodes, &prefixed, &ctx)
-            .expect("transform should succeed");
+        let transformed =
+            template::transform(nodes, &prefixed, &ctx).expect("transform should succeed");
         let html = template::serialize_nodes(&transformed);
 
         assert!(

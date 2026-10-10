@@ -20,7 +20,11 @@ impl ContentElement {
     pub fn heading_from_markdown(level: HeadingLevel, source: &str) -> ContentElement {
         let (content, marker) = crate::inline::read_heading_source(source)
             .unwrap_or_else(|| crate::inline::literal_heading_content(source));
-        ContentElement::Heading { level, content, marker }
+        ContentElement::Heading {
+            level,
+            content,
+            marker,
+        }
     }
 
     /// A paragraph from the markdown source of its content: a trailing
@@ -46,12 +50,15 @@ impl ContentElement {
     /// A blockquote and a list hold blocks (ADR-059 §13), not a text.
     pub fn text(&self) -> Option<Cow<'_, str>> {
         match self {
-            ContentElement::Heading { content, marker, .. } => {
-                Some(Cow::Owned(crate::inline::heading_source_text(content, marker.as_ref())))
-            }
-            ContentElement::Paragraph { content, marker } => {
-                Some(Cow::Owned(crate::inline::paragraph_source_text(content, marker.as_ref())))
-            }
+            ContentElement::Heading {
+                content, marker, ..
+            } => Some(Cow::Owned(crate::inline::heading_source_text(
+                content,
+                marker.as_ref(),
+            ))),
+            ContentElement::Paragraph { content, marker } => Some(Cow::Owned(
+                crate::inline::paragraph_source_text(content, marker.as_ref()),
+            )),
             ContentElement::CodeBlock { code, .. } => Some(Cow::Borrowed(code)),
             ContentElement::Blockquote { .. }
             | ContentElement::List { .. }
@@ -88,7 +95,9 @@ impl ContentElement {
             ContentElement::Heading { level, .. } => {
                 Some(ContentElement::heading_from_markdown(*level, &text))
             }
-            ContentElement::Paragraph { .. } => Some(ContentElement::paragraph_from_markdown(&text)),
+            ContentElement::Paragraph { .. } => {
+                Some(ContentElement::paragraph_from_markdown(&text))
+            }
             ContentElement::CodeBlock { language, .. } => Some(ContentElement::CodeBlock {
                 language: language.clone(),
                 code: text,
@@ -175,7 +184,10 @@ impl fmt::Display for RoundTripError {
                 write!(f, "block markdown failed to parse: {msg}")
             }
             RoundTripError::BlockCount(n) => {
-                write!(f, "block markdown parsed into {n} blocks, expected exactly 1")
+                write!(
+                    f,
+                    "block markdown parsed into {n} blocks, expected exactly 1"
+                )
             }
             RoundTripError::Changed { got } => {
                 write!(f, "block markdown parsed into a different block: {got}")
@@ -211,8 +223,8 @@ pub fn check_block_round_trip(el: &ContentElement) -> Result<(), RoundTripError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::{LinkOp, LinkTarget, LinkText, RefsToTarget, table};
     use crate::inline::AsPlainText;
-    use crate::document::{table, LinkOp, LinkTarget, LinkText, RefsToTarget};
     use schema::HeadingLevel;
 
     /// Parse markdown that must produce exactly one block, and return it.
@@ -239,7 +251,10 @@ mod tests {
                 vec![Inline::Link {
                     destination: LinkDestination::new(href),
                     title: None,
-                    text: Inlines::new(vec![Inline::Text(text.to_string())], InlineContext::LinkText),
+                    text: Inlines::new(
+                        vec![Inline::Text(text.to_string())],
+                        InlineContext::LinkText,
+                    ),
                 }],
                 InlineContext::Paragraph,
             ),
@@ -318,7 +333,11 @@ mod tests {
         ];
         for el in cases {
             for p in [Projection::Block, Projection::Content] {
-                assert_eq!(project_markdown(&el, p), Some(serialize_element(&el)), "{el:?}");
+                assert_eq!(
+                    project_markdown(&el, p),
+                    Some(serialize_element(&el)),
+                    "{el:?}"
+                );
             }
         }
     }
@@ -366,8 +385,7 @@ mod tests {
     #[test]
     fn parse_projection_normalises_line_endings_and_splits_blocks() {
         let el = paragraph("x");
-        let parsed =
-            parse_markdown_projection("one\r\n\r\ntwo", Projection::Block, &el).unwrap();
+        let parsed = parse_markdown_projection("one\r\n\r\ntwo", Projection::Block, &el).unwrap();
         assert_eq!(parsed, vec![paragraph("one"), paragraph("two")]);
     }
 
@@ -414,7 +432,10 @@ mod tests {
     #[test]
     fn text_and_with_text_cover_code_and_paragraph() {
         let cases = [
-            ContentElement::CodeBlock { language: None, code: "x".to_string() },
+            ContentElement::CodeBlock {
+                language: None,
+                code: "x".to_string(),
+            },
             paragraph("p"),
         ];
         for el in cases {
@@ -518,7 +539,9 @@ mod tests {
     fn newline_in_heading_becomes_a_space_in_its_nodes() {
         let h = parse_one("# Title").with_text("Title\nmore").unwrap();
         assert_eq!(check_block_round_trip(&h), Ok(()));
-        let ContentElement::Heading { content, .. } = &h else { panic!("{h:?}") };
+        let ContentElement::Heading { content, .. } = &h else {
+            panic!("{h:?}")
+        };
         assert_eq!(content.plain_text(), "Title more");
     }
 
@@ -529,7 +552,9 @@ mod tests {
     fn heading_source_ending_in_closing_run_is_literal_text() {
         let h = parse_one("# Title").with_text("Title #").unwrap();
         assert_eq!(check_block_round_trip(&h), Ok(()));
-        let ContentElement::Heading { content, .. } = &h else { panic!("{h:?}") };
+        let ContentElement::Heading { content, .. } = &h else {
+            panic!("{h:?}")
+        };
         assert_eq!(content.plain_text(), "Title #");
     }
 
@@ -546,8 +571,13 @@ mod tests {
     fn a_blank_line_is_not_part_of_a_paragraphs_nodes() {
         let p = paragraph("first\n\nsecond");
         assert_eq!(check_block_round_trip(&p), Ok(()));
-        let ContentElement::Paragraph { content, .. } = &p else { panic!("{p:?}") };
-        assert!(!content.edit_text().as_str().contains("\n\n"), "{content:?}");
+        let ContentElement::Paragraph { content, .. } = &p else {
+            panic!("{p:?}")
+        };
+        assert!(
+            !content.edit_text().as_str().contains("\n\n"),
+            "{content:?}"
+        );
     }
 
     /// Heading and list syntax in a paragraph's source is literal text: it is
@@ -558,8 +588,13 @@ mod tests {
         for (source, text) in [("# x", "# x"), ("- x", "- x")] {
             let p = paragraph(source);
             assert_eq!(check_block_round_trip(&p), Ok(()), "{source:?}");
-            let ContentElement::Paragraph { content, .. } = &p else { panic!("{p:?}") };
-            assert_eq!(content.as_slice(), &[crate::inline::Inline::Text(text.to_string())]);
+            let ContentElement::Paragraph { content, .. } = &p else {
+                panic!("{p:?}")
+            };
+            assert_eq!(
+                content.as_slice(),
+                &[crate::inline::Inline::Text(text.to_string())]
+            );
         }
     }
 

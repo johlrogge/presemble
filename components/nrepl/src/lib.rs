@@ -58,7 +58,9 @@ impl SessionStore {
     }
 
     fn create(&self) -> String {
-        let id = self.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_id = format!("presemble-{id}");
         self.sessions.lock().unwrap().insert(session_id.clone(), ());
         session_id
@@ -241,21 +243,24 @@ impl NreplServer {
                 let prefix = msg.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
                 let entries = self.handler.completions(session, prefix);
 
-                let completions_list: Vec<bencode::Value> = entries.iter().map(|e| {
-                    let mut pairs = vec![
-                        ("candidate", bencode::Value::string(&e.candidate)),
-                    ];
-                    if let Some(doc) = &e.doc {
-                        pairs.push(("doc", bencode::Value::string(doc)));
-                    }
-                    if !e.arglists.is_empty() {
-                        let arglists: Vec<bencode::Value> = e.arglists.iter()
-                            .map(|a| bencode::Value::string(a))
-                            .collect();
-                        pairs.push(("arglists", bencode::Value::List(arglists)));
-                    }
-                    bencode::Value::dict(pairs)
-                }).collect();
+                let completions_list: Vec<bencode::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        let mut pairs = vec![("candidate", bencode::Value::string(&e.candidate))];
+                        if let Some(doc) = &e.doc {
+                            pairs.push(("doc", bencode::Value::string(doc)));
+                        }
+                        if !e.arglists.is_empty() {
+                            let arglists: Vec<bencode::Value> = e
+                                .arglists
+                                .iter()
+                                .map(|a| bencode::Value::string(a))
+                                .collect();
+                            pairs.push(("arglists", bencode::Value::List(arglists)));
+                        }
+                        bencode::Value::dict(pairs)
+                    })
+                    .collect();
 
                 vec![bencode::Value::dict(vec![
                     ("id", bencode::Value::string(id)),
@@ -271,7 +276,9 @@ impl NreplServer {
                 let symbol = msg.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
                 match self.handler.doc_lookup(session, symbol) {
                     Some(info) => {
-                        let arglists: Vec<bencode::Value> = info.arglists.iter()
+                        let arglists: Vec<bencode::Value> = info
+                            .arglists
+                            .iter()
                             .map(|a| bencode::Value::string(a))
                             .collect();
                         vec![bencode::Value::dict(vec![
@@ -333,7 +340,10 @@ mod tests {
             if code == "err" {
                 Err("boom".to_string())
             } else {
-                Ok(EvalResult { value: format!("echo:{code}"), out: None })
+                Ok(EvalResult {
+                    value: format!("echo:{code}"),
+                    out: None,
+                })
             }
         }
     }
@@ -476,7 +486,10 @@ mod tests {
         let msgs = server.handle_message(&msg);
         let resp = &msgs[0];
         let completions = resp.get("completions").and_then(|v| v.as_list());
-        assert!(completions.is_some(), "completions key should be present even without prefix");
+        assert!(
+            completions.is_some(),
+            "completions key should be present even without prefix"
+        );
         let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
         assert_eq!(status, &[bencode::Value::string("done")]);
     }
@@ -505,12 +518,16 @@ mod tests {
 
     impl NreplHandler for DocAwareHandler {
         fn eval(&self, _session: &str, code: &str) -> Result<EvalResult, String> {
-            Ok(EvalResult { value: code.to_string(), out: None })
+            Ok(EvalResult {
+                value: code.to_string(),
+                out: None,
+            })
         }
 
         fn completions(&self, _session: &str, prefix: &str) -> Vec<CompletionEntry> {
             let names = ["map", "mapcat", "max", "min", "merge"];
-            names.iter()
+            names
+                .iter()
                 .filter(|n| n.starts_with(prefix))
                 .map(|n| CompletionEntry {
                     candidate: n.to_string(),
@@ -551,7 +568,11 @@ mod tests {
         let resp = &msgs[0];
         let completions = resp.get("completions").and_then(|v| v.as_list()).unwrap();
         // "ma" matches "map", "mapcat", "max" (3 entries)
-        assert_eq!(completions.len(), 3, "should match 'map', 'mapcat', and 'max'");
+        assert_eq!(
+            completions.len(),
+            3,
+            "should match 'map', 'mapcat', and 'max'"
+        );
         // First entry should have candidate key
         let first = &completions[0];
         let candidate = first.get("candidate").and_then(|v| v.as_str());
@@ -599,7 +620,10 @@ mod tests {
         let msgs = server.handle_message(&msg);
         let resp = &msgs[0];
         let ops = resp.get("ops").unwrap();
-        assert!(ops.get("completions").is_some(), "completions op should be advertised");
+        assert!(
+            ops.get("completions").is_some(),
+            "completions op should be advertised"
+        );
         assert!(ops.get("info").is_some(), "info op should be advertised");
     }
 }

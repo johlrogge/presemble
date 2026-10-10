@@ -1,19 +1,27 @@
 /// Injected CSS for the presemble browser UI.
-pub static INJECT_CSS: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/serve/inject.css"));
+pub static INJECT_CSS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../resources/serve/inject.css"
+));
 
 /// Injected JavaScript for the presemble browser UI.
-pub static INJECT_JS: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/serve/inject.js"));
+pub static INJECT_JS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../resources/serve/inject.js"
+));
 
 /// Welcome page shown when the site directory has no built output.
-pub static WELCOME_HTML: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/serve/welcome.html"));
+pub static WELCOME_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../resources/serve/welcome.html"
+));
 
 /// Reader-only live-reload script: connects to the public `/_presemble/ws`
 /// socket and reloads the current page. Contains no editor code.
-pub static RELOAD_JS: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/serve/reload.js"));
+pub static RELOAD_JS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../resources/serve/reload.js"
+));
 
 /// Who a served page is for, which decides what gets injected into it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

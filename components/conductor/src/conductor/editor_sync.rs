@@ -51,7 +51,12 @@ pub(super) struct EditorState {
 
 impl EditorState {
     fn opened(text: String) -> EditorState {
-        EditorState { base: text.clone(), last: text, drifts: Vec::new(), held: Vec::new() }
+        EditorState {
+            base: text.clone(),
+            last: text,
+            drifts: Vec::new(),
+            held: Vec::new(),
+        }
     }
 
     /// The editor and N agree: what the editor has now is the base.
@@ -76,7 +81,10 @@ struct DriftRecord {
 #[derive(Debug, Clone)]
 enum KeepAction {
     /// Replace these blocks of N with these.
-    Replace { nodes: Vec<NodeId>, trees: Vec<ned::NodeTree> },
+    Replace {
+        nodes: Vec<NodeId>,
+        trees: Vec<ned::NodeTree>,
+    },
     /// Read the document again from this text.
     Reread { text: String },
 }
@@ -165,22 +173,34 @@ fn region_edit(
         return BufferEdit { range, text };
     }
     if source_range.is_empty() {
-        return BufferEdit { range: 0..0, text: String::new() };
+        return BufferEdit {
+            range: 0..0,
+            text: String::new(),
+        };
     }
     // Inserted: what a line of the container starts with comes after each line
     // break that is added, so that the text stays in the container it is in.
     if target_range.start < target_parts.len() {
         let at = trimmed(target, target_parts, target_range.start).start;
         let prefix = line_prefix(target, at);
-        return BufferEdit { range: at..at, text: format!("{text}\n{}\n{prefix}", prefix.trim_end()) };
+        return BufferEdit {
+            range: at..at,
+            text: format!("{text}\n{}\n{prefix}", prefix.trim_end()),
+        };
     }
     match target_parts.len().checked_sub(1) {
         Some(last) => {
             let at = trimmed(target, target_parts, last).end;
             let prefix = line_prefix(target, trimmed(target, target_parts, last).start);
-            BufferEdit { range: at..at, text: format!("\n{}\n{prefix}{text}", prefix.trim_end()) }
+            BufferEdit {
+                range: at..at,
+                text: format!("\n{}\n{prefix}{text}", prefix.trim_end()),
+            }
         }
-        None => BufferEdit { range: target.len()..target.len(), text: format!("{text}\n") },
+        None => BufferEdit {
+            range: target.len()..target.len(),
+            text: format!("{text}\n"),
+        },
     }
 }
 
@@ -189,12 +209,18 @@ fn region_edit(
 /// of the lines under it.
 fn line_prefix(text: &str, at: usize) -> String {
     let line_start = text[..at].rfind('\n').map_or(0, |p| p + 1);
-    text[line_start..at].chars().map(|c| if c == '>' || c == '\t' { c } else { ' ' }).collect()
+    text[line_start..at]
+        .chars()
+        .map(|c| if c == '>' || c == '\t' { c } else { ' ' })
+        .collect()
 }
 
 /// The block parts of `parts` that are before part `index`.
 fn blocks_before(parts: &[Spanned<Part>], index: usize) -> usize {
-    parts[..index].iter().filter(|p| matches!(p.node, Part::Block(_))).count()
+    parts[..index]
+        .iter()
+        .filter(|p| matches!(p.node, Part::Block(_)))
+        .count()
 }
 
 fn blocks_in(parts: &[Spanned<Part>]) -> Vec<&ContentElement> {
@@ -280,7 +306,11 @@ fn comments_at(store: &NodeStore, host: NodeId, attr: &str) -> Vec<String> {
 }
 
 fn step(target: NodeId, mutation: editorial_types::NedMutation) -> edit::PlannedMutation {
-    edit::PlannedMutation { targets: ned::Selection::single(target), mutation, origin: "editor-sync" }
+    edit::PlannedMutation {
+        targets: ned::Selection::single(target),
+        mutation,
+        origin: "editor-sync",
+    }
 }
 
 /// The N node that reads as a block of `base`, found without decoding all of
@@ -297,7 +327,13 @@ struct Aligner<'a> {
 
 impl<'a> Aligner<'a> {
     fn new(store: &'a NodeStore, container: NodeId, base: &'a Blocks) -> Aligner<'a> {
-        Aligner { store, container, base, children: store.children(container), full: Default::default() }
+        Aligner {
+            store,
+            container,
+            base,
+            children: store.children(container),
+            full: Default::default(),
+        }
     }
 
     /// N's node for block `i` of the base.
@@ -309,7 +345,11 @@ impl<'a> Aligner<'a> {
         {
             return Some(*child);
         }
-        self.full.get_or_init(|| aligned_children(self.store, self.container, self.base)).get(i).copied().flatten()
+        self.full
+            .get_or_init(|| aligned_children(self.store, self.container, self.base))
+            .get(i)
+            .copied()
+            .flatten()
     }
 }
 
@@ -346,7 +386,11 @@ fn n_blocks_of(
     let aligner = Aligner::new(store, container, base);
     let kids = &aligner.children;
     let position = |node: Option<NodeId>| node.and_then(|n| kids.iter().position(|k| *k == n));
-    let low = if first > 0 { position(aligner.get(first - 1)).map(|i| i + 1) } else { Some(0) };
+    let low = if first > 0 {
+        position(aligner.get(first - 1)).map(|i| i + 1)
+    } else {
+        Some(0)
+    };
     let high = if first + count < base.elements.len() {
         position(aligner.get(first + count))
     } else {
@@ -354,14 +398,19 @@ fn n_blocks_of(
     };
     match (low, high) {
         (Some(low), Some(high)) if low <= high => kids[low..high].to_vec(),
-        _ => (first..first + count).filter_map(|i| aligner.get(i)).collect(),
+        _ => (first..first + count)
+            .filter_map(|i| aligner.get(i))
+            .collect(),
     }
 }
 
 /// The payload of the blocks `elements`, or `None` when one of them is a kind
 /// no payload may carry (a thematic break, an HTML block, a link expression).
 fn payload(elements: &[&ContentElement]) -> Option<Vec<ned::NodeTree>> {
-    elements.iter().map(|el| node_store_bridge::content_bridge::block_to_tree(el).ok()).collect()
+    elements
+        .iter()
+        .map(|el| node_store_bridge::content_bridge::block_to_tree(el).ok())
+        .collect()
 }
 
 /// The container node of N for `container` of the document `root`.
@@ -394,7 +443,10 @@ impl Leaf<'_> {
     /// `base` and are `new`).
     fn lower(&self, cn: NodeId, base: &Blocks, new: &Blocks, region: &sync::Region) -> Outcome {
         let (base_parts, new_parts) = (sync::container_parts(base), sync::container_parts(new));
-        let (b_slice, n_slice) = (&base_parts[region.base.clone()], &new_parts[region.new.clone()]);
+        let (b_slice, n_slice) = (
+            &base_parts[region.base.clone()],
+            &new_parts[region.new.clone()],
+        );
         let (base_blocks, new_blocks) = (blocks_in(b_slice), blocks_in(n_slice));
         let (base_comments, new_comments) = (comments_in(b_slice), comments_in(n_slice));
 
@@ -417,7 +469,9 @@ impl Leaf<'_> {
         }
 
         let aligned = Aligner::new(self.store, cn, base);
-        let nodes_of = |range: Range<usize>| -> Option<Vec<NodeId>> { range.map(|i| aligned.get(i)).collect() };
+        let nodes_of = |range: Range<usize>| -> Option<Vec<NodeId>> {
+            range.map(|i| aligned.get(i)).collect()
+        };
         let first = blocks_before(&base_parts, region.base.start);
         let past = first + base_blocks.len();
 
@@ -441,7 +495,10 @@ impl Leaf<'_> {
             }
             return Outcome::Steps(vec![step(
                 host,
-                editorial_types::NedMutation::SetComments { place, comments: new_comments },
+                editorial_types::NedMutation::SetComments {
+                    place,
+                    comments: new_comments,
+                },
             )]);
         }
 
@@ -457,7 +514,9 @@ impl Leaf<'_> {
             (0, 0) => Outcome::Done,
             // Added.
             (0, _) => {
-                let Some(trees) = payload(&new_blocks) else { return Outcome::Reread };
+                let Some(trees) = payload(&new_blocks) else {
+                    return Outcome::Reread;
+                };
                 let mutation = if first > 0 {
                     match aligned.get(first - 1) {
                         Some(prev) => (prev, editorial_types::NedMutation::InsertAfter(trees)),
@@ -474,17 +533,20 @@ impl Leaf<'_> {
                 Outcome::Steps(vec![step(mutation.0, mutation.1)])
             }
             // Removed.
-            (k, 0) => {
-                match nodes_of(first..first + k) {
-                    Some(nodes) => Outcome::Steps(
-                        nodes.into_iter().map(|n| step(n, editorial_types::NedMutation::Delete)).collect(),
-                    ),
-                    None => Outcome::Drift,
-                }
-            }
+            (k, 0) => match nodes_of(first..first + k) {
+                Some(nodes) => Outcome::Steps(
+                    nodes
+                        .into_iter()
+                        .map(|n| step(n, editorial_types::NedMutation::Delete))
+                        .collect(),
+                ),
+                None => Outcome::Drift,
+            },
             // One block for one: the smallest edit, with the base check.
             (1, 1) => {
-                let Some(node) = aligned.get(first) else { return Outcome::Drift };
+                let Some(node) = aligned.get(first) else {
+                    return Outcome::Drift;
+                };
                 let (Some(base_md), Some(new_md)) = (
                     content::project_markdown(base_blocks[0], self.projection),
                     content::project_markdown(new_blocks[0], self.projection),
@@ -517,10 +579,18 @@ impl Leaf<'_> {
             }
             // Several: replace the first aligned block, delete the rest.
             (k, _) => {
-                let Some(trees) = payload(&new_blocks) else { return Outcome::Reread };
-                let Some(nodes) = nodes_of(first..first + k) else { return Outcome::Drift };
+                let Some(trees) = payload(&new_blocks) else {
+                    return Outcome::Reread;
+                };
+                let Some(nodes) = nodes_of(first..first + k) else {
+                    return Outcome::Drift;
+                };
                 let mut steps = vec![step(nodes[0], editorial_types::NedMutation::Replace(trees))];
-                steps.extend(nodes[1..].iter().map(|n| step(*n, editorial_types::NedMutation::Delete)));
+                steps.extend(
+                    nodes[1..]
+                        .iter()
+                        .map(|n| step(*n, editorial_types::NedMutation::Delete)),
+                );
                 Outcome::Steps(steps)
             }
         }
@@ -528,7 +598,11 @@ impl Leaf<'_> {
 }
 
 impl Conductor {
-    pub(super) fn editor_opened(&self, path: editorial_types::ContentPath, text: String) -> CommandResult {
+    pub(super) fn editor_opened(
+        &self,
+        path: editorial_types::ContentPath,
+        text: String,
+    ) -> CommandResult {
         // A valid content path can still be a symlink out of the site.
         if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, path.as_site_path()) {
             return CommandResult::error(format!("{path}: {e}"));
@@ -537,25 +611,40 @@ impl Conductor {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(path, EditorState::opened(text));
-        CommandResult::with_response(Response::EditorSynced { drifts: vec![], held: vec![] })
+        CommandResult::with_response(Response::EditorSynced {
+            drifts: vec![],
+            held: vec![],
+        })
     }
 
     pub(super) fn editor_closed(&self, path: &editorial_types::ContentPath) -> CommandResult {
-        self.editors.write().unwrap_or_else(|e| e.into_inner()).remove(path);
+        self.editors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(path);
         CommandResult::ok()
     }
 
     /// What the editor of `path` has now, if one is open.
     pub(super) fn editor_text(&self, path: &editorial_types::SitePath) -> Option<String> {
         let key = editorial_types::ContentPath::parse(path.as_str()).ok()?;
-        self.editors.read().unwrap_or_else(|e| e.into_inner()).get(&key).map(|s| s.last.clone())
+        self.editors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .map(|s| s.last.clone())
     }
 
     /// The document was loaded from disk again: what an editor of it has is
     /// what N has.
     pub(super) fn editor_follows_reload(&self, path: &editorial_types::ContentPath) {
         let text = self.canonical_text(path);
-        if let Some(state) = self.editors.write().unwrap_or_else(|e| e.into_inner()).get_mut(path) {
+        if let Some(state) = self
+            .editors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(path)
+        {
             let text = text.unwrap_or_else(|| state.last.clone());
             state.agree_on(text);
         }
@@ -571,9 +660,15 @@ impl Conductor {
     /// Whether the text `text`, as the file of the document at `rel`, reads as
     /// what N holds for it.
     fn n_reads_as_text(&self, rel: &Path, abs: &Path, text: &str) -> bool {
-        let Some(root) = self.doc_root_for_path(rel) else { return false };
-        let Ok((_, _, _, grammar)) = self.document_coordinates(abs) else { return false };
-        let Ok(doc) = content::parse_and_assign(text, &grammar) else { return false };
+        let Some(root) = self.doc_root_for_path(rel) else {
+            return false;
+        };
+        let Ok((_, _, _, grammar)) = self.document_coordinates(abs) else {
+            return false;
+        };
+        let Ok(doc) = content::parse_and_assign(text, &grammar) else {
+            return false;
+        };
         self.n_reads_as(root, &doc)
     }
 
@@ -588,7 +683,12 @@ impl Conductor {
             let before = crate::dirty::DiskStamp::of(abs);
             let text = std::fs::read_to_string(abs).ok()?;
             #[cfg(test)]
-            if let Some(hook) = self.after_read_hook.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            if let Some(hook) = self
+                .after_read_hook
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
                 hook();
             }
             let after = crate::dirty::DiskStamp::of(abs);
@@ -601,7 +701,10 @@ impl Conductor {
 
     /// Remember `stamp` as the version of the file at `rel` our copy is based on.
     fn record_stamp(&self, rel: &Path, stamp: Option<crate::dirty::DiskStamp>) {
-        self.disk_stamps.write().unwrap_or_else(|e| e.into_inner()).record(rel, stamp);
+        self.disk_stamps
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(rel, stamp);
     }
 
     /// Whether the file now at `rel` reads as what N holds for the document.
@@ -609,9 +712,15 @@ impl Conductor {
     /// copy is based on (never a stamp taken after the read, which could belong
     /// to a newer file).
     pub(super) fn disk_reads_as_n(&self, rel: &Path) -> bool {
-        let Ok(site_path) = editorial_types::SitePath::parse(&rel.to_string_lossy()) else { return false };
-        let Ok(abs) = crate::site_resolve::resolve_in_site(&self.site_dir, &site_path) else { return false };
-        let Some((text, stamp)) = self.read_stable(&abs) else { return false };
+        let Ok(site_path) = editorial_types::SitePath::parse(&rel.to_string_lossy()) else {
+            return false;
+        };
+        let Ok(abs) = crate::site_resolve::resolve_in_site(&self.site_dir, &site_path) else {
+            return false;
+        };
+        let Some((text, stamp)) = self.read_stable(&abs) else {
+            return false;
+        };
         let reads = self.n_reads_as_text(rel, &abs, &text);
         if reads {
             self.record_stamp(rel, stamp);
@@ -631,10 +740,17 @@ impl Conductor {
         if let Some(events) = self.editor_wrote(rel) {
             return Some(events);
         }
-        let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(rel);
+        let dirty = self
+            .dirty_docs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(rel);
         if dirty && self.disk_reads_as_n(rel) {
             // (`disk_reads_as_n` recorded the stamp the text was read with.)
-            self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(rel);
+            self.dirty_docs
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear(rel);
             return Some(vec![saved_event([&rel.to_path_buf()])]);
         }
         None
@@ -653,7 +769,12 @@ impl Conductor {
     fn editor_wrote(&self, rel: &Path) -> Option<Vec<ConductorEvent>> {
         let key = editorial_types::ContentPath::parse(&rel.to_string_lossy()).ok()?;
         let abs = crate::site_resolve::resolve_in_site(&self.site_dir, key.as_site_path()).ok()?;
-        let mut state = self.editors.read().unwrap_or_else(|e| e.into_inner()).get(&key).cloned()?;
+        let mut state = self
+            .editors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()?;
         let (disk, stamp) = self.read_stable(&abs)?;
         if disk != state.last {
             return None;
@@ -662,29 +783,51 @@ impl Conductor {
         if state.base != state.last {
             events.extend(self.sync_editor(&key, &abs, &mut state, true).ok()?);
         }
-        let was_dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner()).contains(rel);
+        let was_dirty = self
+            .dirty_docs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(rel);
         let reads_as_n = self.n_reads_as_text(rel, &abs, &disk);
         if reads_as_n {
-            self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(rel);
+            self.dirty_docs
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear(rel);
             self.record_stamp(rel, stamp);
         } else {
             let canonical = self.canonical_text(&key)?;
             self.write_document(rel, canonical.as_bytes()).ok()?;
-            self.dirty_docs.write().unwrap_or_else(|e| e.into_inner()).clear(rel);
+            self.dirty_docs
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear(rel);
         }
         if was_dirty || !reads_as_n {
             events.push(saved_event([&rel.to_path_buf()]));
         }
-        self.editors.write().unwrap_or_else(|e| e.into_inner()).insert(key, state);
+        self.editors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, state);
         Some(events)
     }
 
-    pub(super) fn editor_changed(&self, path: editorial_types::ContentPath, text: String) -> CommandResult {
+    pub(super) fn editor_changed(
+        &self,
+        path: editorial_types::ContentPath,
+        text: String,
+    ) -> CommandResult {
         let abs = match crate::site_resolve::resolve_in_site(&self.site_dir, path.as_site_path()) {
             Ok(abs) => abs,
             Err(e) => return CommandResult::error(format!("{path}: {e}")),
         };
-        let existing = self.editors.read().unwrap_or_else(|e| e.into_inner()).get(&path).cloned();
+        let existing = self
+            .editors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&path)
+            .cloned();
         // An editor that was never opened starts from what N has.
         let mut state = existing.unwrap_or_else(|| {
             EditorState::opened(self.canonical_text(&path).unwrap_or_else(|| text.clone()))
@@ -694,7 +837,11 @@ impl Conductor {
         self.finish_sync(path, state, result)
     }
 
-    pub(super) fn keep_mine(&self, path: editorial_types::ContentPath, drift: DriftId) -> CommandResult {
+    pub(super) fn keep_mine(
+        &self,
+        path: editorial_types::ContentPath,
+        drift: DriftId,
+    ) -> CommandResult {
         let refused = || {
             CommandResult::error("the drift has changed; look at the new diagnostic".to_string())
         };
@@ -702,7 +849,12 @@ impl Conductor {
             Ok(abs) => abs,
             Err(e) => return CommandResult::error(format!("{path}: {e}")),
         };
-        let Some(mut state) = self.editors.read().unwrap_or_else(|e| e.into_inner()).get(&path).cloned()
+        let Some(mut state) = self
+            .editors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&path)
+            .cloned()
         else {
             return refused();
         };
@@ -712,13 +864,21 @@ impl Conductor {
         let mut events = Vec::new();
         match &record.action {
             KeepAction::Replace { nodes, trees } => {
-                let Some((first, rest)) = nodes.split_first() else { return refused() };
+                let Some((first, rest)) = nodes.split_first() else {
+                    return refused();
+                };
                 let mut steps = if trees.is_empty() {
                     vec![step(*first, editorial_types::NedMutation::Delete)]
                 } else {
-                    vec![step(*first, editorial_types::NedMutation::Replace(trees.clone()))]
+                    vec![step(
+                        *first,
+                        editorial_types::NedMutation::Replace(trees.clone()),
+                    )]
                 };
-                steps.extend(rest.iter().map(|n| step(*n, editorial_types::NedMutation::Delete)));
+                steps.extend(
+                    rest.iter()
+                        .map(|n| step(*n, editorial_types::NedMutation::Delete)),
+                );
                 match self.execute_plan(steps.into_iter().collect()) {
                     Ok((_, e)) => events.extend(e),
                     Err(_) => return refused(),
@@ -730,10 +890,12 @@ impl Conductor {
             },
         }
         state.base = sync::apply_edits(&state.base, std::slice::from_ref(&record.base_edit));
-        let result = self.sync_editor(&path, &abs, &mut state, false).map(|more| {
-            events.extend(more);
-            events
-        });
+        let result = self
+            .sync_editor(&path, &abs, &mut state, false)
+            .map(|more| {
+                events.extend(more);
+                events
+            });
         self.finish_sync(path, state, result)
     }
 
@@ -754,7 +916,10 @@ impl Conductor {
             },
             Err(e) => CommandResult::error(e),
         };
-        self.editors.write().unwrap_or_else(|e| e.into_inner()).insert(path, state);
+        self.editors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path, state);
         answer
     }
 
@@ -774,7 +939,10 @@ impl Conductor {
         Ok(if pages.is_empty() {
             vec![]
         } else {
-            vec![ConductorEvent::PagesRebuilt { pages, anchor: None }]
+            vec![ConductorEvent::PagesRebuilt {
+                pages,
+                anchor: None,
+            }]
         })
     }
 
@@ -837,7 +1005,8 @@ impl Conductor {
         let held_text = sync::apply_edits(&state.last, &to_base);
 
         let mut events = Vec::new();
-        let reread_needed = structure_changed || groups.iter().any(|g| matches!(g.outcome, Outcome::Reread));
+        let reread_needed =
+            structure_changed || groups.iter().any(|g| matches!(g.outcome, Outcome::Reread));
         let mut reread_done = false;
         if reread_needed {
             if self.n_reads_as(root, &base_doc) {
@@ -848,9 +1017,20 @@ impl Conductor {
                 let range = 0..state.last.len();
                 let id = drift_id(&[], &state.base, &[root]);
                 state.drifts.push(DriftRecord {
-                    drift: Drift { id, kind: DriftKind::Blocks, path: Vec::new(), range, current },
-                    action: KeepAction::Reread { text: held_text.clone() },
-                    base_edit: BufferEdit { range: 0..state.base.len(), text: state.last.clone() },
+                    drift: Drift {
+                        id,
+                        kind: DriftKind::Blocks,
+                        path: Vec::new(),
+                        range,
+                        current,
+                    },
+                    action: KeepAction::Reread {
+                        text: held_text.clone(),
+                    },
+                    base_edit: BufferEdit {
+                        range: 0..state.base.len(),
+                        text: state.last.clone(),
+                    },
                 });
             }
         }
@@ -891,21 +1071,29 @@ impl Conductor {
                     unsettled.push(group.to_base.clone());
                     let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
                     let aligned = match group.n_container {
-                        Some(cn) => n_blocks_of(&store, cn, &group.base_blocks, group.first, group.count),
+                        Some(cn) => {
+                            n_blocks_of(&store, cn, &group.base_blocks, group.first, group.count)
+                        }
                         None => Vec::new(),
                     };
                     let current = aligned
                         .iter()
                         .filter_map(|n| {
-                            let el = node_store_bridge::content_bridge::block_from_node(&store, *n).ok()?;
+                            let el = node_store_bridge::content_bridge::block_from_node(&store, *n)
+                                .ok()?;
                             content::project_markdown(&el, group.projection)
                         })
                         .collect::<Vec<_>>()
                         .join("\n\n");
                     let new_refs: Vec<&ContentElement> = group.new_elements.iter().collect();
                     let action = match (payload(&new_refs), aligned.is_empty()) {
-                        (Some(trees), false) => KeepAction::Replace { nodes: aligned.clone(), trees },
-                        _ => KeepAction::Reread { text: held_text.clone() },
+                        (Some(trees), false) => KeepAction::Replace {
+                            nodes: aligned.clone(),
+                            trees,
+                        },
+                        _ => KeepAction::Reread {
+                            text: held_text.clone(),
+                        },
                     };
                     state.drifts.push(DriftRecord {
                         drift: Drift {
@@ -950,24 +1138,34 @@ impl Conductor {
         {
             let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
             for site in sites {
-                let blocked = groups
-                    .iter()
-                    .any(|g| matches!(g.outcome, Outcome::Held(_) | Outcome::Drift) && inside(&g.path, site));
+                let blocked = groups.iter().any(|g| {
+                    matches!(g.outcome, Outcome::Held(_) | Outcome::Drift) && inside(&g.path, site)
+                });
                 let n_list = site.list.and_then(|n| {
-                    node_store_bridge::content_bridge::block_from_node(&store, n).ok().map(|el| (n, el))
+                    node_store_bridge::content_bridge::block_from_node(&store, n)
+                        .ok()
+                        .map(|el| (n, el))
                 });
                 match (blocked, n_list, &site.new_list) {
-                    (false, Some((node, ContentElement::List { list: n })), ContentElement::List { list: new }) => {
+                    (
+                        false,
+                        Some((node, ContentElement::List { list: n })),
+                        ContentElement::List { list: new },
+                    ) => {
                         if n.spacing == site.new_spacing {
                             // N follows the text: the items explained it.
                             continue;
                         }
                         let trees = payload(&[&site.new_list]);
                         // Only a list whose items are the text's is replaced.
-                        if n.kind == new.kind && n.items == new.items
+                        if n.kind == new.kind
+                            && n.items == new.items
                             && let Some(trees) = trees
                         {
-                            plans.push((step(node, editorial_types::NedMutation::Replace(trees)), site));
+                            plans.push((
+                                step(node, editorial_types::NedMutation::Replace(trees)),
+                                site,
+                            ));
                             continue;
                         }
                         // An item N changed elsewhere is not overwritten here:
@@ -975,11 +1173,14 @@ impl Conductor {
                         // ways. The base keeps the old spacing, so it is
                         // reported again until it is.
                         unsettled.extend(site.gap_edits.iter().cloned());
-                        let Some(trees) = payload(&[&site.new_list]) else { continue };
-                        let current = node_store_bridge::content_bridge::block_from_node(&store, node)
-                            .ok()
-                            .and_then(|el| content::project_markdown(&el, site.projection))
-                            .unwrap_or_default();
+                        let Some(trees) = payload(&[&site.new_list]) else {
+                            continue;
+                        };
+                        let current =
+                            node_store_bridge::content_bridge::block_from_node(&store, node)
+                                .ok()
+                                .and_then(|el| content::project_markdown(&el, site.projection))
+                                .unwrap_or_default();
                         drifts.push(DriftRecord {
                             drift: Drift {
                                 id: drift_id(&site.path, &site.base_text, &[node]),
@@ -988,10 +1189,16 @@ impl Conductor {
                                 range: site.range.clone(),
                                 current,
                             },
-                            action: KeepAction::Replace { nodes: vec![node], trees },
+                            action: KeepAction::Replace {
+                                nodes: vec![node],
+                                trees,
+                            },
                             // Nothing to put in the base: once N has the list, the
                             // next sync finds it following the text.
-                            base_edit: BufferEdit { range: 0..0, text: String::new() },
+                            base_edit: BufferEdit {
+                                range: 0..0,
+                                text: String::new(),
+                            },
                         });
                     }
                     _ => unsettled.extend(site.gap_edits.iter().cloned()),
@@ -1055,9 +1262,16 @@ impl Conductor {
             let cn = n_container(store, root, &container);
             // The lists compared item by item whose spacing the text changed.
             for site in &lists {
-                if let Some(site) =
-                    spacing_site(store, cn, base_blocks, &new_blocks, base_text, new_text, projection, site)
-                {
+                if let Some(site) = spacing_site(
+                    store,
+                    cn,
+                    base_blocks,
+                    &new_blocks,
+                    base_text,
+                    new_text,
+                    projection,
+                    site,
+                ) {
                     sites.push(site);
                 }
             }
@@ -1071,8 +1285,10 @@ impl Conductor {
                 else {
                     continue;
                 };
-                let (base_parts, new_parts) =
-                    (sync::container_parts(sub_base), sync::container_parts(sub_new));
+                let (base_parts, new_parts) = (
+                    sync::container_parts(sub_base),
+                    sync::container_parts(sub_new),
+                );
                 let region = &located.region;
                 let base_text_of = {
                     let r = parts_range(base_text, &base_parts, &region.base);
@@ -1090,8 +1306,10 @@ impl Conductor {
                 };
                 let first = blocks_before(&base_parts, region.base.start);
                 let count = blocks_in(&base_parts[region.base.clone()]).len();
-                let new_elements: Vec<ContentElement> =
-                    blocks_in(&new_parts[region.new.clone()]).into_iter().cloned().collect();
+                let new_elements: Vec<ContentElement> = blocks_in(&new_parts[region.new.clone()])
+                    .into_iter()
+                    .cloned()
+                    .collect();
 
                 // An unterminated construct is held back, as the parser sees
                 // the region: without what the containers it is in take from
@@ -1100,18 +1318,27 @@ impl Conductor {
                     None
                 } else {
                     let prefixes = sync::path_prefixes(new_text, &new_blocks, &located.path);
-                    held_reason(&sync::container_source(&new_text[new_range.clone()], &prefixes))
+                    held_reason(&sync::container_source(
+                        &new_text[new_range.clone()],
+                        &prefixes,
+                    ))
                 };
                 // N already reads as the editor's text here (the editor took
                 // N's version, or the same edit was made elsewhere): nothing to
                 // lower, and nothing to report.
                 let n_has_it = |sub: NodeId| {
-                    let only_blocks = base_parts[region.base.clone()].iter().all(|p| matches!(p.node, Part::Block(_)))
-                        && new_parts[region.new.clone()].iter().all(|p| matches!(p.node, Part::Block(_)));
+                    let only_blocks = base_parts[region.base.clone()]
+                        .iter()
+                        .all(|p| matches!(p.node, Part::Block(_)))
+                        && new_parts[region.new.clone()]
+                            .iter()
+                            .all(|p| matches!(p.node, Part::Block(_)));
                     only_blocks
                         && n_blocks_of(store, sub, sub_base, first, count)
                             .iter()
-                            .map(|n| node_store_bridge::content_bridge::block_from_node(store, *n).ok())
+                            .map(|n| {
+                                node_store_bridge::content_bridge::block_from_node(store, *n).ok()
+                            })
                             .collect::<Option<Vec<_>>>()
                             .is_some_and(|now| now == new_elements)
                 };
@@ -1204,10 +1431,12 @@ fn spacing_site(
         return None;
     }
     let at_base = blocks_before(&sync::container_parts(sub_base), site.base);
-    let list = node.and_then(|n| match n_blocks_of(store, n, sub_base, at_base, 1).as_slice() {
-        [only] => Some(*only),
-        _ => None,
-    });
+    let list = node.and_then(
+        |n| match n_blocks_of(store, n, sub_base, at_base, 1).as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        },
+    );
     Some(SpacingSite {
         path: site.path.iter().map(PathStep::from).collect(),
         base_part: site.base,
@@ -1215,9 +1444,17 @@ fn spacing_site(
         new_list: new_list.clone(),
         new_spacing: after.spacing,
         gap_edits: gap_edits(new_text, after, before.spacing),
-        range: parts_range(new_text, &sync::container_parts(sub_new), &(site.new..site.new + 1)),
-        base_text: base_text[parts_range(base_text, &sync::container_parts(sub_base), &(site.base..site.base + 1))]
-            .to_string(),
+        range: parts_range(
+            new_text,
+            &sync::container_parts(sub_new),
+            &(site.new..site.new + 1),
+        ),
+        base_text: base_text[parts_range(
+            base_text,
+            &sync::container_parts(sub_base),
+            &(site.base..site.base + 1),
+        )]
+        .to_string(),
         projection,
     })
 }
@@ -1228,7 +1465,10 @@ fn block_at_part(blocks: &Blocks, part: usize) -> Option<&ContentElement> {
     if !matches!(parts.get(part)?.node, Part::Block(_)) {
         return None;
     }
-    blocks.elements.get(blocks_before(&parts, part)).map(|e| &e.node)
+    blocks
+        .elements
+        .get(blocks_before(&parts, part))
+        .map(|e| &e.node)
 }
 
 /// The edits that give the items of `list` (in `text`) the gaps of `spacing`:
@@ -1243,26 +1483,41 @@ fn gap_edits(text: &str, list: &content::List, spacing: Spacing) -> Vec<BufferEd
     let ends: Vec<Option<(usize, usize)>> = list
         .items
         .iter()
-        .map(|item| Some((trim(item.elements.front()?.span).start, trim(item.elements.back()?.span).end)))
+        .map(|item| {
+            Some((
+                trim(item.elements.front()?.span).start,
+                trim(item.elements.back()?.span).end,
+            ))
+        })
         .collect();
     let mut edits = Vec::new();
     for pair in ends.windows(2) {
-        let (Some((_, end)), Some((start, _))) = (pair[0], pair[1]) else { continue };
+        let (Some((_, end)), Some((start, _))) = (pair[0], pair[1]) else {
+            continue;
+        };
         if end >= start {
             continue;
         }
         let gap = &text[end..start];
-        let Some(last_break) = gap.rfind('\n') else { continue };
+        let Some(last_break) = gap.rfind('\n') else {
+            continue;
+        };
         let tail = &gap[last_break + 1..];
         let wanted = match spacing {
             Spacing::Tight => format!("\n{tail}"),
             Spacing::Loose => {
-                let blank: String = tail.chars().map(|c| if c == '>' || c == '\t' { c } else { ' ' }).collect();
+                let blank: String = tail
+                    .chars()
+                    .map(|c| if c == '>' || c == '\t' { c } else { ' ' })
+                    .collect();
                 format!("\n{}\n{tail}", blank.trim_end())
             }
         };
         if wanted != gap {
-            edits.push(BufferEdit { range: end..start, text: wanted });
+            edits.push(BufferEdit {
+                range: end..start,
+                text: wanted,
+            });
         }
     }
     edits
@@ -1295,11 +1550,17 @@ fn descend<'a>(
         let at_new = blocks_before(&sync::container_parts(new), new_part);
         // N's block for it is whatever stands where it did, whether or not it
         // still reads as the base: that is for the region inside to find out.
-        let child = node.and_then(|n| match n_blocks_of(store, n, base, at_base, 1).as_slice() {
-            [only] => Some(*only),
-            _ => None,
-        });
-        match (&base.elements.get(at_base)?.node, &new.elements.get(at_new)?.node, item) {
+        let child = node.and_then(
+            |n| match n_blocks_of(store, n, base, at_base, 1).as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            },
+        );
+        match (
+            &base.elements.get(at_base)?.node,
+            &new.elements.get(at_new)?.node,
+            item,
+        ) {
             (
                 ContentElement::Blockquote { blocks: inner_base },
                 ContentElement::Blockquote { blocks: inner_new },
@@ -1309,7 +1570,11 @@ fn descend<'a>(
                 base = inner_base;
                 new = inner_new;
             }
-            (ContentElement::List { list: list_base }, ContentElement::List { list: list_new }, Some(i)) => {
+            (
+                ContentElement::List { list: list_base },
+                ContentElement::List { list: list_new },
+                Some(i),
+            ) => {
                 node = child.and_then(|c| store.children(c).get(i).copied());
                 base = list_base.items.get(i)?;
                 new = list_new.items.get(i)?;
@@ -1324,7 +1589,10 @@ fn descend<'a>(
 /// slots that one has and the other does not.
 fn structure_differs(base: &Document, new: &Document) -> bool {
     let names = |d: &Document| -> Vec<String> {
-        d.preamble.iter().map(|s| s.name.as_str().to_string()).collect()
+        d.preamble
+            .iter()
+            .map(|s| s.name.as_str().to_string())
+            .collect()
     };
     base.has_separator != new.has_separator || names(base) != names(new)
 }
@@ -1359,7 +1627,9 @@ mod tests {
         std::fs::write(root.join("schemas/post/item.md"), SCHEMA).unwrap();
         std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
         std::fs::write(root.join(FILE), content).unwrap();
-        let repo = site_repository::SiteRepository::builder().from_dir(root).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
         let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
         World { tmp, conductor }
     }
@@ -1369,12 +1639,25 @@ mod tests {
     }
 
     fn open(w: &World, text: &str) {
-        let result = w.conductor.handle_command(Command::EditorOpened { path: path(), text: text.to_string() });
-        assert!(matches!(result.response, Response::EditorSynced { .. } | Response::Ok), "{:?}", result.response);
+        let result = w.conductor.handle_command(Command::EditorOpened {
+            path: path(),
+            text: text.to_string(),
+        });
+        assert!(
+            matches!(
+                result.response,
+                Response::EditorSynced { .. } | Response::Ok
+            ),
+            "{:?}",
+            result.response
+        );
     }
 
     fn change(w: &World, text: &str) -> CommandResult {
-        w.conductor.handle_command(Command::EditorChanged { path: path(), text: text.to_string() })
+        w.conductor.handle_command(Command::EditorChanged {
+            path: path(),
+            text: text.to_string(),
+        })
     }
 
     /// The drifts and held regions an editor command answered with.
@@ -1386,13 +1669,16 @@ mod tests {
     }
 
     fn live_root(w: &World) -> NodeId {
-        w.conductor.doc_root_for_path(Path::new(FILE)).expect("live root")
+        w.conductor
+            .doc_root_for_path(Path::new(FILE))
+            .expect("live root")
     }
 
     fn body_blocks(w: &World) -> Vec<NodeId> {
         let root = live_root(w);
         let store = w.conductor.node_store.read().unwrap();
-        let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body").expect("body");
+        let body = node_store_bridge::content_bridge::find_child_by_name(&store, root, "body")
+            .expect("body");
         store.children(body)
     }
 
@@ -1413,16 +1699,25 @@ mod tests {
     fn body_markdown(w: &World) -> Vec<String> {
         body_blocks(w)
             .into_iter()
-            .map(|b| content::project_markdown(&block(w, b), content::Projection::Block).unwrap_or_default())
+            .map(|b| {
+                content::project_markdown(&block(w, b), content::Projection::Block)
+                    .unwrap_or_default()
+            })
             .collect()
     }
 
     fn element(md: &str) -> content::ContentElement {
-        content::parse_document(md).expect("parses").elements[0].node.clone()
+        content::parse_document(md).expect("parses").elements[0]
+            .node
+            .clone()
     }
 
     fn dirty(w: &World) -> bool {
-        w.conductor.dirty_docs.read().unwrap().contains(Path::new(FILE))
+        w.conductor
+            .dirty_docs
+            .read()
+            .unwrap()
+            .contains(Path::new(FILE))
     }
 
     fn on_disk(w: &World) -> String {
@@ -1430,7 +1725,9 @@ mod tests {
     }
 
     fn page(w: &World) -> String {
-        w.conductor.render_page("/post/first", &RenderMode::View).expect("rendered")
+        w.conductor
+            .render_page("/post/first", &RenderMode::View)
+            .expect("rendered")
     }
 
     fn comments_before(w: &World, id: NodeId) -> Vec<String> {
@@ -1468,13 +1765,23 @@ mod tests {
         let (drifts, held) = synced(&result);
         assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
 
-        assert_eq!(body_blocks(&w), before, "an edit in place keeps every block");
+        assert_eq!(
+            body_blocks(&w),
+            before,
+            "an edit in place keeps every block"
+        );
         assert_eq!(body_markdown(&w)[0], "Alpha changed.");
-        assert!(page(&w).contains("Alpha changed."), "the rendered editorial page shows it");
+        assert!(
+            page(&w).contains("Alpha changed."),
+            "the rendered editorial page shows it"
+        );
         assert!(dirty(&w), "the document is dirty");
         assert_eq!(on_disk(&w), CONTENT, "the file is unchanged");
         assert!(
-            result.events.iter().any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, ConductorEvent::PagesRebuilt { .. })),
             "{:?}",
             result.events
         );
@@ -1512,7 +1819,11 @@ mod tests {
         assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
 
         assert_eq!(body_blocks(&w)[3], quote, "the quote is the same node");
-        assert_eq!(item_blocks(&w, quote), inner, "its blocks are the same nodes");
+        assert_eq!(
+            item_blocks(&w, quote),
+            inner,
+            "its blocks are the same nodes"
+        );
         assert_eq!(block(&w, quote), element("> quoted a\n>\n> quoted bX\n"));
     }
 
@@ -1529,7 +1840,11 @@ mod tests {
             intent: BlockEditIntent::Apply,
             reason: None,
         }));
-        assert!(matches!(browser.response, Response::BlockEdited(_)), "{:?}", browser.response);
+        assert!(
+            matches!(browser.response, Response::BlockEdited(_)),
+            "{:?}",
+            browser.response
+        );
         assert_eq!(body_markdown(&w)[0], "Alpha browser.");
 
         // The editor, which has not seen that, types in "Beta para.".
@@ -1556,7 +1871,11 @@ mod tests {
             intent: BlockEditIntent::Apply,
             reason: None,
         }));
-        assert!(matches!(browser.response, Response::BlockEdited(_)), "{:?}", browser.response);
+        assert!(
+            matches!(browser.response, Response::BlockEdited(_)),
+            "{:?}",
+            browser.response
+        );
         let text = CONTENT.replace("Alpha para.", "Alpha mine.");
         let result = change(&w, &text);
         let (drifts, held) = synced(&result);
@@ -1568,7 +1887,11 @@ mod tests {
     fn stale_editor_edit_to_a_changed_block_is_drifted_not_applied() {
         let (w, text, drifts) = drifted_world();
         assert_eq!(drifts.len(), 1, "{drifts:?}");
-        assert_eq!(body_markdown(&w)[0], "Alpha browser.", "N keeps the browser's text");
+        assert_eq!(
+            body_markdown(&w)[0],
+            "Alpha browser.",
+            "N keeps the browser's text"
+        );
         assert_eq!(&text[drifts[0].range.clone()], "Alpha mine.");
         assert_eq!(drifts[0].current, "Alpha browser.");
 
@@ -1576,7 +1899,10 @@ mod tests {
         let again = change(&w, &format!("{text}\nMore.\n"));
         let (drifts_again, _) = synced(&again);
         assert_eq!(drifts_again.len(), 1, "{drifts_again:?}");
-        assert_eq!(drifts_again[0].id, drifts[0].id, "the id is the same across keystrokes elsewhere");
+        assert_eq!(
+            drifts_again[0].id, drifts[0].id,
+            "the id is the same across keystrokes elsewhere"
+        );
     }
 
     /// "Take the current version": the editor's text now holds, for the region,
@@ -1590,7 +1916,10 @@ mod tests {
         assert_eq!(taken, CONTENT.replace("Alpha para.", "Alpha browser."));
 
         let (remaining, held) = synced(&change(&w, &taken));
-        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        assert!(
+            remaining.is_empty() && held.is_empty(),
+            "{remaining:?} {held:?}"
+        );
         assert_eq!(body_markdown(&w)[0], "Alpha browser.", "N is as it was");
         assert_eq!(base_of(&w), taken, "the base has advanced to the text");
         // And it stays ended on the next change elsewhere.
@@ -1601,9 +1930,15 @@ mod tests {
     #[test]
     fn keep_mine_applies_a_current_drift() {
         let (w, _text, drifts) = drifted_world();
-        let result = w.conductor.handle_command(Command::KeepMine { path: path(), drift_id: drifts[0].id });
+        let result = w.conductor.handle_command(Command::KeepMine {
+            path: path(),
+            drift_id: drifts[0].id,
+        });
         let (remaining, held) = synced(&result);
-        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        assert!(
+            remaining.is_empty() && held.is_empty(),
+            "{remaining:?} {held:?}"
+        );
         assert_eq!(body_markdown(&w)[0], "Alpha mine.");
     }
 
@@ -1611,12 +1946,21 @@ mod tests {
     fn keep_mine_with_an_old_drift_id_is_refused() {
         let (w, _text, drifts) = drifted_world();
         let old = DriftId(drifts[0].id.0 ^ 1);
-        let result = w.conductor.handle_command(Command::KeepMine { path: path(), drift_id: old });
+        let result = w.conductor.handle_command(Command::KeepMine {
+            path: path(),
+            drift_id: old,
+        });
         match &result.response {
-            Response::Error(message) => assert!(message.contains("the drift has changed"), "{message}"),
+            Response::Error(message) => {
+                assert!(message.contains("the drift has changed"), "{message}")
+            }
             other => panic!("expected an error, got {other:?}"),
         }
-        assert_eq!(body_markdown(&w)[0], "Alpha browser.", "nothing was applied");
+        assert_eq!(
+            body_markdown(&w)[0],
+            "Alpha browser.",
+            "nothing was applied"
+        );
     }
 
     // ── drift, held and keep-mine at depth ──────────────────────────────────
@@ -1626,7 +1970,11 @@ mod tests {
         let el = element(markdown);
         let trees = payload(&[&el]).expect("a payload");
         w.conductor
-            .execute_plan(vec![step(node, editorial_types::NedMutation::Replace(trees))].into_iter().collect())
+            .execute_plan(
+                vec![step(node, editorial_types::NedMutation::Replace(trees))]
+                    .into_iter()
+                    .collect(),
+            )
             .expect("the plan runs");
     }
 
@@ -1637,7 +1985,8 @@ mod tests {
             .into_iter()
             .map(|item| {
                 let first = item_blocks(w, item)[0];
-                content::project_markdown(&block(w, first), content::Projection::Block).unwrap_or_default()
+                content::project_markdown(&block(w, first), content::Projection::Block)
+                    .unwrap_or_default()
             })
             .collect()
     }
@@ -1668,9 +2017,15 @@ mod tests {
         assert_eq!(&text[drifts[0].range.clone()], "three mine");
         assert_eq!(drifts[0].current, "three browser");
 
-        let result = w.conductor.handle_command(Command::KeepMine { path: path(), drift_id: drifts[0].id });
+        let result = w.conductor.handle_command(Command::KeepMine {
+            path: path(),
+            drift_id: drifts[0].id,
+        });
         let (remaining, held) = synced(&result);
-        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        assert!(
+            remaining.is_empty() && held.is_empty(),
+            "{remaining:?} {held:?}"
+        );
         assert_eq!(
             item_texts(&w),
             ["one browser", "two", "three mine"],
@@ -1685,12 +2040,18 @@ mod tests {
         let (_, items) = list_and_items(&w);
         other_channel_sets(&w, item_blocks(&w, items[2])[0], "three browser");
 
-        let text = CONTENT.replace("- one", "- one mine").replace("- three", "- three mine");
+        let text = CONTENT
+            .replace("- one", "- one mine")
+            .replace("- three", "- three mine");
         let (drifts, held) = synced(&change(&w, &text));
         assert!(held.is_empty(), "{held:?}");
         assert_eq!(drifts.len(), 1, "only item 3 drifts: {drifts:?}");
         assert_eq!(the_item(&drifts[0].path[0]), 2);
-        assert_eq!(item_texts(&w), ["one mine", "two", "three browser"], "item 1 was lowered");
+        assert_eq!(
+            item_texts(&w),
+            ["one mine", "two", "three browser"],
+            "item 1 was lowered"
+        );
     }
 
     #[test]
@@ -1710,13 +2071,26 @@ mod tests {
         assert!(held[0].reason.contains("fence"), "{}", held[0].reason);
         assert_eq!(held[0].path.len(), 1, "{:?}", held[0].path);
         assert_eq!(the_item(&held[0].path[0]), 0);
-        assert!(text[held[0].range.clone()].starts_with("```rust"), "{:?}", &text[held[0].range.clone()]);
-        assert_eq!(item_texts(&w), ["one", "two typed", "three"], "the other items were lowered");
+        assert!(
+            text[held[0].range.clone()].starts_with("```rust"),
+            "{:?}",
+            &text[held[0].range.clone()]
+        );
+        assert_eq!(
+            item_texts(&w),
+            ["one", "two typed", "three"],
+            "the other items were lowered"
+        );
         let (_, items) = list_and_items(&w);
-        assert_eq!(item_blocks(&w, items[0]).len(), 1, "item 1 got no code block");
+        assert_eq!(
+            item_blocks(&w, items[0]).len(),
+            1,
+            "item 1 got no code block"
+        );
     }
 
-    const NESTED: &str = "# First Post\n\n----\n\nAlpha para.\n\n- one\n  > quoted\n- two\n\nGamma para.\n";
+    const NESTED: &str =
+        "# First Post\n\n----\n\nAlpha para.\n\n- one\n  > quoted\n- two\n\nGamma para.\n";
 
     /// The quote inside the first item of the list of `NESTED`.
     fn nested_quote_blocks(w: &World) -> Vec<NodeId> {
@@ -1738,8 +2112,16 @@ mod tests {
         assert_eq!(held.len(), 1, "{held:?}");
         assert_eq!(held[0].path.len(), 2, "{:?}", held[0].path);
         assert_eq!(the_item(&held[0].path[0]), 0);
-        assert!(matches!(held[0].path[1], PathStep::Quote { .. }), "{:?}", held[0].path);
-        assert!(text[held[0].range.clone()].starts_with("```"), "{:?}", &text[held[0].range.clone()]);
+        assert!(
+            matches!(held[0].path[1], PathStep::Quote { .. }),
+            "{:?}",
+            held[0].path
+        );
+        assert!(
+            text[held[0].range.clone()].starts_with("```"),
+            "{:?}",
+            &text[held[0].range.clone()]
+        );
         assert_eq!(nested_quote_blocks(&w).len(), 1, "N is unchanged");
     }
 
@@ -1757,7 +2139,14 @@ mod tests {
 
     /// What an editor's base text is now.
     fn base_of(w: &World) -> String {
-        w.conductor.editors.read().unwrap().get(&path()).expect("an open editor").base.clone()
+        w.conductor
+            .editors
+            .read()
+            .unwrap()
+            .get(&path())
+            .expect("an open editor")
+            .base
+            .clone()
     }
 
     /// The base text is what the editor and N last agreed on, region by region:
@@ -1770,7 +2159,11 @@ mod tests {
         let loose = CONTENT.replace("- one\n- two\n- three", "- one\n\n- two\n\n- three");
         let fence = "```rust\nlet x = 1;\n";
         let cases = [
-            ("the top level", CONTENT.to_string(), format!("{CONTENT}\n{fence}")),
+            (
+                "the top level",
+                CONTENT.to_string(),
+                format!("{CONTENT}\n{fence}"),
+            ),
             (
                 "a quote",
                 CONTENT.to_string(),
@@ -1788,7 +2181,11 @@ mod tests {
             let (drifts, held) = synced(&change(&w, &typed));
             assert!(drifts.is_empty(), "{name}: {drifts:?}");
             assert_eq!(held.len(), 1, "{name}: {held:?}");
-            assert_eq!(base_of(&w), start, "{name}: the base is the text the editor started from");
+            assert_eq!(
+                base_of(&w),
+                start,
+                "{name}: the base is the text the editor started from"
+            );
         }
     }
 
@@ -1810,16 +2207,35 @@ mod tests {
         let (list, items) = list_and_items(&w);
         // A fence is open in item 2 (which makes the list loose in the text)
         // while item 3 is being edited.
-        let text = CONTENT.replace(TIGHT, "- one\n- two\n  ```rust\n  let x = 1;\n- three typed");
+        let text = CONTENT.replace(
+            TIGHT,
+            "- one\n- two\n  ```rust\n  let x = 1;\n- three typed",
+        );
         let (drifts, held) = synced(&change(&w, &text));
         assert!(drifts.is_empty(), "{drifts:?}");
         assert_eq!(held.len(), 1, "only item 2 is held: {held:?}");
         assert_eq!(held[0].path.len(), 1, "{:?}", held[0].path);
         assert_eq!(the_item(&held[0].path[0]), 1, "the path points at item 2");
-        assert!(text[held[0].range.clone()].starts_with("```rust"), "{:?}", &text[held[0].range.clone()]);
-        assert_eq!(item_texts(&w), ["one", "two", "three typed"], "item 3 reached N");
-        assert_eq!(item_blocks(&w, items[1]).len(), 1, "item 2 got no code block");
-        assert_eq!(list_and_items(&w), (list, items), "the list and its items are the same nodes");
+        assert!(
+            text[held[0].range.clone()].starts_with("```rust"),
+            "{:?}",
+            &text[held[0].range.clone()]
+        );
+        assert_eq!(
+            item_texts(&w),
+            ["one", "two", "three typed"],
+            "item 3 reached N"
+        );
+        assert_eq!(
+            item_blocks(&w, items[1]).len(),
+            1,
+            "item 2 got no code block"
+        );
+        assert_eq!(
+            list_and_items(&w),
+            (list, items),
+            "the list and its items are the same nodes"
+        );
     }
 
     #[test]
@@ -1827,14 +2243,24 @@ mod tests {
         let w = world();
         open(&w, CONTENT);
         let (list, items) = list_and_items(&w);
-        let open_fence = CONTENT.replace(TIGHT, "- one\n- two\n  ```rust\n  let x = 1;\n- three typed");
+        let open_fence = CONTENT.replace(
+            TIGHT,
+            "- one\n- two\n  ```rust\n  let x = 1;\n- three typed",
+        );
         change(&w, &open_fence);
-        let closed = CONTENT.replace(TIGHT, "- one\n- two\n  ```rust\n  let x = 1;\n  ```\n- three typed");
+        let closed = CONTENT.replace(
+            TIGHT,
+            "- one\n- two\n  ```rust\n  let x = 1;\n  ```\n- three typed",
+        );
         let (drifts, held) = synced(&change(&w, &closed));
         assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
 
         // The list is loose in N through the normaliser, with nothing replaced.
-        assert_eq!(list_and_items(&w), (list, items.clone()), "the list and every item keep their ids");
+        assert_eq!(
+            list_and_items(&w),
+            (list, items.clone()),
+            "the list and every item keep their ids"
+        );
         assert_eq!(list_spacing(&w, list), content::Spacing::Loose);
         assert_eq!(item_texts(&w), ["one", "two", "three typed"]);
         let two = item_blocks(&w, items[1]);
@@ -1877,11 +2303,18 @@ mod tests {
         let w = world();
         open(&w, CONTENT);
         // Loose by hand, with a fence open in item 2.
-        let held_text = CONTENT.replace(TIGHT, "- one\n\n- two\n\n  ```rust\n  let x = 1;\n\n- three");
+        let held_text = CONTENT.replace(
+            TIGHT,
+            "- one\n\n- two\n\n  ```rust\n  let x = 1;\n\n- three",
+        );
         let (drifts, held) = synced(&change(&w, &held_text));
         assert!(drifts.is_empty() && held.len() == 1, "{drifts:?} {held:?}");
         let (list, _) = list_and_items(&w);
-        assert_eq!(list_spacing(&w, list), content::Spacing::Tight, "waits: the list does not agree yet");
+        assert_eq!(
+            list_spacing(&w, list),
+            content::Spacing::Tight,
+            "waits: the list does not agree yet"
+        );
 
         // The fence goes; the blank lines stay. Nothing is held, so the spacing is applied.
         let released = CONTENT.replace(TIGHT, "- one\n\n- two\n\n- three");
@@ -1906,14 +2339,28 @@ mod tests {
         assert_eq!(drifts.len(), 1, "{drifts:?}");
         assert_eq!(the_item(&drifts[0].path[0]), 1);
         let (list, _) = list_and_items(&w);
-        assert_eq!(list_spacing(&w, list), content::Spacing::Tight, "waits while item 2 drifts");
+        assert_eq!(
+            list_spacing(&w, list),
+            content::Spacing::Tight,
+            "waits while item 2 drifts"
+        );
         assert_eq!(item_texts(&w), ["one", "two browser", "three"]);
 
-        let result = w.conductor.handle_command(Command::KeepMine { path: path(), drift_id: drifts[0].id });
+        let result = w.conductor.handle_command(Command::KeepMine {
+            path: path(),
+            drift_id: drifts[0].id,
+        });
         let (remaining, held) = synced(&result);
-        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        assert!(
+            remaining.is_empty() && held.is_empty(),
+            "{remaining:?} {held:?}"
+        );
         let (list, _) = list_and_items(&w);
-        assert_eq!(list_spacing(&w, list), content::Spacing::Loose, "applied once the drift is resolved");
+        assert_eq!(
+            list_spacing(&w, list),
+            content::Spacing::Loose,
+            "applied once the drift is resolved"
+        );
         assert_eq!(item_texts(&w), ["one", "two mine", "three"]);
     }
 
@@ -1934,9 +2381,21 @@ mod tests {
     fn a_spacing_change_over_an_item_changed_elsewhere_drifts() {
         let (w, text, drifts) = spacing_over_an_item_changed_elsewhere();
         assert_eq!(drifts.len(), 1, "the editor must be told: {drifts:?}");
-        assert!(drifts[0].path.is_empty(), "the path is the list's (in the body): {:?}", drifts[0].path);
-        assert_eq!(&text[drifts[0].range.clone()], "- one\n\n- two\n\n- three", "the list's span in the text");
-        assert!(drifts[0].current.contains("two browser"), "N's list: {:?}", drifts[0].current);
+        assert!(
+            drifts[0].path.is_empty(),
+            "the path is the list's (in the body): {:?}",
+            drifts[0].path
+        );
+        assert_eq!(
+            &text[drifts[0].range.clone()],
+            "- one\n\n- two\n\n- three",
+            "the list's span in the text"
+        );
+        assert!(
+            drifts[0].current.contains("two browser"),
+            "N's list: {:?}",
+            drifts[0].current
+        );
         // Nothing was applied: N keeps its list as it is.
         let (list, _) = list_and_items(&w);
         assert_eq!(list_spacing(&w, list), content::Spacing::Tight);
@@ -1952,12 +2411,22 @@ mod tests {
     fn keep_mine_on_a_spacing_drift_replaces_the_list() {
         let (w, _text, drifts) = spacing_over_an_item_changed_elsewhere();
         assert_eq!(drifts.len(), 1, "{drifts:?}");
-        let result = w.conductor.handle_command(Command::KeepMine { path: path(), drift_id: drifts[0].id });
+        let result = w.conductor.handle_command(Command::KeepMine {
+            path: path(),
+            drift_id: drifts[0].id,
+        });
         let (remaining, held) = synced(&result);
-        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        assert!(
+            remaining.is_empty() && held.is_empty(),
+            "{remaining:?} {held:?}"
+        );
         let (list, _) = list_and_items(&w);
         assert_eq!(list_spacing(&w, list), content::Spacing::Loose);
-        assert_eq!(item_texts(&w), ["one", "two", "three"], "the editor's list; the other edit is overwritten");
+        assert_eq!(
+            item_texts(&w),
+            ["one", "two", "three"],
+            "the editor's list; the other edit is overwritten"
+        );
     }
 
     /// GUARD: the buffer takes N's list (what "Take the current version" does);
@@ -1969,7 +2438,10 @@ mod tests {
         let mut taken = text.clone();
         taken.replace_range(drifts[0].range.clone(), &drifts[0].current);
         let (remaining, held) = synced(&change(&w, taken.trim_end_matches('\n')));
-        assert!(remaining.is_empty() && held.is_empty(), "{remaining:?} {held:?}");
+        assert!(
+            remaining.is_empty() && held.is_empty(),
+            "{remaining:?} {held:?}"
+        );
         let (list, _) = list_and_items(&w);
         assert_eq!(list_spacing(&w, list), content::Spacing::Tight);
         assert_eq!(item_texts(&w), ["one", "two browser", "three"]);
@@ -2000,8 +2472,15 @@ mod tests {
         for typed in ["Alpha **bold", "Alpha [x](", "Alpha `code", "Alpha *"] {
             let result = change(&w, &CONTENT.replace("Alpha para.", typed));
             let (drifts, held) = synced(&result);
-            assert!(drifts.is_empty() && held.is_empty(), "{typed:?}: {drifts:?} {held:?}");
-            assert_eq!(block(&w, body_blocks(&w)[0]), element(typed), "{typed:?} reads as it reads");
+            assert!(
+                drifts.is_empty() && held.is_empty(),
+                "{typed:?}: {drifts:?} {held:?}"
+            );
+            assert_eq!(
+                block(&w, body_blocks(&w)[0]),
+                element(typed),
+                "{typed:?} reads as it reads"
+            );
         }
     }
 
@@ -2030,8 +2509,15 @@ mod tests {
         let text = CONTENT.replace("Beta para.", "Beta para.\n\n----");
         let (drifts, held) = synced(&change(&w, &text));
         assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
-        let names: Vec<String> = body_blocks(&w).into_iter().map(|b| element_name(&w, b)).collect();
-        assert_eq!(names[..3], ["paragraph", "paragraph", "separator"], "{names:?}");
+        let names: Vec<String> = body_blocks(&w)
+            .into_iter()
+            .map(|b| element_name(&w, b))
+            .collect();
+        assert_eq!(
+            names[..3],
+            ["paragraph", "paragraph", "separator"],
+            "{names:?}"
+        );
         assert!(dirty(&w));
         assert_eq!(on_disk(&w), CONTENT);
     }
@@ -2049,9 +2535,15 @@ mod tests {
         {
             let store = w.conductor.node_store.read().unwrap();
             let preamble =
-                node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble").unwrap();
+                node_store_bridge::content_bridge::find_child_by_name(&store, root, "preamble")
+                    .unwrap();
             assert!(
-                node_store_bridge::content_bridge::find_child_by_name(&store, preamble, "unassigned").is_some(),
+                node_store_bridge::content_bridge::find_child_by_name(
+                    &store,
+                    preamble,
+                    "unassigned"
+                )
+                .is_some(),
                 "the stray paragraph is unassigned now"
             );
         }
@@ -2071,7 +2563,11 @@ mod tests {
         let root_before = live_root(&w);
         let (drifts, _) = synced(&change(&w, &stray));
         assert_eq!(drifts.len(), 1, "{drifts:?}");
-        assert_eq!(live_root(&w), root_before, "the document was not read again");
+        assert_eq!(
+            live_root(&w),
+            root_before,
+            "the document was not read again"
+        );
         assert_eq!(body_markdown(&w)[0], "Alpha browser.");
     }
 
@@ -2090,10 +2586,18 @@ mod tests {
         assert!(drifts.is_empty(), "{drifts:?}");
         assert_eq!(held.len(), 1, "{held:?}");
         assert!(held[0].reason.contains("fence"), "{}", held[0].reason);
-        assert!(OPEN_FENCE[held[0].range.clone()].starts_with("```rust"), "{:?}", held[0]);
+        assert!(
+            OPEN_FENCE[held[0].range.clone()].starts_with("```rust"),
+            "{:?}",
+            held[0]
+        );
         assert_eq!(body_blocks(&w), before, "N is unchanged");
         assert_eq!(body_markdown(&w), markdown);
-        assert!(result.events.is_empty(), "nothing was rebuilt: {:?}", result.events);
+        assert!(
+            result.events.is_empty(),
+            "nothing was rebuilt: {:?}",
+            result.events
+        );
     }
 
     #[test]
@@ -2122,8 +2626,14 @@ mod tests {
         assert!(dirty(&w));
 
         // `presemble reload`: N takes the disk text; the editor is given it.
-        let reloaded = w.conductor.handle_command(Command::ReloadDocument { path: path() });
-        assert!(matches!(reloaded.response, Response::Reloaded { .. }), "{:?}", reloaded.response);
+        let reloaded = w
+            .conductor
+            .handle_command(Command::ReloadDocument { path: path() });
+        assert!(
+            matches!(reloaded.response, Response::Reloaded { .. }),
+            "{:?}",
+            reloaded.response
+        );
         let result = change(&w, CONTENT);
         let (drifts, held) = synced(&result);
         assert!(drifts.is_empty() && held.is_empty(), "{drifts:?} {held:?}");
@@ -2139,7 +2649,10 @@ mod tests {
         // The editor has a paragraph above "Alpha para." that the file lacks.
         let text = CONTENT.replace("Alpha para.", "Above.\n\nAlpha para.");
         open(&w, &text);
-        let line = text.lines().position(|l| l == "Alpha para.").expect("a line") as u32;
+        let line = text
+            .lines()
+            .position(|l| l == "Alpha para.")
+            .expect("a line") as u32;
         let moved = w.conductor.handle_command(Command::CursorMoved {
             path: editorial_types::SitePath::parse(FILE).unwrap(),
             line,
@@ -2147,7 +2660,10 @@ mod tests {
         match moved.events.as_slice() {
             [ConductorEvent::CursorScrollTo { anchor }] => {
                 assert_eq!(anchor.node_kind, "paragraph");
-                assert_eq!(anchor.offset, 1, "the second paragraph of the editor's text");
+                assert_eq!(
+                    anchor.offset, 1,
+                    "the second paragraph of the editor's text"
+                );
             }
             other => panic!("expected one CursorScrollTo, got {other:?}"),
         }
@@ -2160,11 +2676,20 @@ mod tests {
         open(&w, CONTENT);
         change(&w, &CONTENT.replace("Alpha para.", "Alpha changed."));
         let blocks = body_blocks(&w);
-        let closed = w.conductor.handle_command(Command::EditorClosed { path: path() });
-        assert!(matches!(closed.response, Response::Ok), "{:?}", closed.response);
+        let closed = w
+            .conductor
+            .handle_command(Command::EditorClosed { path: path() });
+        assert!(
+            matches!(closed.response, Response::Ok),
+            "{:?}",
+            closed.response
+        );
         assert_eq!(body_blocks(&w), blocks);
         assert_eq!(body_markdown(&w)[0], "Alpha changed.");
-        assert!(w.conductor.editors.read().unwrap().is_empty(), "the state is gone");
+        assert!(
+            w.conductor.editors.read().unwrap().is_empty(),
+            "the state is gone"
+        );
     }
 
     /// Timing (the gate of 2.3): p50 and p95 of `EditorChanged`, for an edit in
@@ -2196,7 +2721,9 @@ mod tests {
             .chain((0..500).map(|i| format!("Paragraph {i} of the big document.\n\n")))
             .collect();
         std::fs::write(root.join("content/post/big.md"), &big).unwrap();
-        let repo = site_repository::SiteRepository::builder().from_dir(root).build();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
         let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
 
         let path = ContentPath::parse("content/post/big.md").unwrap();
@@ -2204,8 +2731,9 @@ mod tests {
         // whatever drifts in the machine's speed drifts for all of them. Each
         // round starts from the text N has and ends with N having the next.
         let rounds = 40;
-        let mut paragraphs: Vec<String> =
-            (0..500).map(|i| format!("Paragraph {i} of the big document.")).collect();
+        let mut paragraphs: Vec<String> = (0..500)
+            .map(|i| format!("Paragraph {i} of the big document."))
+            .collect();
         let render = |paragraphs: &[String]| -> String {
             let body: String = paragraphs.iter().map(|p| format!("{p}\n\n")).collect();
             format!("# Big\n\n----\n\n{body}")
@@ -2213,7 +2741,10 @@ mod tests {
         let (mut old, mut in_place, mut structural) = (Vec::new(), Vec::new(), Vec::new());
         let editor_case = |text: String| -> f64 {
             let at = std::time::Instant::now();
-            let result = conductor.handle_command(Command::EditorChanged { path: path.clone(), text });
+            let result = conductor.handle_command(Command::EditorChanged {
+                path: path.clone(),
+                text,
+            });
             let ms = at.elapsed().as_secs_f64() * 1000.0;
             assert!(
                 matches!(result.response, Response::EditorSynced { ref drifts, ref held } if drifts.is_empty() && held.is_empty()),
@@ -2228,16 +2759,24 @@ mod tests {
             paragraphs[250] = format!("Paragraph 250 round {round} document of the big document.");
             let text = render(&paragraphs);
             let at = std::time::Instant::now();
-            conductor.rebuild_page(&root.join("content/post/big.md"), &text).expect("re-ingested");
+            conductor
+                .rebuild_page(&root.join("content/post/big.md"), &text)
+                .expect("re-ingested");
             old.push(at.elapsed().as_secs_f64() * 1000.0);
 
             // An edit in place: the editor has what N has, and types a character.
-            conductor.handle_command(Command::EditorOpened { path: path.clone(), text });
+            conductor.handle_command(Command::EditorOpened {
+                path: path.clone(),
+                text,
+            });
             paragraphs[250] = format!("Paragraph 250 round {round} typed of the big document.");
             in_place.push(editor_case(render(&paragraphs)));
 
             // A new paragraph after paragraph 100.
-            conductor.handle_command(Command::EditorOpened { path: path.clone(), text: render(&paragraphs) });
+            conductor.handle_command(Command::EditorOpened {
+                path: path.clone(),
+                text: render(&paragraphs),
+            });
             paragraphs.insert(101, format!("New paragraph {round}."));
             structural.push(editor_case(render(&paragraphs)));
         }
@@ -2265,11 +2804,14 @@ mod tests {
     }
 
     fn editor_saved(w: &World) -> CommandResult {
-        w.conductor.handle_command(Command::DocumentSaved { path: site_path() })
+        w.conductor
+            .handle_command(Command::DocumentSaved { path: site_path() })
     }
 
     fn watcher_saw(w: &World) -> CommandResult {
-        w.conductor.handle_command(Command::FileChanged { paths: vec![site_path()] })
+        w.conductor.handle_command(Command::FileChanged {
+            paths: vec![site_path()],
+        })
     }
 
     fn conflicts(w: &World) -> Vec<String> {
@@ -2280,7 +2822,11 @@ mod tests {
     }
 
     fn dirty_buffers(w: &World) -> Vec<String> {
-        match w.conductor.handle_command(Command::GetDirtyBuffers).response {
+        match w
+            .conductor
+            .handle_command(Command::GetDirtyBuffers)
+            .response
+        {
             Response::DirtyBuffers(files) => files,
             other => panic!("expected DirtyBuffers, got {other:?}"),
         }
@@ -2304,11 +2850,22 @@ mod tests {
 
         editor_writes(&w, &text);
         let result = editor_saved(&w);
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
 
         let canonical = w.conductor.canonical_text(&path()).expect("N serializes");
-        assert!(canonical.contains("Alpha browser.") && canonical.contains("Beta typed."), "{canonical}");
-        assert_eq!(on_disk(&w), canonical, "the file holds N, with the browser's edit");
+        assert!(
+            canonical.contains("Alpha browser.") && canonical.contains("Beta typed."),
+            "{canonical}"
+        );
+        assert_eq!(
+            on_disk(&w),
+            canonical,
+            "the file holds N, with the browser's edit"
+        );
         assert!(!dirty(&w), "a flush is a save");
         assert!(conflicts(&w).is_empty(), "{:?}", conflicts(&w));
     }
@@ -2327,7 +2884,11 @@ mod tests {
 
         editor_writes(&w, &text);
         let result = editor_saved(&w);
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
         assert_eq!(on_disk(&w), text, "the editor's text is not rewritten");
         assert!(!dirty(&w));
         assert!(conflicts(&w).is_empty());
@@ -2351,7 +2912,11 @@ mod tests {
 
         // The save notice that follows changes nothing.
         let result = editor_saved(&w);
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
         assert!(conflicts(&w).is_empty());
         assert!(!dirty(&w));
         assert_eq!(on_disk(&w), text);
@@ -2386,15 +2951,34 @@ mod tests {
         let before = body_blocks(&w);
         let (drifts, held) = synced(&change(&w, OPEN_FENCE));
         assert!(drifts.is_empty() && held.len() == 1, "{drifts:?} {held:?}");
-        assert_eq!(body_blocks(&w), before, "held: N is unchanged until the write");
+        assert_eq!(
+            body_blocks(&w),
+            before,
+            "held: N is unchanged until the write"
+        );
 
         editor_writes(&w, OPEN_FENCE);
         let result = editor_saved(&w);
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
 
-        let names: Vec<String> = body_blocks(&w).into_iter().map(|b| element_name(&w, b)).collect();
-        assert_eq!(names, ["paragraph", "code-block"], "the open fence is a code block now");
-        assert_eq!(on_disk(&w), OPEN_FENCE, "N reads as the file, which stays as written");
+        let names: Vec<String> = body_blocks(&w)
+            .into_iter()
+            .map(|b| element_name(&w, b))
+            .collect();
+        assert_eq!(
+            names,
+            ["paragraph", "code-block"],
+            "the open fence is a code block now"
+        );
+        assert_eq!(
+            on_disk(&w),
+            OPEN_FENCE,
+            "N reads as the file, which stays as written"
+        );
         assert!(!dirty(&w));
         assert!(conflicts(&w).is_empty());
     }
@@ -2424,7 +3008,10 @@ mod tests {
         let w = world();
         browser_sets_alpha(&w, "Alpha browser.");
         // A file that reads as N: no conflict, if nothing else happens.
-        editor_writes(&w, &CONTENT.replace("Alpha para.\n\n", "Alpha browser.\n\n\n\n"));
+        editor_writes(
+            &w,
+            &CONTENT.replace("Alpha para.\n\n", "Alpha browser.\n\n\n\n"),
+        );
         // And just after it was read, something else writes the file.
         let file = w.tmp.path().join(FILE);
         let outside = CONTENT.replace("Gamma para.", "Gamma sed.");
@@ -2433,7 +3020,11 @@ mod tests {
 
         watcher_saw(&w);
 
-        assert_eq!(conflicts(&w), [FILE], "the newer file is a conflict, not N's version");
+        assert_eq!(
+            conflicts(&w),
+            [FILE],
+            "the newer file is a conflict, not N's version"
+        );
         assert!(dirty(&w), "the unsaved edit is kept");
         assert_eq!(body_markdown(&w)[0], "Alpha browser.");
         // The next save of N is refused without consent, so it cannot
@@ -2441,7 +3032,11 @@ mod tests {
         let saved = w.conductor.handle_command(Command::SaveAllBuffers {
             consent: editorial_types::ConflictConsent::None,
         });
-        assert!(matches!(saved.response, Response::ConflictsNeedConfirmation(_)), "{:?}", saved.response);
+        assert!(
+            matches!(saved.response, Response::ConflictsNeedConfirmation(_)),
+            "{:?}",
+            saved.response
+        );
         assert!(on_disk(&w).contains("Gamma sed."));
     }
 
@@ -2455,7 +3050,11 @@ mod tests {
         editor_writes(&w, &CONTENT.replace("Gamma para.", "Gamma sed."));
         watcher_saw(&w);
         assert_eq!(conflicts(&w), [FILE]);
-        assert_eq!(body_markdown(&w)[0], "Alpha browser.", "the unsaved edit stays");
+        assert_eq!(
+            body_markdown(&w)[0],
+            "Alpha browser.",
+            "the unsaved edit stays"
+        );
 
         // With an editor whose text the file does not hold.
         let w = world();
@@ -2464,7 +3063,11 @@ mod tests {
         editor_writes(&w, &CONTENT.replace("Gamma para.", "Gamma sed."));
         watcher_saw(&w);
         assert_eq!(conflicts(&w), [FILE]);
-        assert_eq!(body_markdown(&w)[0], "Alpha typed.", "the unsaved edit stays");
+        assert_eq!(
+            body_markdown(&w)[0],
+            "Alpha typed.",
+            "the unsaved edit stays"
+        );
     }
 
     /// The browser's save-all saves N. What the editor holds that N does not
@@ -2474,17 +3077,31 @@ mod tests {
         let w = world();
         open(&w, CONTENT);
         change(&w, &CONTENT.replace("Alpha para.", "Alpha typed."));
-        let (_, held) = synced(&change(&w, &OPEN_FENCE.replace("Alpha para.", "Alpha typed.")));
+        let (_, held) = synced(&change(
+            &w,
+            &OPEN_FENCE.replace("Alpha para.", "Alpha typed."),
+        ));
         assert_eq!(held.len(), 1);
-        assert_eq!(dirty_buffers(&w), [FILE], "N holds an unsaved edit; the editor's text adds nothing");
+        assert_eq!(
+            dirty_buffers(&w),
+            [FILE],
+            "N holds an unsaved edit; the editor's text adds nothing"
+        );
 
         let result = w.conductor.handle_command(Command::SaveAllBuffers {
             consent: editorial_types::ConflictConsent::None,
         });
-        assert!(matches!(result.response, Response::Ok), "{:?}", result.response);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
         let saved = on_disk(&w);
         assert!(saved.contains("Alpha typed."), "{saved}");
-        assert!(!saved.contains("```"), "the held fence is not written: {saved}");
+        assert!(
+            !saved.contains("```"),
+            "the held fence is not written: {saved}"
+        );
         assert!(dirty_buffers(&w).is_empty());
     }
 
@@ -2502,7 +3119,8 @@ mod tests {
             change(&w, &text);
             assert_eq!(on_disk(&w), CONTENT);
         }
-        w.conductor.handle_command(Command::EditorClosed { path: path() });
+        w.conductor
+            .handle_command(Command::EditorClosed { path: path() });
         assert_eq!(on_disk(&w), CONTENT);
     }
 }

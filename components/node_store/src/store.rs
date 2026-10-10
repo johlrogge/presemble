@@ -175,7 +175,12 @@ impl NodeStore {
 
     /// Replace all Reference edge targets matching `old_target` with `new_target`
     /// on edges FROM the given node.
-    pub fn replace_reference_target(&mut self, from: NodeId, old_target: NodeId, new_target: NodeId) {
+    pub fn replace_reference_target(
+        &mut self,
+        from: NodeId,
+        old_target: NodeId,
+        new_target: NodeId,
+    ) {
         self.record_touched(from);
         if let Some(edges) = self.edges_from.get_mut(&from) {
             let mut new_edges = Vector::new();
@@ -190,8 +195,14 @@ impl NodeStore {
                                 .collect();
                         }
                         // Add new edge
-                        let new_edge = Edge::Reference { name: *name, target: new_target };
-                        let rev = ReverseEdge { source: from, edge: new_edge.clone() };
+                        let new_edge = Edge::Reference {
+                            name: *name,
+                            target: new_target,
+                        };
+                        let rev = ReverseEdge {
+                            source: from,
+                            edge: new_edge.clone(),
+                        };
                         self.edges_to.entry(new_target).or_default().push_back(rev);
                         new_edges.push_back(new_edge);
                     }
@@ -212,13 +223,20 @@ impl NodeStore {
                 match edge {
                     Edge::Child(child) if *child == old_target => {
                         if let Some(rev_edges) = self.edges_to.get_mut(&old_target) {
-                            *rev_edges = rev_edges.iter()
-                                .filter(|r| !(r.source == from && matches!(&r.edge, Edge::Child(c) if *c == old_target)))
+                            *rev_edges = rev_edges
+                                .iter()
+                                .filter(|r| {
+                                    !(r.source == from
+                                        && matches!(&r.edge, Edge::Child(c) if *c == old_target))
+                                })
                                 .cloned()
                                 .collect();
                         }
                         let new_edge = Edge::Child(new_target);
-                        let rev = ReverseEdge { source: from, edge: new_edge.clone() };
+                        let rev = ReverseEdge {
+                            source: from,
+                            edge: new_edge.clone(),
+                        };
                         self.edges_to.entry(new_target).or_default().push_back(rev);
                         new_edges.push_back(new_edge);
                     }
@@ -390,9 +408,9 @@ impl NodeStore {
             fwd.remove(pos);
         }
         if let Some(rev) = self.edges_to.get_mut(&child)
-            && let Some(pos) = rev.iter().position(|re| {
-                re.source == parent && matches!(re.edge, Edge::Child(_))
-            })
+            && let Some(pos) = rev
+                .iter()
+                .position(|re| re.source == parent && matches!(re.edge, Edge::Child(_)))
         {
             rev.remove(pos);
         }
@@ -670,7 +688,10 @@ mod tests {
         into_to.sort_by_key(|(source, _)| *source);
         assert_eq!(
             into_to,
-            vec![(from, Edge::Child(to)), (elsewhere, Edge::Reference { name, target: to })]
+            vec![
+                (from, Edge::Child(to)),
+                (elsewhere, Edge::Reference { name, target: to })
+            ]
         );
         assert_eq!(store.incoming(child), vec![(from, Edge::Child(child))]);
     }
@@ -968,7 +989,13 @@ mod tests {
         let a = store.add_node(Node::Text("a".to_string()));
         let b = store.add_node(Node::Text("b".to_string()));
         let c = store.add_node(Node::Text("c".to_string()));
-        store.add_edge(a, Edge::Reference { name: link, target: b });
+        store.add_edge(
+            a,
+            Edge::Reference {
+                name: link,
+                target: b,
+            },
+        );
         store.start_journal();
         store.replace_reference_target(a, b, c);
         let log = store.take_journal().unwrap();
@@ -1170,9 +1197,27 @@ mod tests {
         let page = store.add_node(Node::Text("page".to_string()));
         let a = store.add_node(Node::Text("a".to_string()));
         let b = store.add_node(Node::Text("b".to_string()));
-        store.add_edge(page, Edge::Reference { name: author, target: a });
-        store.add_edge(page, Edge::Reference { name: other, target: a });
-        store.add_edge(page, Edge::Reference { name: author, target: b });
+        store.add_edge(
+            page,
+            Edge::Reference {
+                name: author,
+                target: a,
+            },
+        );
+        store.add_edge(
+            page,
+            Edge::Reference {
+                name: other,
+                target: a,
+            },
+        );
+        store.add_edge(
+            page,
+            Edge::Reference {
+                name: author,
+                target: b,
+            },
+        );
 
         store.remove_reference(page, author);
 
@@ -1190,7 +1235,13 @@ mod tests {
         let link = store.intern("link");
         let a = store.add_node(Node::Text("a".to_string()));
         let b = store.add_node(Node::Text("b".to_string()));
-        store.add_edge(a, Edge::Reference { name: link, target: b });
+        store.add_edge(
+            a,
+            Edge::Reference {
+                name: link,
+                target: b,
+            },
+        );
         store.start_journal();
         store.remove_reference(a, link);
         let log = store.take_journal().unwrap();
@@ -1206,9 +1257,27 @@ mod tests {
         let q1 = store.add_node(Node::Text("q1".to_string()));
         let q2 = store.add_node(Node::Text("q2".to_string()));
         let page = store.add_node(Node::Text("page".to_string()));
-        store.add_edge(q1, Edge::Derived { name: over, target: stem });
-        store.add_edge(q2, Edge::Derived { name: over, target: stem });
-        store.add_edge(page, Edge::Derived { name: query, target: stem });
+        store.add_edge(
+            q1,
+            Edge::Derived {
+                name: over,
+                target: stem,
+            },
+        );
+        store.add_edge(
+            q2,
+            Edge::Derived {
+                name: over,
+                target: stem,
+            },
+        );
+        store.add_edge(
+            page,
+            Edge::Derived {
+                name: query,
+                target: stem,
+            },
+        );
         store.add_edge(page, Edge::Child(stem));
 
         assert_eq!(store.derived_sources(stem, over), vec![q1, q2]);
@@ -1231,7 +1300,13 @@ mod tests {
         let referrer = store.add_node(Node::Text("r".to_string()));
         let target = store.add_node(Node::Text("t".to_string()));
         store.add_edge(parent, Edge::Child(target));
-        store.add_edge(attr_owner, Edge::Attribute { name: attr, value: target });
+        store.add_edge(
+            attr_owner,
+            Edge::Attribute {
+                name: attr,
+                value: target,
+            },
+        );
         store.add_edge(referrer, Edge::Reference { name: link, target });
         let mut owners = store.owners(target);
         owners.sort();
@@ -1295,7 +1370,13 @@ mod tests {
         let root = store.add_node(Node::Text("root".to_string()));
         let referenced = store.add_node(Node::Text("ref".to_string()));
         let orphan = store.add_node(Node::Text("orphan".to_string()));
-        store.add_edge(root, Edge::Reference { name: link, target: referenced });
+        store.add_edge(
+            root,
+            Edge::Reference {
+                name: link,
+                target: referenced,
+            },
+        );
 
         store.sweep([root]);
 
@@ -1314,9 +1395,21 @@ mod tests {
         let part = store.add_node(Node::Text("part".to_string()));
         let derived = store.add_node(Node::Text("derived".to_string()));
         store.add_edge(root, Edge::Child(child));
-        store.add_edge(child, Edge::Attribute { name: n, value: attr });
+        store.add_edge(
+            child,
+            Edge::Attribute {
+                name: n,
+                value: attr,
+            },
+        );
         store.add_edge(attr, Edge::ConsistsOf { name: n, part });
-        store.add_edge(part, Edge::Derived { name: n, target: derived });
+        store.add_edge(
+            part,
+            Edge::Derived {
+                name: n,
+                target: derived,
+            },
+        );
 
         let removed = store.sweep([root]);
 

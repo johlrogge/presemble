@@ -1,29 +1,29 @@
 use crate::error::CliError;
-use crate::{build_for_serve, UrlConfig};
+use crate::{UrlConfig, build_for_serve};
 use accounts::{
     ClosedSessionStore, DevSessionStore, LoginAvailability, MagicLinkSessionStore, Session,
     SessionKey, SessionStore, Unauthorized,
 };
+use axum::extract::FromRef;
 use axum::{
     Router,
-    extract::{Query, State, WebSocketUpgrade},
     extract::ws::{Message, WebSocket},
+    extract::{Query, State, WebSocketUpgrade},
     response::IntoResponse,
     routing::{get, post},
 };
-use axum::extract::FromRef;
 use lsp_service::PresembleLsp;
-use tower_lsp::{LspService, Server};
 use notify::event::{CreateKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use tower_lsp::{LspService, Server};
 
 /// Message sent over the session-gated editorial WebSocket (`/_presemble/editorial-ws`).
 /// Empty `pages` = full rebuild → reload in place.
@@ -37,17 +37,13 @@ enum EditorialMessage {
         anchor: editorial_types::StructuralAnchor,
     },
     /// Suggestion overlay metadata changed — no HTML was mutated, no page reload needed.
-    SuggestionListChanged {
-        file: Option<String>,
-    },
+    SuggestionListChanged { file: Option<String> },
     /// The browser may have missed messages (lagged receiver); it should
     /// reload in place to pick up whatever it missed.
     Resync,
     /// A document with unsaved edits changed on disk (ADR-065). Editorial
     /// only: a draft file name never goes on the public socket.
-    Conflict {
-        file: String,
-    },
+    Conflict { file: String },
 }
 
 /// Serialisable projection of a [`editorial_types::StructuralAnchor`] for the
@@ -157,12 +153,18 @@ impl EditorialMessage {
                 let anchor_json = match anchor {
                     Some(a) => {
                         let wire = AnchorWire::from(a);
-                        format!(r#","anchor":{}"#, serde_json::to_string(&wire).unwrap_or_default())
+                        format!(
+                            r#","anchor":{}"#,
+                            serde_json::to_string(&wire).unwrap_or_default()
+                        )
                     }
                     None => String::new(),
                 };
                 if pages.is_empty() {
-                    format!(r#"{{"type":"reload","pages":[],"primary":""{}}}"#, anchor_json)
+                    format!(
+                        r#"{{"type":"reload","pages":[],"primary":""{}}}"#,
+                        anchor_json
+                    )
                 } else {
                     let pages_json = pages
                         .iter()
@@ -212,7 +214,11 @@ const PUBLISH_QUIET: Duration = Duration::from_millis(400);
 /// Handle one conductor event: a save triggers a published build; everything
 /// else is for the editors only. Readers hear of changes from the published
 /// build (what they are served), never from an edit in progress.
-fn dispatch_conductor_event(ev: conductor::ConductorEvent, channels: &BrowserChannels, trigger: &PublishTrigger) {
+fn dispatch_conductor_event(
+    ev: conductor::ConductorEvent,
+    channels: &BrowserChannels,
+    trigger: &PublishTrigger,
+) {
     if let conductor::ConductorEvent::DocumentsSaved { .. } = ev {
         trigger.fire();
         return;
@@ -228,27 +234,39 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
     use conductor::ConductorEvent;
     Some(match ev {
         ConductorEvent::DocumentsSaved { .. } => return None,
-        ConductorEvent::PagesRebuilt { pages, anchor } => EditorialMessage::Reload { pages, anchor },
-        ConductorEvent::BuildFailed { error_pages } => {
-            EditorialMessage::Reload { pages: error_pages, anchor: None }
+        ConductorEvent::PagesRebuilt { pages, anchor } => {
+            EditorialMessage::Reload { pages, anchor }
         }
+        ConductorEvent::BuildFailed { error_pages } => EditorialMessage::Reload {
+            pages: error_pages,
+            anchor: None,
+        },
         ConductorEvent::CursorScrollTo { anchor } => EditorialMessage::ScrollTo { anchor },
         ConductorEvent::NedSuggestionCreated { suggestion } => {
-            EditorialMessage::SuggestionListChanged { file: Some(suggestion.file.to_string()) }
+            EditorialMessage::SuggestionListChanged {
+                file: Some(suggestion.file.to_string()),
+            }
         }
         ConductorEvent::NedSuggestionStaled { file, .. } => {
-            EditorialMessage::SuggestionListChanged { file: Some(file.to_string()) }
+            EditorialMessage::SuggestionListChanged {
+                file: Some(file.to_string()),
+            }
         }
         // Empty `pages` means nothing was re-rendered (never "full rebuild"),
         // so only the suggestion list needs refreshing.
         ConductorEvent::NedSuggestionAccepted { file, pages, .. } if pages.is_empty() => {
-            EditorialMessage::SuggestionListChanged { file: Some(file.to_string()) }
+            EditorialMessage::SuggestionListChanged {
+                file: Some(file.to_string()),
+            }
         }
-        ConductorEvent::NedSuggestionAccepted { pages, .. } => {
-            EditorialMessage::Reload { pages, anchor: None }
-        }
+        ConductorEvent::NedSuggestionAccepted { pages, .. } => EditorialMessage::Reload {
+            pages,
+            anchor: None,
+        },
         ConductorEvent::NedSuggestionRejected { file, .. } => {
-            EditorialMessage::SuggestionListChanged { file: Some(file.to_string()) }
+            EditorialMessage::SuggestionListChanged {
+                file: Some(file.to_string()),
+            }
         }
         ConductorEvent::DiskConflict { file } => EditorialMessage::Conflict { file },
     })
@@ -321,7 +339,10 @@ pub fn serve_site(
 ) -> Result<(), CliError> {
     // Validate the session key before doing anything else: a set-but-invalid
     // key is a fatal startup error (ADR-055 amendment).
-    let mode = resolve_editorial_mode(std::env::var_os(accounts::SESSION_KEY_ENV), dev_session_label)?;
+    let mode = resolve_editorial_mode(
+        std::env::var_os(accounts::SESSION_KEY_ENV),
+        dev_session_label,
+    )?;
     tokio::runtime::Runtime::new()
         .map_err(|e| CliError::Render(format!("failed to create tokio runtime: {e}")))?
         .block_on(serve_async(site_dir, port, url_config, mode))
@@ -332,7 +353,10 @@ pub fn serve_site(
 enum EditorialMode {
     /// A valid `PRESEMBLE_SESSION_KEY` is set: verify control-plane `acct:` tokens.
     /// `dev_session_ignored` records that `--dev-session` was also given.
-    Hosted { key: SessionKey, dev_session_ignored: bool },
+    Hosted {
+        key: SessionKey,
+        dev_session_ignored: bool,
+    },
     /// `--dev-session <label>`: random per-process key and a printed login link.
     DevLogin { label: String },
     /// Neither: no session can be obtained, editing is disabled.
@@ -340,7 +364,10 @@ enum EditorialMode {
 }
 
 /// Pick the editorial mode from the validated session key and CLI flags.
-fn select_editorial_mode(session_key: Option<SessionKey>, dev_label: Option<String>) -> EditorialMode {
+fn select_editorial_mode(
+    session_key: Option<SessionKey>,
+    dev_label: Option<String>,
+) -> EditorialMode {
     match (session_key, dev_label) {
         (Some(key), dev_label) => EditorialMode::Hosted {
             key,
@@ -365,7 +392,10 @@ fn resolve_editorial_mode(
 fn editorial_banner(mode: &EditorialMode, login_token: Option<&str>, port: u16) -> String {
     let mut out = String::new();
     match mode {
-        EditorialMode::Hosted { dev_session_ignored, .. } => {
+        EditorialMode::Hosted {
+            dev_session_ignored,
+            ..
+        } => {
             out.push_str("Session store: MagicLinkSessionStore (PRESEMBLE_SESSION_KEY set)\n");
             if *dev_session_ignored {
                 out.push_str(
@@ -467,12 +497,18 @@ impl PublishedSite {
     /// A directory that is served as it is and never removed.
     #[cfg(test)]
     fn fixed(dir: std::path::PathBuf) -> Self {
-        Self::from_version(PublishedVersion { dir, remove_when_unused: false })
+        Self::from_version(PublishedVersion {
+            dir,
+            remove_when_unused: false,
+        })
     }
 
     /// The version a request reads; hold it for the length of the request.
     fn current(&self) -> Arc<PublishedVersion> {
-        self.current.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.current
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Move the pointer to `version`; the previous version is returned.
@@ -491,7 +527,10 @@ impl PublishedSite {
 /// the output directory `presemble build` writes.
 fn version_dir(site_dir: &Path, n: usize) -> std::path::PathBuf {
     let live = crate::output_dir(site_dir);
-    let mut name = live.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = live
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(format!(".publishing-{n}"));
     live.with_file_name(name)
 }
@@ -499,9 +538,13 @@ fn version_dir(site_dir: &Path, n: usize) -> std::path::PathBuf {
 /// Remove the version directories an earlier serve left behind.
 fn remove_stale_versions(site_dir: &Path) {
     let live = crate::output_dir(site_dir);
-    let (Some(parent), Some(name)) = (live.parent(), live.file_name()) else { return };
+    let (Some(parent), Some(name)) = (live.parent(), live.file_name()) else {
+        return;
+    };
     let prefix = format!("{}.publishing-", name.to_string_lossy());
-    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
     for entry in entries.flatten() {
         if entry.file_name().to_string_lossy().starts_with(&prefix) {
             let _ = std::fs::remove_dir_all(entry.path());
@@ -517,9 +560,14 @@ fn initial_publish(site_dir: &Path) -> PublishedSite {
     let _ = std::fs::create_dir_all(&dir);
     match crate::build_published_into(site_dir, &dir) {
         Ok(outcome) => println!("Published output ready ({} file(s))", outcome.files_built),
-        Err(e) => eprintln!("Not published (readers see no pages until the site passes the gate): {e}"),
+        Err(e) => {
+            eprintln!("Not published (readers see no pages until the site passes the gate): {e}")
+        }
     }
-    PublishedSite::from_version(PublishedVersion { dir, remove_when_unused: true })
+    PublishedSite::from_version(PublishedVersion {
+        dir,
+        remove_when_unused: true,
+    })
 }
 
 /// What changed between two published versions, for the readers' reload.
@@ -533,13 +581,18 @@ struct ChangedPages {
 }
 
 fn read_tree(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
             read_tree(root, &path, out);
         } else if let Ok(rel) = path.strip_prefix(root) {
-            out.insert(rel.to_string_lossy().replace('\\', "/"), std::fs::read(&path).unwrap_or_default());
+            out.insert(
+                rel.to_string_lossy().replace('\\', "/"),
+                std::fs::read(&path).unwrap_or_default(),
+            );
         }
     }
 }
@@ -558,7 +611,10 @@ fn urls_of(rel: &str) -> Vec<String> {
 }
 
 fn changed_pages(old: &Path, new: &Path) -> ChangedPages {
-    let (mut before, mut after) = (std::collections::BTreeMap::new(), std::collections::BTreeMap::new());
+    let (mut before, mut after) = (
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    );
     read_tree(old, old, &mut before);
     read_tree(new, new, &mut after);
     let mut changed = ChangedPages::default();
@@ -589,7 +645,12 @@ impl PublishTrigger {
 /// Build the site from the files on disk into `dir`; if it passes the gate and
 /// differs from what is served, move the pointer to it and tell the readers
 /// which pages changed. Otherwise `dir` is removed and nothing changes.
-fn publish_next_version(site_dir: &Path, published: &PublishedSite, channels: &BrowserChannels, dir: std::path::PathBuf) {
+fn publish_next_version(
+    site_dir: &Path,
+    published: &PublishedSite,
+    channels: &BrowserChannels,
+    dir: std::path::PathBuf,
+) {
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("Not published: cannot create {}: {e}", dir.display());
@@ -609,11 +670,18 @@ fn publish_next_version(site_dir: &Path, published: &PublishedSite, channels: &B
     // One step: from here every new request reads the new version. The old
     // one is removed when the last request still reading it lets go.
     drop(before);
-    let previous = published.swap(PublishedVersion { dir, remove_when_unused: true });
+    let previous = published.swap(PublishedVersion {
+        dir,
+        remove_when_unused: true,
+    });
     drop(previous);
     // A changed non-page (stylesheet, image) may affect any page: an empty
     // list means every page.
-    let pages = if changed.other { Vec::new() } else { changed.pages };
+    let pages = if changed.other {
+        Vec::new()
+    } else {
+        changed.pages
+    };
     channels.publish_reload_to_readers(pages);
 }
 
@@ -637,7 +705,9 @@ fn start_publisher(
             let dir = version_dir(&site_dir, next_version);
             next_version += 1;
             publish_next_version(&site_dir, &published, &channels, dir);
-            published.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            published
+                .attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     });
     PublishTrigger(tx)
@@ -670,11 +740,19 @@ async fn serve_async(
     // Ensure the site directory exists so canonicalize produces an absolute path.
     // In serve mode the dir will be populated by scaffold or the user.
     if !site_dir.exists() {
-        std::fs::create_dir_all(site_dir)
-            .map_err(|e| CliError::Render(format!("cannot create site directory {}: {e}", site_dir.display())))?;
+        std::fs::create_dir_all(site_dir).map_err(|e| {
+            CliError::Render(format!(
+                "cannot create site directory {}: {e}",
+                site_dir.display()
+            ))
+        })?;
     }
-    let site_dir = std::fs::canonicalize(site_dir)
-        .map_err(|e| CliError::Render(format!("cannot resolve site directory {}: {e}", site_dir.display())))?;
+    let site_dir = std::fs::canonicalize(site_dir).map_err(|e| {
+        CliError::Render(format!(
+            "cannot resolve site directory {}: {e}",
+            site_dir.display()
+        ))
+    })?;
     let site_dir = site_dir.as_path();
 
     let out_dir = crate::editorial_output_dir(site_dir);
@@ -694,13 +772,17 @@ async fn serve_async(
 
     let channels = BrowserChannels::new(256);
     // Readers follow saves and external file changes, not edits in progress.
-    let publish_trigger =
-        start_publisher(site_dir.to_path_buf(), published.clone(), channels.clone(), PUBLISH_QUIET);
+    let publish_trigger = start_publisher(
+        site_dir.to_path_buf(),
+        published.clone(),
+        channels.clone(),
+        PUBLISH_QUIET,
+    );
 
     // Connect to conductor — mandatory for serve mode.
     let conductor_client = Arc::new(
         conductor::ensure_conductor(site_dir)
-            .map_err(|e| CliError::Render(format!("conductor required for serve: {e}")))?
+            .map_err(|e| CliError::Render(format!("conductor required for serve: {e}")))?,
     );
     println!("Connected to conductor");
 
@@ -716,23 +798,24 @@ async fn serve_async(
     {
         let pub_url = format!("{}-pub", conductor::socket_url(site_dir));
         let channels_clone = channels.clone();
-        std::thread::spawn(move || relay_conductor_events(&pub_url, &channels_clone, &publish_trigger));
+        std::thread::spawn(move || {
+            relay_conductor_events(&pub_url, &channels_clone, &publish_trigger)
+        });
     }
 
     // Build session store from the selected editorial mode.
     let (session_store, login_token): (Arc<dyn SessionStore>, Option<accounts::SessionToken>) =
         match &mode {
-            EditorialMode::Hosted { key, .. } => {
-                (Arc::new(MagicLinkSessionStore::with_key(key.clone())) as Arc<dyn SessionStore>, None)
-            }
+            EditorialMode::Hosted { key, .. } => (
+                Arc::new(MagicLinkSessionStore::with_key(key.clone())) as Arc<dyn SessionStore>,
+                None,
+            ),
             EditorialMode::DevLogin { label } => {
                 let ds = DevSessionStore::new_random();
                 let token = ds.mint(label);
                 (Arc::new(ds) as Arc<dyn SessionStore>, Some(token))
             }
-            EditorialMode::Closed => {
-                (Arc::new(ClosedSessionStore) as Arc<dyn SessionStore>, None)
-            }
+            EditorialMode::Closed => (Arc::new(ClosedSessionStore) as Arc<dyn SessionStore>, None),
         };
     print!(
         "{}",
@@ -755,10 +838,12 @@ async fn serve_async(
     println!("Press Ctrl-C to stop.");
     print_available_pages(&out_dir, &addr);
 
-    let listener = TcpListener::bind(&addr).await
+    let listener = TcpListener::bind(&addr)
+        .await
         .map_err(|e| CliError::Render(format!("failed to bind {addr}: {e}")))?;
 
-    axum::serve(listener, app).await
+    axum::serve(listener, app)
+        .await
         .map_err(|e| CliError::Render(format!("server error: {e}")))?;
 
     Ok(())
@@ -785,11 +870,26 @@ fn app_router(state: AppState) -> Router {
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
         .route("/_presemble/conflicts", get(conflicts_handler))
         .route("/_presemble/block-edit", post(block_edit_handler))
-        .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
-        .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
-        .route("/_presemble/ned-suggestions/accept", post(ned_suggestions_accept_handler))
-        .route("/_presemble/ned-suggestions/reject", post(ned_suggestions_reject_handler))
-        .route("/_presemble/ned-suggestion-files", get(ned_suggestion_files_handler))
+        .route(
+            "/_presemble/ned-suggestions",
+            post(ned_suggestions_create_handler),
+        )
+        .route(
+            "/_presemble/ned-suggestions",
+            get(ned_suggestions_list_handler),
+        )
+        .route(
+            "/_presemble/ned-suggestions/accept",
+            post(ned_suggestions_accept_handler),
+        )
+        .route(
+            "/_presemble/ned-suggestions/reject",
+            post(ned_suggestions_reject_handler),
+        )
+        .route(
+            "/_presemble/ned-suggestion-files",
+            get(ned_suggestion_files_handler),
+        )
         .route("/_presemble/save-all", post(save_all_handler))
         .route("/_presemble/templates", get(templates_handler))
         .route("/_presemble/scaffold", post(scaffold_handler))
@@ -870,7 +970,11 @@ impl EditResponse {
         }
     }
 
-    fn ok_applied(dirty_paths: usize, rebuilt_pages: Vec<String>, failed_pages: Vec<String>) -> Self {
+    fn ok_applied(
+        dirty_paths: usize,
+        rebuilt_pages: Vec<String>,
+        failed_pages: Vec<String>,
+    ) -> Self {
         Self {
             dirty_paths: Some(dirty_paths),
             rebuilt_pages: Some(rebuilt_pages),
@@ -880,7 +984,10 @@ impl EditResponse {
     }
 
     fn err(msg: String) -> Self {
-        Self { error: Some(msg), ..Self::base(false) }
+        Self {
+            error: Some(msg),
+            ..Self::base(false)
+        }
     }
 
     fn plan_refused(failure: editorial_types::PlanFailure) -> Self {
@@ -895,31 +1002,33 @@ impl EditResponse {
 }
 
 /// Convert a conductor command result into an EditResponse.
-fn conductor_edit_response(result: Result<conductor::Response, String>) -> axum::Json<EditResponse> {
+fn conductor_edit_response(
+    result: Result<conductor::Response, String>,
+) -> axum::Json<EditResponse> {
     match result {
         Ok(conductor::Response::Ok)
         | Ok(conductor::Response::SuggestionCreated(_))
-        | Ok(conductor::Response::AlreadyInPlace) => {
-            axum::Json(EditResponse::ok_simple())
-        }
-        Ok(conductor::Response::Applied { rebuilt_pages, failed_pages, dirty_paths }) => {
-            axum::Json(EditResponse::ok_applied(dirty_paths, rebuilt_pages, failed_pages))
-        }
+        | Ok(conductor::Response::AlreadyInPlace) => axum::Json(EditResponse::ok_simple()),
+        Ok(conductor::Response::Applied {
+            rebuilt_pages,
+            failed_pages,
+            dirty_paths,
+        }) => axum::Json(EditResponse::ok_applied(
+            dirty_paths,
+            rebuilt_pages,
+            failed_pages,
+        )),
         Ok(conductor::Response::PlanRefused(failure)) => {
             axum::Json(EditResponse::plan_refused(failure))
         }
         Ok(conductor::Response::ConflictsNeedConfirmation(conflicts)) => {
             axum::Json(EditResponse::needs_confirmation(conflicts))
         }
-        Ok(conductor::Response::Error(e)) => {
-            axum::Json(EditResponse::err(e))
-        }
-        Err(e) => {
-            axum::Json(EditResponse::err(e))
-        }
-        _ => {
-            axum::Json(EditResponse::err("unexpected conductor response".to_string()))
-        }
+        Ok(conductor::Response::Error(e)) => axum::Json(EditResponse::err(e)),
+        Err(e) => axum::Json(EditResponse::err(e)),
+        _ => axum::Json(EditResponse::err(
+            "unexpected conductor response".to_string(),
+        )),
     }
 }
 
@@ -950,26 +1059,40 @@ async fn grammar_handler(
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    match state.conductor.send(&conductor::Command::GetGrammar { stem: query.stem }) {
-        Ok(conductor::Response::SchemaSource(Some(src))) => {
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/plain")],
-                src.into_bytes(),
-            ).into_response()
-        }
-        Ok(conductor::Response::SchemaSource(None)) => {
-            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], b"not found".to_vec()).into_response()
-        }
-        Ok(conductor::Response::Error(e)) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
-        }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
-        }
-        _ => {
-            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], b"unexpected conductor response".to_vec()).into_response()
-        }
+    match state
+        .conductor
+        .send(&conductor::Command::GetGrammar { stem: query.stem })
+    {
+        Ok(conductor::Response::SchemaSource(Some(src))) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain")],
+            src.into_bytes(),
+        )
+            .into_response(),
+        Ok(conductor::Response::SchemaSource(None)) => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain")],
+            b"not found".to_vec(),
+        )
+            .into_response(),
+        Ok(conductor::Response::Error(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            e.into_bytes(),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            e.into_bytes(),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            b"unexpected conductor response".to_vec(),
+        )
+            .into_response(),
     }
 }
 
@@ -994,28 +1117,44 @@ async fn render_handler(
             return (
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "text/plain")],
-                format!("invalid mode: {:?}; expected 'view' or 'schema'", query.mode).into_bytes(),
-            ).into_response();
+                format!(
+                    "invalid mode: {:?}; expected 'view' or 'schema'",
+                    query.mode
+                )
+                .into_bytes(),
+            )
+                .into_response();
         }
     };
 
-    match state.conductor.send(&conductor::Command::RenderPage { path: query.path, mode }) {
-        Ok(conductor::Response::PageRendered { html }) => {
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                html.into_bytes(),
-            ).into_response()
-        }
-        Ok(conductor::Response::Error(e)) => {
-            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
-        }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], e.into_bytes()).into_response()
-        }
-        _ => {
-            (StatusCode::INTERNAL_SERVER_ERROR, [(header::CONTENT_TYPE, "text/plain")], b"unexpected conductor response".to_vec()).into_response()
-        }
+    match state.conductor.send(&conductor::Command::RenderPage {
+        path: query.path,
+        mode,
+    }) {
+        Ok(conductor::Response::PageRendered { html }) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            html.into_bytes(),
+        )
+            .into_response(),
+        Ok(conductor::Response::Error(e)) => (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain")],
+            e.into_bytes(),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            e.into_bytes(),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain")],
+            b"unexpected conductor response".to_vec(),
+        )
+            .into_response(),
     }
 }
 
@@ -1032,7 +1171,8 @@ async fn dirty_buffers_handler(
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/json")],
                 json,
-            ).into_response()
+            )
+                .into_response()
         }
         Ok(conductor::Response::Error(e)) => {
             let body = format!(r#"{{"error":{:?}}}"#, e);
@@ -1040,7 +1180,8 @@ async fn dirty_buffers_handler(
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(e) => {
             let body = format!(r#"{{"error":{:?}}}"#, e);
@@ -1048,7 +1189,8 @@ async fn dirty_buffers_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
         _ => {
             let body = r#"{"error":"unexpected conductor response"}"#.to_string();
@@ -1056,7 +1198,8 @@ async fn dirty_buffers_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -1089,9 +1232,15 @@ async fn save_all_handler(
     let consent = if request.overwrite_conflicts.is_empty() {
         editorial_types::ConflictConsent::None
     } else {
-        editorial_types::ConflictConsent::Overwrite(request.overwrite_conflicts.into_iter().collect())
+        editorial_types::ConflictConsent::Overwrite(
+            request.overwrite_conflicts.into_iter().collect(),
+        )
     };
-    conductor_edit_response(state.conductor.send(&conductor::Command::SaveAllBuffers { consent }))
+    conductor_edit_response(
+        state
+            .conductor
+            .send(&conductor::Command::SaveAllBuffers { consent }),
+    )
 }
 
 /// `GET /_presemble/conflicts`: the documents whose file changed on disk while
@@ -1103,9 +1252,10 @@ async fn conflicts_handler(
     use axum::http::{StatusCode, header};
 
     let (status, body) = match state.conductor.send(&conductor::Command::GetConflicts) {
-        Ok(conductor::Response::Conflicts(files)) => {
-            (StatusCode::OK, serde_json::to_vec(&files).unwrap_or_else(|_| b"[]".to_vec()))
-        }
+        Ok(conductor::Response::Conflicts(files)) => (
+            StatusCode::OK,
+            serde_json::to_vec(&files).unwrap_or_else(|_| b"[]".to_vec()),
+        ),
         Ok(conductor::Response::Error(e)) | Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::to_vec(&serde_json::json!({ "error": e })).unwrap_or_default(),
@@ -1183,14 +1333,16 @@ async fn ned_suggestions_create_handler(
     if let Err(e) = editorial_types::validate_no_existing(&req.mutation) {
         return failed(e);
     }
-    match state.conductor.send(&conductor::Command::CreateNedSuggestion {
-        file: req.file,
-        selection: req.selection,
-        mutation: req.mutation,
-        reason: req.reason,
-        // TODO: carry session/user id when multiplayer suggestions land
-        author: editorial_types::Author::Human("browser".to_string()),
-    }) {
+    match state
+        .conductor
+        .send(&conductor::Command::CreateNedSuggestion {
+            file: req.file,
+            selection: req.selection,
+            mutation: req.mutation,
+            reason: req.reason,
+            // TODO: carry session/user id when multiplayer suggestions land
+            author: editorial_types::Author::Human("browser".to_string()),
+        }) {
         Ok(conductor::Response::SuggestionCreated(id)) => axum::Json(NedSuggestionCreateResponse {
             ok: true,
             id: Some(id.to_string()),
@@ -1228,7 +1380,8 @@ async fn ned_suggestions_list_handler(
             StatusCode::BAD_REQUEST,
             [(header::CONTENT_TYPE, "application/json")],
             body.into_bytes(),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let file = match editorial_types::ContentPath::parse(&query.file) {
@@ -1239,19 +1392,25 @@ async fn ned_suggestions_list_handler(
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
-    match state.conductor.send(&conductor::Command::GetNedSuggestions { file }) {
+    match state
+        .conductor
+        .send(&conductor::Command::GetNedSuggestions { file })
+    {
         Ok(conductor::Response::NedSuggestions(suggestions)) => {
-            let browser: Vec<NedSuggestionJson> = suggestions.iter().map(NedSuggestionJson::from).collect();
+            let browser: Vec<NedSuggestionJson> =
+                suggestions.iter().map(NedSuggestionJson::from).collect();
             let json = serde_json::to_vec(&browser).unwrap_or_else(|_| b"[]".to_vec());
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/json")],
                 json,
-            ).into_response()
+            )
+                .into_response()
         }
         Ok(conductor::Response::Error(e)) => {
             let body = format!(r#"{{"error":{:?}}}"#, e);
@@ -1259,7 +1418,8 @@ async fn ned_suggestions_list_handler(
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(e) => {
             let body = format!(r#"{{"error":{:?}}}"#, e);
@@ -1267,7 +1427,8 @@ async fn ned_suggestions_list_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
         _ => {
             let body = r#"{"error":"unexpected conductor response"}"#.to_string();
@@ -1275,7 +1436,8 @@ async fn ned_suggestions_list_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -1299,18 +1461,18 @@ async fn ned_suggestions_accept_handler(
 ) -> impl axum::response::IntoResponse {
     use axum::http::StatusCode;
 
-    match state.conductor.send(&conductor::Command::AcceptNedSuggestion {
-        id: editorial_types::SuggestionId::from(req.id),
-    }) {
-        Ok(conductor::Response::Ok) => {
-            (
-                StatusCode::OK,
-                axum::Json(NedSuggestionAcceptResponse {
-                    ok: true,
-                    error: None,
-                }),
-            )
-        }
+    match state
+        .conductor
+        .send(&conductor::Command::AcceptNedSuggestion {
+            id: editorial_types::SuggestionId::from(req.id),
+        }) {
+        Ok(conductor::Response::Ok) => (
+            StatusCode::OK,
+            axum::Json(NedSuggestionAcceptResponse {
+                ok: true,
+                error: None,
+            }),
+        ),
         Ok(conductor::Response::Error(e)) => {
             // Error response means the suggestion wasn't found or wasn't pending.
             // For stale: conductor returns Ok (with NedSuggestionStaled event), not an Error response.
@@ -1322,24 +1484,20 @@ async fn ned_suggestions_accept_handler(
                 }),
             )
         }
-        Err(e) => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(NedSuggestionAcceptResponse {
-                    ok: false,
-                    error: Some(e),
-                }),
-            )
-        }
-        _ => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(NedSuggestionAcceptResponse {
-                    ok: false,
-                    error: Some("unexpected conductor response".to_string()),
-                }),
-            )
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(NedSuggestionAcceptResponse {
+                ok: false,
+                error: Some(e),
+            }),
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(NedSuggestionAcceptResponse {
+                ok: false,
+                error: Some("unexpected conductor response".to_string()),
+            }),
+        ),
     }
 }
 
@@ -1348,9 +1506,13 @@ async fn ned_suggestions_reject_handler(
     State(state): State<AppState>,
     axum::Json(req): axum::Json<NedSuggestionActionRequest>,
 ) -> axum::Json<EditResponse> {
-    conductor_edit_response(state.conductor.send(&conductor::Command::RejectNedSuggestion {
-        id: editorial_types::SuggestionId::from(req.id),
-    }))
+    conductor_edit_response(
+        state
+            .conductor
+            .send(&conductor::Command::RejectNedSuggestion {
+                id: editorial_types::SuggestionId::from(req.id),
+            }),
+    )
 }
 
 async fn ned_suggestion_files_handler(
@@ -1359,14 +1521,18 @@ async fn ned_suggestion_files_handler(
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    match state.conductor.send(&conductor::Command::GetNedSuggestionFiles) {
+    match state
+        .conductor
+        .send(&conductor::Command::GetNedSuggestionFiles)
+    {
         Ok(conductor::Response::NedSuggestionFiles(paths)) => {
             let json = serde_json::to_vec(&paths).unwrap_or_else(|_| b"[]".to_vec());
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/json")],
                 json,
-            ).into_response()
+            )
+                .into_response()
         }
         Ok(conductor::Response::Error(e)) => {
             let body = format!(r#"{{"error":{:?}}}"#, e);
@@ -1374,7 +1540,8 @@ async fn ned_suggestion_files_handler(
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(e) => {
             let body = format!(r#"{{"error":{:?}}}"#, e);
@@ -1382,7 +1549,8 @@ async fn ned_suggestion_files_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
         _ => {
             let body = r#"{"error":"unexpected conductor response"}"#.to_string();
@@ -1390,7 +1558,8 @@ async fn ned_suggestion_files_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "application/json")],
                 body.into_bytes(),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -1407,7 +1576,10 @@ async fn templates_handler(_session: Session) -> axum::response::Response {
 
     let items: Vec<TemplateInfo> = site_templates::available_templates()
         .into_iter()
-        .map(|t| TemplateInfo { name: t.name, description: t.description })
+        .map(|t| TemplateInfo {
+            name: t.name,
+            description: t.description,
+        })
         .collect();
 
     let json = serde_json::to_vec(&items).unwrap_or_default();
@@ -1450,19 +1622,22 @@ async fn font_moods_handler(_session: Session) -> axum::Json<serde_json::Value> 
 }
 
 async fn palette_types_handler(_session: Session) -> axum::Json<serde_json::Value> {
-    let types: Vec<serde_json::Value> = site_templates::PaletteType::all().iter().map(|p| {
-        let desc = match p {
-            site_templates::PaletteType::Warm => "Analogous — seed and neighbors",
-            site_templates::PaletteType::Cool => "Complementary — seed and opposite",
-            site_templates::PaletteType::Bold => "Split-complementary — high energy",
-        };
-        serde_json::json!({
-            "id": p.to_string().to_lowercase(),
-            "label": p.to_string(),
-            "description": desc,
-            "hue_offsets": p.hue_offsets()
+    let types: Vec<serde_json::Value> = site_templates::PaletteType::all()
+        .iter()
+        .map(|p| {
+            let desc = match p {
+                site_templates::PaletteType::Warm => "Analogous — seed and neighbors",
+                site_templates::PaletteType::Cool => "Complementary — seed and opposite",
+                site_templates::PaletteType::Bold => "Split-complementary — high energy",
+            };
+            serde_json::json!({
+                "id": p.to_string().to_lowercase(),
+                "label": p.to_string(),
+                "description": desc,
+                "hue_offsets": p.hue_offsets()
+            })
         })
-    }).collect();
+        .collect();
     axum::Json(serde_json::json!(types))
 }
 
@@ -1530,7 +1705,9 @@ async fn scaffold_handler(
         }
         Ok(conductor::Response::Error(e)) => axum::Json(EditResponse::err(e)),
         Err(e) => axum::Json(EditResponse::err(e)),
-        _ => axum::Json(EditResponse::err("unexpected conductor response".to_string())),
+        _ => axum::Json(EditResponse::err(
+            "unexpected conductor response".to_string(),
+        )),
     }
 }
 
@@ -1551,10 +1728,12 @@ async fn links_handler(
     // This allows the picker to show options from the correct collection
     // (e.g., author options when editing a post's author slot).
     let effective_stem = if let Some(slot) = &query.slot {
-        match state.conductor.send(&conductor::Command::ResolveLinkTargetStem {
-            source_stem: query.schema.clone(),
-            slot: slot.clone(),
-        }) {
+        match state
+            .conductor
+            .send(&conductor::Command::ResolveLinkTargetStem {
+                source_stem: query.schema.clone(),
+                slot: slot.clone(),
+            }) {
             Ok(conductor::Response::LinkTargetStem(Some(target_stem))) => target_stem,
             // If resolution fails or returns None, fall back to the source schema
             _ => query.schema.clone(),
@@ -1568,16 +1747,31 @@ async fn links_handler(
     }) {
         Ok(conductor::Response::LinkOptions(options)) => {
             #[derive(serde::Serialize)]
-            struct LinkOptionJson { text: String, href: String }
-            let mapped: Vec<LinkOptionJson> = options.into_iter()
-                .map(|o| LinkOptionJson { text: o.title, href: o.url })
+            struct LinkOptionJson {
+                text: String,
+                href: String,
+            }
+            let mapped: Vec<LinkOptionJson> = options
+                .into_iter()
+                .map(|o| LinkOptionJson {
+                    text: o.title,
+                    href: o.url,
+                })
                 .collect();
             let json = serde_json::to_vec(&mapped).unwrap_or_default();
-            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
         }
-        _ => {
-            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], b"[]".to_vec()).into_response()
-        }
+        _ => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            b"[]".to_vec(),
+        )
+            .into_response(),
     }
 }
 
@@ -1596,21 +1790,33 @@ struct CreateContentResponse {
     error: Option<String>,
 }
 
-async fn schemas_handler(_session: Session, State(state): State<AppState>) -> axum::response::Response {
+async fn schemas_handler(
+    _session: Session,
+    State(state): State<AppState>,
+) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
     match state.conductor.send(&conductor::Command::ListSchemas) {
         Ok(conductor::Response::SchemaList(schemas)) => {
-            let stems: Vec<String> = schemas.into_iter()
+            let stems: Vec<String> = schemas
+                .into_iter()
                 .map(|(stem, _src)| stem)
                 .filter(|s| s != "index" && !s.ends_with("/index"))
                 .collect();
             let json = serde_json::to_vec(&stems).unwrap_or_default();
-            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
         }
-        _ => {
-            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], b"[]".to_vec()).into_response()
-        }
+        _ => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            b"[]".to_vec(),
+        )
+            .into_response(),
     }
 }
 
@@ -1625,19 +1831,36 @@ async fn schema_for_handler(
     Query(q): Query<SchemaForQuery>,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
-    match state.conductor.send(&conductor::Command::SchemaUrlForPage { page_url: q.page.clone() }) {
+    match state.conductor.send(&conductor::Command::SchemaUrlForPage {
+        page_url: q.page.clone(),
+    }) {
         Ok(conductor::Response::SchemaUrl(Some(url))) => {
             let json = format!(r#"{{"url":{:?}}}"#, url);
-            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
         }
         Ok(conductor::Response::SchemaUrl(None)) => {
             let msg = format!("no schema for {}", q.page);
             let json = format!(r#"{{"error":{:?}}}"#, msg);
-            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
         }
         Ok(conductor::Response::Error(e)) => {
             let json = format!(r#"{{"error":{:?}}}"#, e);
-            (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected response").into_response(),
     }
@@ -1654,19 +1877,36 @@ async fn page_for_handler(
     Query(q): Query<PageForQuery>,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
-    match state.conductor.send(&conductor::Command::PageUrlForSchema { schema_url: q.schema.clone() }) {
+    match state.conductor.send(&conductor::Command::PageUrlForSchema {
+        schema_url: q.schema.clone(),
+    }) {
         Ok(conductor::Response::PageUrl(Some(url))) => {
             let json = format!(r#"{{"url":{:?}}}"#, url);
-            (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
         }
         Ok(conductor::Response::PageUrl(None)) => {
             let msg = format!("no page for {}", q.schema);
             let json = format!(r#"{{"error":{:?}}}"#, msg);
-            (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
         }
         Ok(conductor::Response::Error(e)) => {
             let json = format!(r#"{{"error":{:?}}}"#, e);
-            (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "application/json")], json).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                json,
+            )
+                .into_response()
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "unexpected response").into_response(),
     }
@@ -1707,10 +1947,7 @@ async fn create_content_handler(
     }
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     // Subscribe before the 101 response goes out: subscribing inside the
     // upgrade callback would lose broadcasts sent between the handshake and
     // the callback running. Public route (ADR-054/055) — no `Session`.
@@ -1733,7 +1970,8 @@ async fn editorial_ws_handler(
     }
     // Subscribe before the 101 response goes out (see `ws_handler`).
     let rx = state.channels.editorial.subscribe();
-    ws.on_upgrade(move |socket| handle_ws(socket, rx)).into_response()
+    ws.on_upgrade(move |socket| handle_ws(socket, rx))
+        .into_response()
 }
 
 /// 403 response for a WebSocket upgrade whose `Origin` does not match `Host`.
@@ -1824,7 +2062,8 @@ async fn login_handler(
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "text/plain")],
             "Invalid or expired token",
-        ).into_response();
+        )
+            .into_response();
     }
     let cookie = accounts::set_session_cookie_str(&q.token);
     (
@@ -1834,7 +2073,8 @@ async fn login_handler(
             (header::SET_COOKIE, cookie),
         ],
         "",
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// What a browser WebSocket should do with one result from the broadcast receiver.
@@ -1891,7 +2131,8 @@ async fn lsp_ws_handler(
     if !origin_matches_host(&headers) {
         return cross_origin_ws_refused();
     }
-    ws.on_upgrade(move |socket| handle_lsp_ws(socket, state.site_dir)).into_response()
+    ws.on_upgrade(move |socket| handle_lsp_ws(socket, state.site_dir))
+        .into_response()
 }
 
 async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
@@ -1911,9 +2152,8 @@ async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
         conductor::ConductorClient::connect(&conductor::socket_url(&site_dir))
             .expect("conductor socket unreachable after ensure_conductor failed")
     });
-    let (service, lsp_socket) = LspService::new(|client| {
-        PresembleLsp::new(client, site_dir, conductor_client)
-    });
+    let (service, lsp_socket) =
+        LspService::new(|client| PresembleLsp::new(client, site_dir, conductor_client));
 
     // Split lsp_side for the Server (needs separate AsyncRead and AsyncWrite).
     let (lsp_read, lsp_write) = tokio::io::split(lsp_side);
@@ -1986,17 +2226,17 @@ async fn render_schema_url_directly(
             let final_bytes = inject_reload_script(html.into_bytes(), serve_ui::Audience::Editor);
             (StatusCode::OK, HTML_PAGE_HEADERS, final_bytes).into_response()
         }
-        Ok(conductor::Response::Error(e)) => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                format!("schema render error: {e}").into_bytes(),
-            ).into_response()
-        }
+        Ok(conductor::Response::Error(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("schema render error: {e}").into_bytes(),
+        )
+            .into_response(),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "unexpected conductor response",
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -2028,21 +2268,30 @@ async fn file_handler(
     // The published version is read through the pointer and held until the
     // response is built, so a republish cannot remove it from under us.
     let published = state.published.current();
-    let served_dir = if editor { &state.editorial_dir } else { &published.dir };
+    let served_dir = if editor {
+        &state.editorial_dir
+    } else {
+        &published.dir
+    };
 
     // Check for build errors before attempting to serve from disk: editors
     // only. A reader gets the published page, or a plain 404.
     // Normalise: look up with and without trailing slash.
     if editor {
-        let errors: HashMap<String, Vec<String>> = match state.conductor.send(&conductor::Command::GetBuildErrors) {
-            Ok(conductor::Response::BuildErrors(e)) => e,
-            _ => HashMap::new(),
-        };
+        let errors: HashMap<String, Vec<String>> =
+            match state.conductor.send(&conductor::Command::GetBuildErrors) {
+                Ok(conductor::Response::BuildErrors(e)) => e,
+                _ => HashMap::new(),
+            };
         let bare = path.trim_end_matches('/');
         let key = if bare.is_empty() { "/" } else { bare };
         if let Some(messages) = errors.get(key).or_else(|| errors.get(&format!("{key}/"))) {
             let html = render_error_page(path, messages, audience);
-            return (StatusCode::UNPROCESSABLE_ENTITY, HTML_PAGE_HEADERS, html.into_bytes())
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                HTML_PAGE_HEADERS,
+                html.into_bytes(),
+            )
                 .into_response();
         }
     }
@@ -2050,11 +2299,19 @@ async fn file_handler(
     // The path is public input: plain names only, and whatever it names must
     // stay inside the output directory (a symlink out of it does not count).
     if editorial_types::plain_url_segments(path).is_err() {
-        return (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], b"not found".to_vec())
+        return (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain")],
+            b"not found".to_vec(),
+        )
             .into_response();
     }
     let relative = path.trim_start_matches('/');
-    let relative = if relative.is_empty() { "index.html" } else { relative };
+    let relative = if relative.is_empty() {
+        "index.html"
+    } else {
+        relative
+    };
 
     let candidates = vec![
         served_dir.join(relative),
@@ -2077,7 +2334,8 @@ async fn file_handler(
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, content_type)],
                 bytes,
-            ).into_response();
+            )
+                .into_response();
         }
     }
 
@@ -2147,7 +2405,9 @@ fn print_available_pages(output_dir: &Path, addr: &str) {
 }
 
 fn collect_html_files(root: &Path, dir: &Path, pages: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
@@ -2236,7 +2496,9 @@ fn watch_and_rebuild(
         let first_paths: Vec<std::path::PathBuf> = loop {
             match rx.recv_timeout(Duration::from_secs(2)) {
                 Ok(Ok(event)) if is_relevant_event(&event) => {
-                    let paths: Vec<_> = event.paths.iter()
+                    let paths: Vec<_> = event
+                        .paths
+                        .iter()
                         .filter(|p| is_relevant_path(p))
                         .cloned()
                         .collect();
@@ -2277,11 +2539,7 @@ fn watch_and_rebuild(
             }
             match rx.recv_timeout(remaining) {
                 Ok(Ok(event)) if is_relevant_event(&event) => {
-                    dirty.extend(
-                        event.paths.iter()
-                            .filter(|p| is_relevant_path(p))
-                            .cloned()
-                    );
+                    dirty.extend(event.paths.iter().filter(|p| is_relevant_path(p)).cloned());
                 }
                 Ok(Ok(_)) => {} // irrelevant event kind — skip, keep draining
                 Ok(Err(_)) => {}
@@ -2297,16 +2555,20 @@ fn watch_and_rebuild(
         // The notify watcher returns absolute paths; strip the site_dir prefix
         // so the conductor can join them with its own site_dir cleanly.
         // A path outside the site (or not a plain site path) is dropped here.
-        let paths: Vec<editorial_types::SitePath> = dirty.iter()
+        let paths: Vec<editorial_types::SitePath> = dirty
+            .iter()
             .filter_map(|p| editorial_types::SitePath::from_absolute(site_dir, p).ok())
             .collect();
 
-        println!("  rebuild: {} file(s) changed [{}]",
+        println!(
+            "  rebuild: {} file(s) changed [{}]",
             dirty.len(),
-            dirty.iter()
+            dirty
+                .iter()
                 .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
                 .collect::<Vec<_>>()
-                .join(", "));
+                .join(", ")
+        );
 
         // Delegate rebuild to the conductor — it handles classification,
         // rebuild, error tracking, and emits PagesRebuilt/BuildFailed events.
@@ -2346,7 +2608,11 @@ enum AnchorJson {
     /// Derived from `(ned/slot (ned/doc-by-path "FILE") "SLOT")`
     Slot { file: String, slot: String },
     /// Derived from `(ned/nth-child (ned/slot (ned/doc-by-path "FILE") "SLOT") IDX)`
-    SlotNth { file: String, slot: String, index: usize },
+    SlotNth {
+        file: String,
+        slot: String,
+        index: usize,
+    },
     /// Derived from `(ned/nth-after (ned/heading-with-text ...) "KIND" N)` or
     /// `(ned/heading-with-text ...)` or `(ned/nth-of-kind ...)`
     Structural(editorial_types::StructuralAnchor),
@@ -2760,13 +3026,19 @@ mod tests {
     #[test]
     fn ws_step_lagged_requests_editorial_resync() {
         let step = ws_step::<EditorialMessage>(Err(broadcast::error::RecvError::Lagged(42)));
-        assert!(matches!(step, WsStep::Forward(EditorialMessage::Resync)), "got {step:?}");
+        assert!(
+            matches!(step, WsStep::Forward(EditorialMessage::Resync)),
+            "got {step:?}"
+        );
     }
 
     #[test]
     fn ws_step_lagged_requests_public_resync() {
         let step = ws_step::<PublicMessage>(Err(broadcast::error::RecvError::Lagged(42)));
-        assert!(matches!(step, WsStep::Forward(PublicMessage::Resync)), "got {step:?}");
+        assert!(
+            matches!(step, WsStep::Forward(PublicMessage::Resync)),
+            "got {step:?}"
+        );
     }
 
     #[test]
@@ -2779,9 +3051,15 @@ mod tests {
 
     #[test]
     fn ws_step_ok_forwards_editorial_message() {
-        let step = ws_step(Ok(EditorialMessage::Reload { pages: vec!["/a".to_string()], anchor: None }));
+        let step = ws_step(Ok(EditorialMessage::Reload {
+            pages: vec!["/a".to_string()],
+            anchor: None,
+        }));
         match step {
-            WsStep::Forward(EditorialMessage::Reload { pages, anchor: None }) => {
+            WsStep::Forward(EditorialMessage::Reload {
+                pages,
+                anchor: None,
+            }) => {
                 assert_eq!(pages, vec!["/a".to_string()]);
             }
             other => panic!("expected Forward(Reload), got {other:?}"),
@@ -2790,7 +3068,9 @@ mod tests {
 
     #[test]
     fn ws_step_ok_forwards_public_message() {
-        let step = ws_step(Ok(PublicMessage::Reload { pages: vec!["/a".to_string()] }));
+        let step = ws_step(Ok(PublicMessage::Reload {
+            pages: vec!["/a".to_string()],
+        }));
         match step {
             WsStep::Forward(PublicMessage::Reload { pages }) => {
                 assert_eq!(pages, vec!["/a".to_string()]);
@@ -2809,13 +3089,17 @@ mod tests {
 
     #[test]
     fn public_reload_json_has_only_type_and_pages() {
-        let msg = PublicMessage::Reload { pages: vec!["/a".to_string()] };
+        let msg = PublicMessage::Reload {
+            pages: vec!["/a".to_string()],
+        };
         assert_eq!(msg.to_json(), r#"{"type":"reload","pages":["/a"]}"#);
     }
 
     #[test]
     fn public_reload_json_escapes_double_quote() {
-        let msg = PublicMessage::Reload { pages: vec!["/bad\"path".to_string()] };
+        let msg = PublicMessage::Reload {
+            pages: vec!["/bad\"path".to_string()],
+        };
         let json = msg.to_json();
         assert_eq!(json, r#"{"type":"reload","pages":["/bad\"path"]}"#);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2833,8 +3117,14 @@ mod tests {
             pages: vec!["/a".to_string()],
             anchor: Some(test_anchor()),
         });
-        assert!(matches!(public_rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
-        assert!(matches!(editorial_rx.try_recv(), Ok(EditorialMessage::Reload { .. })));
+        assert!(matches!(
+            public_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            editorial_rx.try_recv(),
+            Ok(EditorialMessage::Reload { .. })
+        ));
     }
 
     #[test]
@@ -2847,7 +3137,10 @@ mod tests {
             Ok(PublicMessage::Reload { pages }) => assert_eq!(pages, vec!["/a".to_string()]),
             other => panic!("expected public Reload, got {other:?}"),
         }
-        assert!(matches!(editorial_rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(
+            editorial_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -2869,7 +3162,10 @@ mod tests {
 
     #[test]
     fn origin_absent_matches() {
-        assert!(origin_matches_host(&headers_with(&[("host", "127.0.0.1:3000")])));
+        assert!(origin_matches_host(&headers_with(&[(
+            "host",
+            "127.0.0.1:3000"
+        )])));
     }
 
     #[test]
@@ -2922,14 +3218,20 @@ mod tests {
 
     #[test]
     fn origin_without_host_does_not_match() {
-        assert!(!origin_matches_host(&headers_with(&[("origin", "http://127.0.0.1:3000")])));
+        assert!(!origin_matches_host(&headers_with(&[(
+            "origin",
+            "http://127.0.0.1:3000"
+        )])));
     }
 
     // ── next_backoff ─────────────────────────────────────────────────────────
 
     #[test]
     fn next_backoff_doubles_and_caps() {
-        assert_eq!(next_backoff(Duration::from_millis(250)), Duration::from_millis(500));
+        assert_eq!(
+            next_backoff(Duration::from_millis(250)),
+            Duration::from_millis(500)
+        );
         assert_eq!(next_backoff(Duration::from_secs(4)), RELAY_BACKOFF_MAX);
         assert_eq!(next_backoff(RELAY_BACKOFF_MAX), RELAY_BACKOFF_MAX);
     }
@@ -2944,7 +3246,9 @@ mod tests {
     /// GUARD: a save is not announced to anyone directly; it triggers a build.
     #[test]
     fn a_save_has_no_editorial_message() {
-        let ev = conductor::ConductorEvent::DocumentsSaved { files: vec!["content/a.md".to_string()] };
+        let ev = conductor::ConductorEvent::DocumentsSaved {
+            files: vec!["content/a.md".to_string()],
+        };
         assert!(editorial_message_of(ev).is_none());
     }
 
@@ -2979,7 +3283,10 @@ mod tests {
             error_pages: vec!["/post/broken".to_string()],
         });
         match msg {
-            EditorialMessage::Reload { pages, anchor: None } => {
+            EditorialMessage::Reload {
+                pages,
+                anchor: None,
+            } => {
                 assert_eq!(pages, vec!["/post/broken".to_string()]);
             }
             other => panic!("expected Reload without anchor, got {other:?}"),
@@ -2988,7 +3295,9 @@ mod tests {
 
     #[test]
     fn editorial_message_for_cursor_scroll_to_is_scroll_to() {
-        let msg = editorial_message_for(conductor::ConductorEvent::CursorScrollTo { anchor: test_anchor() });
+        let msg = editorial_message_for(conductor::ConductorEvent::CursorScrollTo {
+            anchor: test_anchor(),
+        });
         match msg {
             EditorialMessage::ScrollTo { anchor } => assert_eq!(anchor, test_anchor()),
             other => panic!("expected ScrollTo, got {other:?}"),
@@ -3009,7 +3318,9 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             preview: None,
         };
-        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionCreated { suggestion: Box::new(suggestion) });
+        let msg = editorial_message_for(conductor::ConductorEvent::NedSuggestionCreated {
+            suggestion: Box::new(suggestion),
+        });
         match msg {
             EditorialMessage::SuggestionListChanged { file } => {
                 assert_eq!(file.as_deref(), Some("content/post/a.md"));
@@ -3041,7 +3352,10 @@ mod tests {
             pages: vec!["/post/a".to_string()],
         });
         match msg {
-            EditorialMessage::Reload { pages, anchor: None } => {
+            EditorialMessage::Reload {
+                pages,
+                anchor: None,
+            } => {
                 assert_eq!(pages, vec!["/post/a".to_string()]);
             }
             other => panic!("expected Reload without anchor, got {other:?}"),
@@ -3079,15 +3393,27 @@ mod tests {
 
     #[test]
     fn reload_message_full_rebuild_json() {
-        let msg = EditorialMessage::Reload { pages: vec![], anchor: None };
-        assert_eq!(msg.to_json(), r#"{"type":"reload","pages":[],"primary":""}"#);
+        let msg = EditorialMessage::Reload {
+            pages: vec![],
+            anchor: None,
+        };
+        assert_eq!(
+            msg.to_json(),
+            r#"{"type":"reload","pages":[],"primary":""}"#
+        );
     }
 
     #[test]
     fn reload_message_single_page_json() {
-        let msg = EditorialMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: None };
+        let msg = EditorialMessage::Reload {
+            pages: vec!["/article/hello".to_string()],
+            anchor: None,
+        };
         let json = msg.to_json();
-        assert_eq!(json, r#"{"type":"reload","pages":["/article/hello"],"primary":"/article/hello"}"#);
+        assert_eq!(
+            json,
+            r#"{"type":"reload","pages":["/article/hello"],"primary":"/article/hello"}"#
+        );
     }
 
     #[test]
@@ -3102,7 +3428,10 @@ mod tests {
 
     #[test]
     fn reload_message_escapes_double_quote_in_url() {
-        let msg = EditorialMessage::Reload { pages: vec!["/bad\"path".to_string()], anchor: None };
+        let msg = EditorialMessage::Reload {
+            pages: vec!["/bad\"path".to_string()],
+            anchor: None,
+        };
         let json = msg.to_json();
         assert!(json.contains(r#"\/bad\"path"#) || json.contains(r#"/bad\""#));
     }
@@ -3122,11 +3451,23 @@ mod tests {
         };
         let json = msg.to_json();
         assert!(json.contains(r#""anchor":"#), "should have anchor field");
-        assert!(json.contains(r#""kind":"structural""#), "anchor kind should be structural");
-        assert!(json.contains(r#""file":"content/post/hello.md""#), "should have file");
-        assert!(json.contains(r#""node-kind":"paragraph""#), "should have node-kind");
+        assert!(
+            json.contains(r#""kind":"structural""#),
+            "anchor kind should be structural"
+        );
+        assert!(
+            json.contains(r#""file":"content/post/hello.md""#),
+            "should have file"
+        );
+        assert!(
+            json.contains(r#""node-kind":"paragraph""#),
+            "should have node-kind"
+        );
         assert!(json.contains(r#""offset":2"#), "should have offset");
-        assert!(json.contains(r#""heading-text":"Why Presemble""#), "should have heading-text");
+        assert!(
+            json.contains(r#""heading-text":"Why Presemble""#),
+            "should have heading-text"
+        );
     }
 
     #[test]
@@ -3140,15 +3481,30 @@ mod tests {
         };
         let msg = EditorialMessage::ScrollTo { anchor };
         let json = msg.to_json();
-        assert!(json.contains(r#""type":"scroll""#), "should have type scroll");
-        assert!(json.contains(r#""kind":"structural""#), "anchor kind should be structural");
-        assert!(json.contains(r#""node-kind":"paragraph""#), "should have node-kind");
-        assert!(!json.contains("heading-text"), "heading-text should be absent when None");
+        assert!(
+            json.contains(r#""type":"scroll""#),
+            "should have type scroll"
+        );
+        assert!(
+            json.contains(r#""kind":"structural""#),
+            "anchor kind should be structural"
+        );
+        assert!(
+            json.contains(r#""node-kind":"paragraph""#),
+            "should have node-kind"
+        );
+        assert!(
+            !json.contains("heading-text"),
+            "heading-text should be absent when None"
+        );
     }
 
     #[test]
     fn reload_message_without_anchor_omits_field() {
-        let msg = EditorialMessage::Reload { pages: vec!["/article/hello".to_string()], anchor: None };
+        let msg = EditorialMessage::Reload {
+            pages: vec!["/article/hello".to_string()],
+            anchor: None,
+        };
         assert!(!msg.to_json().contains("anchor"));
     }
 
@@ -3160,7 +3516,10 @@ mod tests {
             serve_ui::Audience::Reader,
         );
         assert!(html.contains("/article/foo"), "should contain url path");
-        assert!(html.contains("[ERROR] title must be capitalized"), "should contain error message");
+        assert!(
+            html.contains("[ERROR] title must be capitalized"),
+            "should contain error message"
+        );
         assert!(html.contains("Build error"), "should contain heading");
     }
 
@@ -3172,20 +3531,40 @@ mod tests {
             serve_ui::Audience::Reader,
         );
         assert!(html.contains("/bad&lt;path&gt;"), "url should be escaped");
-        assert!(html.contains("message with &lt;b&gt;html&lt;/b&gt;"), "message should be escaped");
+        assert!(
+            html.contains("message with &lt;b&gt;html&lt;/b&gt;"),
+            "message should be escaped"
+        );
     }
 
     #[test]
     fn render_error_page_for_reader_includes_public_reload_script_only() {
-        let html = render_error_page("/article/foo", &["some error".to_string()], serve_ui::Audience::Reader);
-        assert!(html.contains("/_presemble/ws"), "should include live reload script");
-        assert!(!html.contains("editorial-ws"), "reader page must not get the editor script");
+        let html = render_error_page(
+            "/article/foo",
+            &["some error".to_string()],
+            serve_ui::Audience::Reader,
+        );
+        assert!(
+            html.contains("/_presemble/ws"),
+            "should include live reload script"
+        );
+        assert!(
+            !html.contains("editorial-ws"),
+            "reader page must not get the editor script"
+        );
     }
 
     #[test]
     fn render_error_page_for_editor_includes_editorial_script() {
-        let html = render_error_page("/article/foo", &["some error".to_string()], serve_ui::Audience::Editor);
-        assert!(html.contains("/_presemble/editorial-ws"), "should include editor script");
+        let html = render_error_page(
+            "/article/foo",
+            &["some error".to_string()],
+            serve_ui::Audience::Editor,
+        );
+        assert!(
+            html.contains("/_presemble/editorial-ws"),
+            "should include editor script"
+        );
     }
 
     // ── derive_anchor tests ──────────────────────────────────────────────────
@@ -3226,7 +3605,9 @@ mod tests {
         let sel = r#"(ned/body-at (ned/doc-by-path "posts/foo.md") 2)"#;
         assert_eq!(
             derive_anchor(sel),
-            AnchorJson::Doc { file: Some("posts/foo.md".to_string()) },
+            AnchorJson::Doc {
+                file: Some("posts/foo.md".to_string())
+            },
         );
     }
 
@@ -3262,12 +3643,17 @@ mod tests {
             slot: "title".to_string(),
         };
         let json = serde_json::to_string(&anchor).unwrap();
-        assert_eq!(json, r#"{"kind":"slot","file":"posts/foo.md","slot":"title"}"#);
+        assert_eq!(
+            json,
+            r#"{"kind":"slot","file":"posts/foo.md","slot":"title"}"#
+        );
     }
 
     #[test]
     fn anchor_json_doc_with_file_serializes_correctly() {
-        let anchor = AnchorJson::Doc { file: Some("posts/foo.md".to_string()) };
+        let anchor = AnchorJson::Doc {
+            file: Some("posts/foo.md".to_string()),
+        };
         let json = serde_json::to_string(&anchor).unwrap();
         assert_eq!(json, r#"{"kind":"doc","file":"posts/foo.md"}"#);
     }
@@ -3339,7 +3725,10 @@ mod tests {
             index: 1,
         };
         let json = serde_json::to_string(&anchor).unwrap();
-        assert_eq!(json, r#"{"kind":"slot-nth","file":"content/index.md","slot":"pitch","index":1}"#);
+        assert_eq!(
+            json,
+            r#"{"kind":"slot-nth","file":"content/index.md","slot":"pitch","index":1}"#
+        );
     }
 
     // ── Structural anchor tests ──────────────────────────────────────────────
@@ -3454,7 +3843,8 @@ mod tests {
     /// The three structural selection forms, built over `children_fn`
     /// (`ned/children` or `ned/blocks`), paired with their expected anchors.
     fn structural_forms(children_fn: &str) -> Vec<(String, AnchorJson)> {
-        let slot = format!(r#"({children_fn} (ned/slot (ned/doc-by-path "content/page.md") "body"))"#);
+        let slot =
+            format!(r#"({children_fn} (ned/slot (ned/doc-by-path "content/page.md") "body"))"#);
         vec![
             (
                 format!(r#"(ned/nth-after (ned/heading-with-text {slot} "Intro") "paragraph" 1)"#),
@@ -3500,7 +3890,8 @@ mod tests {
             }
         );
         // Regression: (ned/nth-child (ned/slot ...) N) → SlotNth (not Structural)
-        let nth_sel = r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "pitch") 2)"#;
+        let nth_sel =
+            r#"(ned/nth-child (ned/slot (ned/doc-by-path "content/index.md") "pitch") 2)"#;
         assert_eq!(
             derive_anchor(nth_sel),
             AnchorJson::SlotNth {
@@ -3546,7 +3937,8 @@ mod tests {
             id: editorial_types::SuggestionId::from("sug-00000000roundtrip".to_string()),
             author: editorial_types::Author::Claude,
             file: editorial_types::ContentPath::parse("content/post/hello.md").expect("valid"),
-            selection: r#"(ned/slot (ned/doc-by-path "content/post/hello.md") "title")"#.to_string(),
+            selection: r#"(ned/slot (ned/doc-by-path "content/post/hello.md") "title")"#
+                .to_string(),
             mutation: editorial_types::NedMutation::SetText("New Title".to_string()),
             workspace_hash: "abc123".to_string(),
             reason: "Clearer title".to_string(),
@@ -3561,7 +3953,10 @@ mod tests {
         assert_eq!(json_val["reason"], "Clearer title");
         assert_eq!(json_val["workspace_hash"], "abc123");
         // mutation serializes as tagged variant
-        assert_eq!(json_val["mutation"], serde_json::json!({"SetText": "New Title"}));
+        assert_eq!(
+            json_val["mutation"],
+            serde_json::json!({"SetText": "New Title"})
+        );
         // anchor is derived from the selection
         assert_eq!(json_val["anchor"]["kind"], "slot");
         assert_eq!(json_val["anchor"]["file"], "content/post/hello.md");
@@ -3615,13 +4010,11 @@ mod tests {
         std::fs::write(
             root.join("schemas/test/item.md"),
             "# Title {#title}\noccurs\n: exactly once\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").unwrap();
         // Content file so the NodeStore has a real document to select from.
-        std::fs::write(
-            root.join("content/test/doc.md"),
-            "# Test Title\n",
-        ).unwrap();
+        std::fs::write(root.join("content/test/doc.md"), "# Test Title\n").unwrap();
 
         let client = start_conductor_for(root, |_| {});
         (client, tmp)
@@ -3636,9 +4029,7 @@ mod tests {
         use std::sync::Arc;
 
         // Use Conductor::new so populate_node_store runs automatically.
-        let c = Arc::new(
-            conductor::Conductor::new(root.to_path_buf()).expect("conductor"),
-        );
+        let c = Arc::new(conductor::Conductor::new(root.to_path_buf()).expect("conductor"));
 
         // Unique socket URL (use temp dir hash to avoid collision with other tests)
         let url = {
@@ -3714,9 +4105,8 @@ mod tests {
     #[cfg(test)]
     fn test_app(client: conductor::ConductorClient) -> axum::Router {
         let channels = BrowserChannels::new(4);
-        let session_store = Arc::new(
-            accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
-        ) as Arc<dyn SessionStore>;
+        let session_store = Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY)))
+            as Arc<dyn SessionStore>;
         let state = AppState {
             editorial_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
             published: PublishedSite::fixed(std::path::PathBuf::from("/tmp/presemble-test-out")),
@@ -3730,11 +4120,26 @@ mod tests {
             .route("/_presemble/conflicts", get(conflicts_handler))
             .route("/_presemble/apply", post(apply_handler))
             .route("/_presemble/block-edit", post(block_edit_handler))
-            .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
-            .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
-            .route("/_presemble/ned-suggestions/accept", post(ned_suggestions_accept_handler))
-            .route("/_presemble/ned-suggestions/reject", post(ned_suggestions_reject_handler))
-            .route("/_presemble/ned-suggestion-files", get(ned_suggestion_files_handler))
+            .route(
+                "/_presemble/ned-suggestions",
+                post(ned_suggestions_create_handler),
+            )
+            .route(
+                "/_presemble/ned-suggestions",
+                get(ned_suggestions_list_handler),
+            )
+            .route(
+                "/_presemble/ned-suggestions/accept",
+                post(ned_suggestions_accept_handler),
+            )
+            .route(
+                "/_presemble/ned-suggestions/reject",
+                post(ned_suggestions_reject_handler),
+            )
+            .route(
+                "/_presemble/ned-suggestion-files",
+                get(ned_suggestion_files_handler),
+            )
             .with_state(state)
     }
 
@@ -3766,7 +4171,10 @@ mod tests {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, val)
     }
@@ -3789,7 +4197,9 @@ mod tests {
         let (status, val) =
             post_block_edit(&app, request("Test Title", "Better Title", "suggest")).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{val}");
-        let id = val["done"]["suggestion-created"]["id"].as_str().expect("id");
+        let id = val["done"]["suggestion-created"]["id"]
+            .as_str()
+            .expect("id");
         assert!(id.starts_with("sug-"), "{val}");
 
         // The suggestion is stored with its preview.
@@ -3802,8 +4212,10 @@ mod tests {
                 .body(axum::body::Body::empty())
                 .unwrap();
             let resp = app.clone().oneshot(req).await.unwrap();
-            let bytes =
-                http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+            let bytes = http_body_util::BodyExt::collect(resp.into_body())
+                .await
+                .unwrap()
+                .to_bytes();
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
         };
         assert_eq!(list.as_array().map(Vec::len), Some(1), "{list}");
@@ -3815,8 +4227,7 @@ mod tests {
         assert!(val["done"]["applied"]["pages"].is_array(), "{val}");
 
         // A stale base is refused with a 200 and a typed cause.
-        let (status, val) =
-            post_block_edit(&app, request("Test Title", "Again", "apply")).await;
+        let (status, val) = post_block_edit(&app, request("Test Title", "Again", "apply")).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{val}");
         assert_eq!(val["refused"]["cause"], "drifted", "{val}");
 
@@ -3876,17 +4287,26 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let list = list.as_array().expect("array");
         assert_eq!(list.len(), 2, "{list:?}");
-        let with = list.iter().find(|s| s["reason"] != "no preview").expect("block-edit one");
+        let with = list
+            .iter()
+            .find(|s| s["reason"] != "no preview")
+            .expect("block-edit one");
         assert_eq!(
             with["preview"],
             serde_json::json!({"base": {"markdown": "Test Title"}, "proposed": {"markdown": "Better Title"}}),
             "{with}"
         );
-        let without = list.iter().find(|s| s["reason"] == "no preview").expect("plain one");
+        let without = list
+            .iter()
+            .find(|s| s["reason"] == "no preview")
+            .expect("plain one");
         assert!(without.get("preview").is_none(), "{without}");
     }
 
@@ -3914,11 +4334,17 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val["ok"], true, "expected ok:true, got: {val}");
-        assert!(val["id"].as_str().is_some_and(|s| s.starts_with("sug-")),
-            "expected id starting with sug-, got: {}", val["id"]);
+        assert!(
+            val["id"].as_str().is_some_and(|s| s.starts_with("sug-")),
+            "expected id starting with sug-, got: {}",
+            val["id"]
+        );
     }
 
     #[tokio::test]
@@ -3945,9 +4371,16 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(val, serde_json::json!({"ok": true, "alreadyInPlace": true}), "{val}");
+        assert_eq!(
+            val,
+            serde_json::json!({"ok": true, "alreadyInPlace": true}),
+            "{val}"
+        );
     }
 
     #[test]
@@ -3959,7 +4392,10 @@ mod tests {
             EditorialMessage::Conflict { file } => assert_eq!(file, "content/post/a.md"),
             other => panic!("expected Conflict, got {other:?}"),
         }
-        assert_eq!(msg.to_json(), r#"{"type":"conflict","file":"content/post/a.md"}"#);
+        assert_eq!(
+            msg.to_json(),
+            r#"{"type":"conflict","file":"content/post/a.md"}"#
+        );
     }
 
     /// POST (optionally with a JSON body) and parse the JSON answer.
@@ -3981,7 +4417,10 @@ mod tests {
             None => axum::body::Body::empty(),
         };
         let resp = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -3993,7 +4432,9 @@ mod tests {
         // An unsaved edit, then the editor writes the file: a conflict.
         let program = r#"(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))) "Edited")"#;
         client
-            .send(&conductor::Command::ApplyNedProgram { program: program.to_string() })
+            .send(&conductor::Command::ApplyNedProgram {
+                program: program.to_string(),
+            })
             .unwrap();
         client
             .send(&conductor::Command::DocumentSaved {
@@ -4009,7 +4450,10 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let listed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(listed, serde_json::json!(["content/test/doc.md"]));
 
@@ -4017,8 +4461,17 @@ mod tests {
         let refused = post_json_body(&app, "/_presemble/save-all", None).await;
         assert_eq!(refused["ok"], false, "{refused}");
         assert_eq!(refused["needsConfirmation"], true, "{refused}");
-        assert_eq!(refused["conflicts"], serde_json::json!(["content/test/doc.md"]), "{refused}");
-        assert!(refused["error"].as_str().is_some_and(|e| e.contains("content/test/doc.md")), "{refused}");
+        assert_eq!(
+            refused["conflicts"],
+            serde_json::json!(["content/test/doc.md"]),
+            "{refused}"
+        );
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("content/test/doc.md")),
+            "{refused}"
+        );
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("content/test/doc.md")).unwrap(),
             "# Test Title\n"
@@ -4032,7 +4485,11 @@ mod tests {
         )
         .await;
         assert_eq!(saved["ok"], true, "{saved}");
-        assert!(std::fs::read_to_string(tmp.path().join("content/test/doc.md")).unwrap().contains("Edited"));
+        assert!(
+            std::fs::read_to_string(tmp.path().join("content/test/doc.md"))
+                .unwrap()
+                .contains("Edited")
+        );
     }
 
     #[tokio::test]
@@ -4055,15 +4512,17 @@ mod tests {
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val["ok"], false, "{val}");
         assert_eq!(val["step"], 2, "{val}");
         assert_eq!(val["origin"], "ned/delete", "{val}");
         assert_eq!(val["cause"], "Unresolved", "{val}");
         assert_eq!(
-            val["error"],
-            "step 2 (ned/delete): the address matches no node in a live document",
+            val["error"], "step 2 (ned/delete): the address matches no node in a live document",
             "{val}"
         );
     }
@@ -4073,8 +4532,9 @@ mod tests {
         use tower::ServiceExt;
 
         let file = "content/test/doc.md";
-        let selection =
-            format!(r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "{file}") "title")))"#);
+        let selection = format!(
+            r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "{file}") "title")))"#
+        );
         let create_body = serde_json::json!({
             "file": file,
             "selection": selection,
@@ -4092,7 +4552,9 @@ mod tests {
             .uri("/_presemble/ned-suggestions")
             .header("content-type", "application/json")
             .header("cookie", test_session_cookie())
-            .body(axum::body::Body::from(serde_json::to_vec(&create_body).unwrap()))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&create_body).unwrap(),
+            ))
             .unwrap();
         app.clone().oneshot(create_req).await.unwrap();
 
@@ -4105,7 +4567,10 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(list_req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let arr = val.as_array().expect("expected array");
         assert_eq!(arr.len(), 1, "expected 1 suggestion");
@@ -4131,7 +4596,10 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val, serde_json::json!([]), "expected empty array");
     }
@@ -4158,9 +4626,8 @@ mod tests {
         // Build app from a shared Arc so the state (and conductor) is accessible after oneshot.
         let channels = BrowserChannels::new(4);
         let conductor = std::sync::Arc::new(client);
-        let session_store = Arc::new(
-            accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
-        ) as Arc<dyn SessionStore>;
+        let session_store = Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY)))
+            as Arc<dyn SessionStore>;
         let state = AppState {
             editorial_dir: std::path::PathBuf::from("/tmp/presemble-test-out"),
             published: PublishedSite::fixed(std::path::PathBuf::from("/tmp/presemble-test-out")),
@@ -4170,11 +4637,26 @@ mod tests {
             session_store,
         };
         let app = Router::new()
-            .route("/_presemble/ned-suggestions", post(ned_suggestions_create_handler))
-            .route("/_presemble/ned-suggestions", get(ned_suggestions_list_handler))
-            .route("/_presemble/ned-suggestions/accept", post(ned_suggestions_accept_handler))
-            .route("/_presemble/ned-suggestions/reject", post(ned_suggestions_reject_handler))
-            .route("/_presemble/ned-suggestion-files", get(ned_suggestion_files_handler))
+            .route(
+                "/_presemble/ned-suggestions",
+                post(ned_suggestions_create_handler),
+            )
+            .route(
+                "/_presemble/ned-suggestions",
+                get(ned_suggestions_list_handler),
+            )
+            .route(
+                "/_presemble/ned-suggestions/accept",
+                post(ned_suggestions_accept_handler),
+            )
+            .route(
+                "/_presemble/ned-suggestions/reject",
+                post(ned_suggestions_reject_handler),
+            )
+            .route(
+                "/_presemble/ned-suggestion-files",
+                get(ned_suggestion_files_handler),
+            )
             .with_state(state);
 
         let body = serde_json::json!({"id": id});
@@ -4186,26 +4668,40 @@ mod tests {
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = app.oneshot(accept_req).await.unwrap();
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // Accept returns {ok: true} with no status field — the browser refetches the list.
         assert_eq!(val["ok"], true, "accept must return ok:true, got: {val}");
-        assert!(val.get("status").is_none(), "response must not contain a status field: {val}");
+        assert!(
+            val.get("status").is_none(),
+            "response must not contain a status field: {val}"
+        );
 
         // Follow-up via conductor directly: suggestion must be Accepted or Stale (conductor took one path).
-        let list_result = conductor.send(&conductor::Command::GetNedSuggestions {
-            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
-        }).unwrap();
+        let list_result = conductor
+            .send(&conductor::Command::GetNedSuggestions {
+                file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
+            })
+            .unwrap();
         let suggestions = match list_result {
             conductor::Response::NedSuggestions(s) => s,
             other => panic!("expected NedSuggestions, got: {other:?}"),
         };
-        let sug = suggestions.iter().find(|s| s.id.to_string() == id)
+        let sug = suggestions
+            .iter()
+            .find(|s| s.id.to_string() == id)
             .expect("suggestion must still exist after accept");
         assert!(
             matches!(sug.status, editorial_types::NedSuggestionStatus::Accepted)
-                || matches!(sug.status, editorial_types::NedSuggestionStatus::Stale { .. }),
-            "suggestion status must be Accepted or Stale after accept, got: {:?}", sug.status
+                || matches!(
+                    sug.status,
+                    editorial_types::NedSuggestionStatus::Stale { .. }
+                ),
+            "suggestion status must be Accepted or Stale after accept, got: {:?}",
+            sug.status
         );
     }
 
@@ -4236,11 +4732,16 @@ mod tests {
             .uri("/_presemble/ned-suggestions/reject")
             .header("content-type", "application/json")
             .header("cookie", test_session_cookie())
-            .body(axum::body::Body::from(serde_json::to_vec(&reject_body).unwrap()))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&reject_body).unwrap(),
+            ))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(val["ok"], true, "reject should return ok:true; got {val}");
 
@@ -4253,10 +4754,17 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let list_resp = app.oneshot(list_req).await.unwrap();
-        let list_bytes = http_body_util::BodyExt::collect(list_resp.into_body()).await.unwrap().to_bytes();
+        let list_bytes = http_body_util::BodyExt::collect(list_resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let list_val: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
         let arr = list_val.as_array().expect("expected array");
-        assert_eq!(arr.len(), 1, "suggestion should still be returned (all statuses)");
+        assert_eq!(
+            arr.len(),
+            1,
+            "suggestion should still be returned (all statuses)"
+        );
         assert_eq!(arr[0]["status"], "Rejected", "status must be Rejected");
     }
 
@@ -4274,8 +4782,10 @@ mod tests {
             reason: "files test".to_string(),
             author: editorial_types::Author::Human("tester".to_string()),
         }).unwrap();
-        assert!(matches!(create_result, conductor::Response::SuggestionCreated(_)),
-            "expected SuggestionCreated, got: {create_result:?}");
+        assert!(
+            matches!(create_result, conductor::Response::SuggestionCreated(_)),
+            "expected SuggestionCreated, got: {create_result:?}"
+        );
 
         let app = test_app(client);
 
@@ -4287,11 +4797,15 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let arr = val.as_array().expect("expected array of file paths");
         assert!(
-            arr.iter().any(|p| p.as_str() == Some("content/test/doc.md")),
+            arr.iter()
+                .any(|p| p.as_str() == Some("content/test/doc.md")),
             "content/test/doc.md must appear in ned-suggestion-files; got: {val}"
         );
     }
@@ -4323,9 +4837,15 @@ mod tests {
 
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(val["ok"], false, "expected ok:false for Existing node, got: {val}");
+        assert_eq!(
+            val["ok"], false,
+            "expected ok:false for Existing node, got: {val}"
+        );
         let err = val["error"].as_str().expect("expected error field");
         assert!(
             err.contains("Existing"),
@@ -4340,9 +4860,16 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let list_resp = app.oneshot(list_req).await.unwrap();
-        let list_bytes = http_body_util::BodyExt::collect(list_resp.into_body()).await.unwrap().to_bytes();
+        let list_bytes = http_body_util::BodyExt::collect(list_resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         let list_val: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
-        assert_eq!(list_val, serde_json::json!([]), "no suggestion should have been created");
+        assert_eq!(
+            list_val,
+            serde_json::json!([]),
+            "no suggestion should have been created"
+        );
     }
 
     // ── Auth boundary integration tests ─────────────────────────────────────
@@ -4357,9 +4884,8 @@ mod tests {
         client: conductor::ConductorClient,
         out_dir: std::path::PathBuf,
     ) -> axum::Router {
-        let session_store = Arc::new(
-            accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))
-        ) as Arc<dyn SessionStore>;
+        let session_store = Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY)))
+            as Arc<dyn SessionStore>;
         test_app_full_with_store(client, out_dir, session_store)
     }
 
@@ -4381,8 +4907,11 @@ mod tests {
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "edit without cookie must return 401");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "edit without cookie must return 401"
+        );
     }
 
     // (b) POST /_presemble/block-edit with valid cookie → not 401
@@ -4404,8 +4933,11 @@ mod tests {
             .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "edit with valid cookie must not return 401");
+        assert_ne!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "edit with valid cookie must not return 401"
+        );
     }
 
     // (c) GET /_presemble/render without cookie → 401; with cookie → not 401
@@ -4424,8 +4956,11 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "render without cookie must return 401");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "render without cookie must return 401"
+        );
     }
 
     #[tokio::test]
@@ -4444,8 +4979,11 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "render with valid cookie must not return 401");
+        assert_ne!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "render with valid cookie must not return 401"
+        );
     }
 
     // (d) GET /_schema/<x> without cookie → 401
@@ -4464,8 +5002,11 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "/_schema/ without cookie must return 401");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "/_schema/ without cookie must return 401"
+        );
     }
 
     // (e) GET / (published page) without cookie → 200
@@ -4480,7 +5021,8 @@ mod tests {
         std::fs::write(
             out_dir.join("index.html"),
             b"<html><body>Hello</body></html>",
-        ).unwrap();
+        )
+        .unwrap();
         let app = test_app_full(client, out_dir);
 
         let req = axum::http::Request::builder()
@@ -4489,8 +5031,11 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK,
-            "published page without cookie must return 200");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "published page without cookie must return 200"
+        );
     }
 
     // (f) GET /_presemble/ws upgrade without cookie → 101 (WebSocket upgrade accepted — public)
@@ -4511,14 +5056,19 @@ mod tests {
             .body(axum::body::Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "/_presemble/ws without cookie must not return 401");
+        assert_ne!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "/_presemble/ws without cookie must not return 401"
+        );
     }
 
     // ── Raw WebSocket helpers (real TCP) ────────────────────────────────────
 
     /// Serve `app` on an ephemeral port. Abort the returned handle when done.
-    async fn serve_ephemeral(app: axum::Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    async fn serve_ephemeral(
+        app: axum::Router,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -4536,7 +5086,8 @@ mod tests {
     ) -> (String, std::net::TcpStream) {
         use std::io::{Read, Write};
         let mut s = std::net::TcpStream::connect(addr).unwrap();
-        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
         let mut req = format!(
             "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUpgrade: websocket\r\n\
              Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
@@ -4574,7 +5125,12 @@ mod tests {
         use std::io::Read;
         let mut hdr = [0u8; 2];
         s.read_exact(&mut hdr)?;
-        assert_eq!(hdr[0] & 0x0f, 0x1, "expected a text frame, got opcode {:#x}", hdr[0] & 0x0f);
+        assert_eq!(
+            hdr[0] & 0x0f,
+            0x1,
+            "expected a text frame, got opcode {:#x}",
+            hdr[0] & 0x0f
+        );
         let len = match hdr[1] & 0x7f {
             126 => {
                 let mut ext = [0u8; 2];
@@ -4613,7 +5169,8 @@ mod tests {
         let state = test_state(
             client,
             tmp.path().join("output"),
-            Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))) as Arc<dyn SessionStore>,
+            Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY)))
+                as Arc<dyn SessionStore>,
             channels.clone(),
         );
         let (addr, server) = serve_ephemeral(app_router(state)).await;
@@ -4637,9 +5194,14 @@ mod tests {
         .unwrap();
         server.abort();
 
-        assert!(head.starts_with("HTTP/1.1 101"), "{path}: expected 101 upgrade, got: {head}");
-        assert_eq!(receivers_at_101, 1,
-            "{path}: handler must subscribe before the 101 response is sent");
+        assert!(
+            head.starts_with("HTTP/1.1 101"),
+            "{path}: expected 101 upgrade, got: {head}"
+        );
+        assert_eq!(
+            receivers_at_101, 1,
+            "{path}: handler must subscribe before the 101 response is sent"
+        );
         let payload = frame.expect("broadcast sent right after the handshake must arrive");
         assert_eq!(payload, r#"{"type":"resync"}"#);
     }
@@ -4669,7 +5231,8 @@ mod tests {
         let state = test_state(
             client,
             tmp.path().join("output"),
-            Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))) as Arc<dyn SessionStore>,
+            Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY)))
+                as Arc<dyn SessionStore>,
             channels.clone(),
         );
         let (addr, server) = serve_ephemeral(app_router(state)).await;
@@ -4696,11 +5259,23 @@ mod tests {
             .unwrap();
         server.abort();
 
-        assert!(public_head.starts_with("HTTP/1.1 101"), "public: {public_head}");
-        assert!(editorial_head.starts_with("HTTP/1.1 101"), "editorial: {editorial_head}");
+        assert!(
+            public_head.starts_with("HTTP/1.1 101"),
+            "public: {public_head}"
+        );
+        assert!(
+            editorial_head.starts_with("HTTP/1.1 101"),
+            "editorial: {editorial_head}"
+        );
         let editorial_frame = editorial_frame.expect("editorial frame");
-        assert!(editorial_frame.contains(r#""anchor""#), "editorial frame: {editorial_frame}");
-        assert_eq!(public_frame.expect("public frame"), r#"{"type":"reload","pages":["/a"]}"#);
+        assert!(
+            editorial_frame.contains(r#""anchor""#),
+            "editorial frame: {editorial_frame}"
+        );
+        assert_eq!(
+            public_frame.expect("public frame"),
+            r#"{"type":"reload","pages":["/a"]}"#
+        );
     }
 
     /// Serve the production router with a cookie-accepting store and attempt a
@@ -4730,30 +5305,49 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn editorial_ws_cross_origin_returns_403() {
         let head = cross_origin_upgrade_head("/_presemble/editorial-ws").await;
-        assert!(head.starts_with("HTTP/1.1 403"), "expected 403, got: {head}");
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "expected 403, got: {head}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lsp_ws_cross_origin_returns_403() {
         let head = cross_origin_upgrade_head("/_presemble/lsp").await;
-        assert!(head.starts_with("HTTP/1.1 403"), "expected 403, got: {head}");
+        assert!(
+            head.starts_with("HTTP/1.1 403"),
+            "expected 403, got: {head}"
+        );
     }
 
     // ── Editorial socket, session probe and audience injection (oneshot) ───
 
-    async fn oneshot_get(app: axum::Router, uri: &str, cookie: Option<&str>) -> axum::response::Response {
+    async fn oneshot_get(
+        app: axum::Router,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> axum::response::Response {
         use tower::ServiceExt;
         let mut req = axum::http::Request::builder().method("GET").uri(uri);
         if let Some(c) = cookie {
             req = req.header("cookie", c);
         }
-        app.oneshot(req.body(axum::body::Body::empty()).unwrap()).await.unwrap()
+        app.oneshot(req.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap()
     }
 
-    fn full_app_with_index(tmp: &tempfile::TempDir, client: conductor::ConductorClient) -> axum::Router {
+    fn full_app_with_index(
+        tmp: &tempfile::TempDir,
+        client: conductor::ConductorClient,
+    ) -> axum::Router {
         let out_dir = tmp.path().join("output");
         std::fs::create_dir_all(&out_dir).unwrap();
-        std::fs::write(out_dir.join("index.html"), b"<html><body>Hello</body></html>").unwrap();
+        std::fs::write(
+            out_dir.join("index.html"),
+            b"<html><body>Hello</body></html>",
+        )
+        .unwrap();
         test_app_full(client, out_dir)
     }
 
@@ -4772,11 +5366,18 @@ mod tests {
         // The first two were red before the fix. The percent-encoded form is a
         // GUARD: nothing decodes the path, so `%2e%2e` is a literal name that
         // does not exist, before and after the fix.
-        for uri in ["/../secret.txt", "/a/../../secret.txt", "/%2e%2e/secret.txt"] {
+        for uri in [
+            "/../secret.txt",
+            "/a/../../secret.txt",
+            "/%2e%2e/secret.txt",
+        ] {
             let resp = oneshot_get(app.clone(), uri, None).await;
             let status = resp.status();
             let text = body_string(resp).await;
-            assert!(!text.contains("SECRET-FILE"), "{uri} served a file outside the output: {text}");
+            assert!(
+                !text.contains("SECRET-FILE"),
+                "{uri} served a file outside the output: {text}"
+            );
             assert_ne!(status, axum::http::StatusCode::OK, "{uri}");
         }
     }
@@ -4784,7 +5385,12 @@ mod tests {
     #[tokio::test]
     async fn editorial_ws_no_cookie_returns_json_401() {
         let (client, tmp) = start_test_conductor();
-        let resp = oneshot_get(full_app_with_index(&tmp, client), "/_presemble/editorial-ws", None).await;
+        let resp = oneshot_get(
+            full_app_with_index(&tmp, client),
+            "/_presemble/editorial-ws",
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
         let text = body_string(resp).await;
         assert!(text.contains(r#""ok":false"#), "body: {text}");
@@ -4794,8 +5400,12 @@ mod tests {
     async fn editorial_ws_with_cookie_not_401() {
         let (client, tmp) = start_test_conductor();
         let cookie = test_session_cookie();
-        let resp =
-            oneshot_get(full_app_with_index(&tmp, client), "/_presemble/editorial-ws", Some(&cookie)).await;
+        let resp = oneshot_get(
+            full_app_with_index(&tmp, client),
+            "/_presemble/editorial-ws",
+            Some(&cookie),
+        )
+        .await;
         assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
@@ -4803,7 +5413,12 @@ mod tests {
     async fn closed_store_editorial_ws_returns_401_editing_disabled() {
         let (client, tmp) = start_test_conductor();
         let cookie = test_session_cookie();
-        let resp = oneshot_get(closed_app(&tmp, client), "/_presemble/editorial-ws", Some(&cookie)).await;
+        let resp = oneshot_get(
+            closed_app(&tmp, client),
+            "/_presemble/editorial-ws",
+            Some(&cookie),
+        )
+        .await;
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
         let text = body_string(resp).await;
         assert!(text.contains("Editing is disabled"), "body: {text}");
@@ -4812,7 +5427,12 @@ mod tests {
     #[tokio::test]
     async fn session_probe_no_cookie_returns_401() {
         let (client, tmp) = start_test_conductor();
-        let resp = oneshot_get(full_app_with_index(&tmp, client), "/_presemble/session", None).await;
+        let resp = oneshot_get(
+            full_app_with_index(&tmp, client),
+            "/_presemble/session",
+            None,
+        )
+        .await;
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 
@@ -4820,7 +5440,12 @@ mod tests {
     async fn session_probe_with_cookie_returns_200_without_principal() {
         let (client, tmp) = start_test_conductor();
         let cookie = test_session_cookie();
-        let resp = oneshot_get(full_app_with_index(&tmp, client), "/_presemble/session", Some(&cookie)).await;
+        let resp = oneshot_get(
+            full_app_with_index(&tmp, client),
+            "/_presemble/session",
+            Some(&cookie),
+        )
+        .await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let text = body_string(resp).await;
         assert_eq!(text, r#"{"ok":true}"#);
@@ -4832,12 +5457,24 @@ mod tests {
         let resp = oneshot_get(full_app_with_index(&tmp, client), "/", None).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let headers = resp.headers().clone();
-        assert_eq!(headers.get("cache-control").and_then(|v| v.to_str().ok()), Some("no-store"));
-        assert_eq!(headers.get("vary").and_then(|v| v.to_str().ok()), Some("Cookie"));
+        assert_eq!(
+            headers.get("cache-control").and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+        assert_eq!(
+            headers.get("vary").and_then(|v| v.to_str().ok()),
+            Some("Cookie")
+        );
         let text = body_string(resp).await;
         assert!(text.contains("/_presemble/ws"), "body: {text}");
-        assert!(!text.contains("editorial-ws"), "reader page must not get editor code");
-        assert!(!text.contains("dirty-buffers"), "reader page must not get editor code");
+        assert!(
+            !text.contains("editorial-ws"),
+            "reader page must not get editor code"
+        );
+        assert!(
+            !text.contains("dirty-buffers"),
+            "reader page must not get editor code"
+        );
     }
 
     // ── Readers are served the published output, never the working copy ─────
@@ -4875,8 +5512,8 @@ mod tests {
         published: PublishedSite,
         channels: BrowserChannels,
     ) -> AppState {
-        let session_store =
-            Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY))) as Arc<dyn SessionStore>;
+        let session_store = Arc::new(accounts::DevSessionStore::with_key(sk(TEST_SESSION_KEY)))
+            as Arc<dyn SessionStore>;
         AppState {
             editorial_dir: site_index::editorial_output_dir(root),
             published,
@@ -4894,7 +5531,11 @@ mod tests {
         std::fs::create_dir_all(root.join("schemas/test")).unwrap();
         std::fs::create_dir_all(root.join("content/test")).unwrap();
         std::fs::create_dir_all(root.join("templates/test")).unwrap();
-        std::fs::write(root.join("schemas/test/item.md"), "# Title {#title}\noccurs\n: exactly once\n").unwrap();
+        std::fs::write(
+            root.join("schemas/test/item.md"),
+            "# Title {#title}\noccurs\n: exactly once\n",
+        )
+        .unwrap();
         std::fs::write(root.join("templates/test/item.hiccup"), template).unwrap();
         std::fs::write(root.join("content/test/doc.md"), content).unwrap();
         let published = if startup {
@@ -4903,7 +5544,12 @@ mod tests {
             PublishedSite::fixed(site_index::output_dir(&root))
         };
         let channels = BrowserChannels::new(16);
-        let trigger = start_publisher(root.clone(), published.clone(), channels.clone(), TEST_QUIET);
+        let trigger = start_publisher(
+            root.clone(),
+            published.clone(),
+            channels.clone(),
+            TEST_QUIET,
+        );
         // What the relay does with the events the conductor publishes.
         let events_channels = channels.clone();
         let events_trigger = trigger.clone();
@@ -4911,7 +5557,15 @@ mod tests {
             dispatch_conductor_event(event, &events_channels, &events_trigger)
         }));
         let state = served_state(&root, client.clone(), published.clone(), channels.clone());
-        ServedSite { app: app_router(state), client, channels, published, trigger, root, _tmp: tmp }
+        ServedSite {
+            app: app_router(state),
+            client,
+            channels,
+            published,
+            trigger,
+            root,
+            _tmp: tmp,
+        }
     }
 
     /// Save every buffer, as the browser's "save all" does.
@@ -4956,7 +5610,11 @@ mod tests {
         None
     }
 
-    async fn get_page(site: &ServedSite, uri: &str, cookie: Option<&str>) -> (axum::http::StatusCode, String) {
+    async fn get_page(
+        site: &ServedSite,
+        uri: &str,
+        cookie: Option<&str>,
+    ) -> (axum::http::StatusCode, String) {
         let resp = oneshot_get(site.app.clone(), uri, cookie).await;
         let status = resp.status();
         (status, body_string(resp).await)
@@ -4974,7 +5632,11 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, axum::http::StatusCode::OK, "the edit is applied: {val}");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "the edit is applied: {val}"
+        );
     }
 
     #[tokio::test]
@@ -4983,9 +5645,16 @@ mod tests {
         let (status, text) = get_page(&site, "/test/doc", None).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{text}");
         assert!(text.contains("Test Title"), "{text}");
-        assert!(!text.contains("data-presemble-address"), "a reader's page carries no editor data: {text}");
+        assert!(
+            !text.contains("data-presemble-address"),
+            "a reader's page carries no editor data: {text}"
+        );
         assert!(!text.contains("data-presemble-md"), "{text}");
-        for editor_only in ["data-presemble-diagnostics", "data-presemble-path", "presemble-diagnostics"] {
+        for editor_only in [
+            "data-presemble-diagnostics",
+            "data-presemble-path",
+            "presemble-diagnostics",
+        ] {
             assert!(!text.contains(editor_only), "{editor_only}: {text}");
         }
     }
@@ -5005,11 +5674,17 @@ mod tests {
 
         // The editor sees the edit...
         let (_, editor) = get_page(&site, "/test/doc", Some(&test_session_cookie())).await;
-        assert!(editor.contains("Edited Title"), "the edit reaches the editor's page: {editor}");
+        assert!(
+            editor.contains("Edited Title"),
+            "the edit reaches the editor's page: {editor}"
+        );
         // ...a reader does not: the edit is not saved.
         let (status, reader) = get_page(&site, "/test/doc", None).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{reader}");
-        assert!(!reader.contains("Edited Title"), "an unsaved edit leaked to a reader: {reader}");
+        assert!(
+            !reader.contains("Edited Title"),
+            "an unsaved edit leaked to a reader: {reader}"
+        );
         assert!(reader.contains("Test Title"), "{reader}");
     }
 
@@ -5023,13 +5698,26 @@ mod tests {
         // What the file watcher tells the conductor.
         let changed = editorial_types::SitePath::from_absolute(&site.root, &template).unwrap();
         site.client
-            .send(&conductor::Command::FileChanged { paths: vec![changed] })
+            .send(&conductor::Command::FileChanged {
+                paths: vec![changed],
+            })
             .expect("the conductor rebuilds");
         let (status, text) = get_page(&site, "/test/doc", None).await;
-        assert_ne!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY, "a reader got the error page: {text}");
-        assert!(!text.contains("nosuchtemplate"), "a reader saw the build error: {text}");
+        assert_ne!(
+            status,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "a reader got the error page: {text}"
+        );
+        assert!(
+            !text.contains("nosuchtemplate"),
+            "a reader saw the build error: {text}"
+        );
         let (status, text) = get_page(&site, "/test/doc", Some(&test_session_cookie())).await;
-        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "{text}"
+        );
         assert!(text.contains("nosuchtemplate"), "{text}");
     }
 
@@ -5049,8 +5737,15 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["marker.html".to_string()], "the conductor wrote into the published directory");
-        assert_eq!(std::fs::metadata(&published).unwrap().modified().unwrap(), before);
+        assert_eq!(
+            names,
+            vec!["marker.html".to_string()],
+            "the conductor wrote into the published directory"
+        );
+        assert_eq!(
+            std::fs::metadata(&published).unwrap().modified().unwrap(),
+            before
+        );
     }
 
     // ── The published output and the readers' reloads follow saves ──────────
@@ -5067,14 +5762,18 @@ mod tests {
 
         let page = wait_for_reader_page(&site, "Edited Title").await;
         let page = page.expect("a saved edit reaches the readers");
-        assert!(!page.contains("data-presemble-address"), "still the published form: {page}");
+        assert!(
+            !page.contains("data-presemble-address"),
+            "still the published form: {page}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_external_file_change_updates_the_published_page() {
         let site = served_site("# Test Title\n", TITLE_TEMPLATE, true);
         // The file watcher, as `serve` runs it.
-        let (root, client, trigger) = (site.root.clone(), site.client.clone(), site.trigger.clone());
+        let (root, client, trigger) =
+            (site.root.clone(), site.client.clone(), site.trigger.clone());
         std::thread::spawn(move || watch_and_rebuild(&root, client, trigger));
         tokio::time::sleep(Duration::from_millis(1200)).await; // it settles before it watches
 
@@ -5093,7 +5792,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(600)).await;
 
         assert!(
-            matches!(public.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            matches!(
+                public.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
             "an edit in progress reloaded the readers"
         );
     }
@@ -5129,15 +5831,28 @@ mod tests {
         let mut public = site.channels.public.subscribe();
 
         // A change that makes the site unpublishable (no heading).
-        std::fs::write(site.root.join("content/test/doc.md"), "Just a paragraph, no title.\n").unwrap();
+        std::fs::write(
+            site.root.join("content/test/doc.md"),
+            "Just a paragraph, no title.\n",
+        )
+        .unwrap();
         site.trigger.fire();
 
-        assert!(wait_for(10, || site.published.attempts() > attempts).await, "the publisher ran");
+        assert!(
+            wait_for(10, || site.published.attempts() > attempts).await,
+            "the publisher ran"
+        );
         let (status, page) = get_page(&site, "/test/doc", None).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{page}");
-        assert!(page.contains("Test Title"), "readers keep the last good output: {page}");
         assert!(
-            matches!(public.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            page.contains("Test Title"),
+            "readers keep the last good output: {page}"
+        );
+        assert!(
+            matches!(
+                public.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
             "nothing changed for the readers, so no reload"
         );
     }
@@ -5145,7 +5860,10 @@ mod tests {
     #[test]
     fn urls_of_a_page_file() {
         assert_eq!(urls_of("index.html"), vec!["/".to_string()]);
-        assert_eq!(urls_of("post/a/index.html"), vec!["/post/a".to_string(), "/post/a/".to_string()]);
+        assert_eq!(
+            urls_of("post/a/index.html"),
+            vec!["/post/a".to_string(), "/post/a/".to_string()]
+        );
         assert_eq!(urls_of("style.css"), vec!["/style.css".to_string()]);
     }
 
@@ -5175,7 +5893,10 @@ mod tests {
         site.trigger.fire();
         assert!(wait_for(10, || site.published.attempts() > attempts).await);
         assert_ne!(site.published.current().dir, first, "the pointer moved");
-        assert!(wait_for(5, || !first.exists()).await, "the old version is cleaned up");
+        assert!(
+            wait_for(5, || !first.exists()).await,
+            "the old version is cleaned up"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5196,16 +5917,35 @@ mod tests {
         };
 
         for i in 1..=6 {
-            std::fs::write(site.root.join("content/test/doc.md"), format!("# Title {i}\n")).unwrap();
+            std::fs::write(
+                site.root.join("content/test/doc.md"),
+                format!("# Title {i}\n"),
+            )
+            .unwrap();
             site.trigger.fire();
-            assert!(wait_for(10, || site.published.attempts() >= attempts + i).await, "republish {i}");
+            assert!(
+                wait_for(10, || site.published.attempts() >= attempts + i).await,
+                "republish {i}"
+            );
         }
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let statuses = reader.await.expect("the reader task");
 
-        assert!(statuses.len() > 20, "the readers kept reading: {}", statuses.len());
-        let bad: Vec<_> = statuses.iter().filter(|s| **s != axum::http::StatusCode::OK).collect();
-        assert!(bad.is_empty(), "{} of {} requests were not 200: {bad:?}", bad.len(), statuses.len());
+        assert!(
+            statuses.len() > 20,
+            "the readers kept reading: {}",
+            statuses.len()
+        );
+        let bad: Vec<_> = statuses
+            .iter()
+            .filter(|s| **s != axum::http::StatusCode::OK)
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "{} of {} requests were not 200: {bad:?}",
+            bad.len(),
+            statuses.len()
+        );
         let (_, page) = get_page(&site, "/test/doc", None).await;
         assert!(page.contains("Title 6"), "{page}");
     }
@@ -5227,7 +5967,10 @@ mod tests {
         let resp = oneshot_get(full_app_with_index(&tmp, client), "/", Some(&cookie)).await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let text = body_string(resp).await;
-        assert!(text.contains("editorial-ws"), "editor page must get editor code");
+        assert!(
+            text.contains("editorial-ws"),
+            "editor page must get editor code"
+        );
     }
 
     // ── V1 auth hand-off integration tests ──────────────────────────────────
@@ -5244,7 +5987,12 @@ mod tests {
         out_dir: std::path::PathBuf,
         session_store: Arc<dyn SessionStore>,
     ) -> axum::Router {
-        app_router(test_state(client, out_dir, session_store, BrowserChannels::new(4)))
+        app_router(test_state(
+            client,
+            out_dir,
+            session_store,
+            BrowserChannels::new(4),
+        ))
     }
 
     /// An `AppState` for tests, with caller-supplied channels so tests can publish.
@@ -5273,8 +6021,8 @@ mod tests {
 
         const KEY: &str = "v1-integration-test-key-abc123-xyz";
         let mint_store = accounts::MagicLinkSessionStore::with_key(sk(KEY));
-        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY)))
-            as Arc<dyn SessionStore>;
+        let serve_store =
+            Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY))) as Arc<dyn SessionStore>;
 
         let account_id = accounts::AccountId::generate();
         let token = mint_store.mint(&account_id);
@@ -5291,15 +6039,21 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
 
-        assert_eq!(resp.status(), axum::http::StatusCode::FOUND,
-            "login with valid acct token must return 302");
-        let set_cookie = resp.headers()
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::FOUND,
+            "login with valid acct token must return 302"
+        );
+        let set_cookie = resp
+            .headers()
             .get(axum::http::header::SET_COOKIE)
             .expect("Set-Cookie header must be present")
             .to_str()
             .unwrap();
-        assert!(set_cookie.contains("presemble_session="),
-            "Set-Cookie must contain presemble_session; got: {set_cookie}");
+        assert!(
+            set_cookie.contains("presemble_session="),
+            "Set-Cookie must contain presemble_session; got: {set_cookie}"
+        );
     }
 
     // (V1-b) Token minted by MagicLinkSessionStore(K) when presented to a serve
@@ -5311,8 +6065,8 @@ mod tests {
         const KEY_A: &str = "v1-key-a-for-mint-padded-to-32-bytes";
         const KEY_B: &str = "v1-key-b-for-serve-padded-to-32-bytes";
         let mint_store = accounts::MagicLinkSessionStore::with_key(sk(KEY_A));
-        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY_B)))
-            as Arc<dyn SessionStore>;
+        let serve_store =
+            Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY_B))) as Arc<dyn SessionStore>;
 
         let account_id = accounts::AccountId::generate();
         let token = mint_store.mint(&account_id);
@@ -5329,8 +6083,11 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
 
-        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "login with token minted under wrong key must return 401");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "login with token minted under wrong key must return 401"
+        );
         // Must NOT set a cookie
         assert!(
             resp.headers().get(axum::http::header::SET_COOKIE).is_none(),
@@ -5350,8 +6107,8 @@ mod tests {
 
         const KEY: &str = "v1-public-check-key-padded-to-32-bytes";
         let mint_store = accounts::MagicLinkSessionStore::with_key(sk(KEY));
-        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY)))
-            as Arc<dyn SessionStore>;
+        let serve_store =
+            Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY))) as Arc<dyn SessionStore>;
 
         let account_id = accounts::AccountId::generate();
         let token = mint_store.mint(&account_id);
@@ -5370,9 +6127,12 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
 
-        assert_eq!(resp.status(), axum::http::StatusCode::FOUND,
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::FOUND,
             "/_presemble/login with valid token and NO prior session cookie must return 302 \
-             (proves route is public — no Session extractor gate)");
+             (proves route is public — no Session extractor gate)"
+        );
     }
 
     // (V1-d) After obtaining a session cookie via /_presemble/login (magic-link path),
@@ -5383,8 +6143,8 @@ mod tests {
 
         const KEY: &str = "v1-edit-auth-test-key-padded-to-32-bytes";
         let mint_store = accounts::MagicLinkSessionStore::with_key(sk(KEY));
-        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY)))
-            as Arc<dyn SessionStore>;
+        let serve_store =
+            Arc::new(accounts::MagicLinkSessionStore::with_key(sk(KEY))) as Arc<dyn SessionStore>;
 
         let account_id = accounts::AccountId::generate();
         let session_token = mint_store.mint(&account_id);
@@ -5403,12 +6163,17 @@ mod tests {
             .uri("/_presemble/block-edit")
             .header("content-type", "application/json")
             .header("cookie", cookie_header)
-            .body(axum::body::Body::from(serde_json::to_vec(&edit_body).unwrap()))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&edit_body).unwrap(),
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
 
-        assert_ne!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "POST /_presemble/block-edit with magic-link session cookie must not return 401");
+        assert_ne!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "POST /_presemble/block-edit with magic-link session cookie must not return 401"
+        );
     }
 
     // (V1-e) V0 regression: editorial routes still 401 without a cookie.
@@ -5417,9 +6182,9 @@ mod tests {
     async fn v1_editorial_routes_still_gate_without_cookie() {
         use tower::ServiceExt;
 
-        let serve_store = Arc::new(
-            accounts::MagicLinkSessionStore::with_key(sk("v1-gate-test-key-padded-to-32-bytes"))
-        ) as Arc<dyn SessionStore>;
+        let serve_store = Arc::new(accounts::MagicLinkSessionStore::with_key(sk(
+            "v1-gate-test-key-padded-to-32-bytes",
+        ))) as Arc<dyn SessionStore>;
 
         let (client, _tmp) = start_test_conductor();
         let out_dir = _tmp.path().join("output");
@@ -5432,19 +6197,27 @@ mod tests {
             .method("POST")
             .uri("/_presemble/block-edit")
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(serde_json::to_vec(&edit_body).unwrap()))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&edit_body).unwrap(),
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
 
-        assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED,
-            "editorial route must return 401 without session (MagicLinkSessionStore)");
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::UNAUTHORIZED,
+            "editorial route must return 401 without session (MagicLinkSessionStore)"
+        );
     }
 
     // ── Editorial mode selection and banner ─────────────────────────────────
 
     #[test]
     fn select_editorial_mode_no_key_no_dev_is_closed() {
-        assert!(matches!(select_editorial_mode(None, None), EditorialMode::Closed));
+        assert!(matches!(
+            select_editorial_mode(None, None),
+            EditorialMode::Closed
+        ));
     }
 
     #[test]
@@ -5459,7 +6232,10 @@ mod tests {
     fn select_editorial_mode_key_set_is_hosted() {
         assert!(matches!(
             select_editorial_mode(Some(sk(TEST_SESSION_KEY)), None),
-            EditorialMode::Hosted { dev_session_ignored: false, .. }
+            EditorialMode::Hosted {
+                dev_session_ignored: false,
+                ..
+            }
         ));
     }
 
@@ -5467,7 +6243,10 @@ mod tests {
     fn select_editorial_mode_key_and_dev_is_hosted_with_ignored_dev_session() {
         assert!(matches!(
             select_editorial_mode(Some(sk(TEST_SESSION_KEY)), Some("dev".to_string())),
-            EditorialMode::Hosted { dev_session_ignored: true, .. }
+            EditorialMode::Hosted {
+                dev_session_ignored: true,
+                ..
+            }
         ));
     }
 
@@ -5495,7 +6274,10 @@ mod tests {
         let err = resolve_editorial_mode(Some(OsString::from(secret)), None)
             .expect_err("short key must be rejected");
         assert!(
-            matches!(err, CliError::SessionKey(accounts::SessionKeyError::TooShort { .. })),
+            matches!(
+                err,
+                CliError::SessionKey(accounts::SessionKeyError::TooShort { .. })
+            ),
             "got: {err:?}"
         );
         let msg = err.to_string();
@@ -5506,7 +6288,10 @@ mod tests {
     fn resolve_mode_valid_key_is_hosted() {
         assert!(matches!(
             resolve_editorial_mode(Some(OsString::from(TEST_SESSION_KEY)), None),
-            Ok(EditorialMode::Hosted { dev_session_ignored: false, .. })
+            Ok(EditorialMode::Hosted {
+                dev_session_ignored: false,
+                ..
+            })
         ));
     }
 
@@ -5523,18 +6308,26 @@ mod tests {
         let banner = editorial_banner(&EditorialMode::Closed, None, 3000);
         assert!(banner.contains("--dev-session"), "banner: {banner}");
         assert!(banner.contains("PRESEMBLE_SESSION_KEY"), "banner: {banner}");
-        assert!(banner.starts_with("Session store: none (editing disabled)\n"), "banner: {banner}");
+        assert!(
+            banner.starts_with("Session store: none (editing disabled)\n"),
+            "banner: {banner}"
+        );
     }
 
     #[test]
     fn dev_login_banner_keeps_smoketest_parseable_lines() {
-        let mode = EditorialMode::DevLogin { label: "dev".to_string() };
+        let mode = EditorialMode::DevLogin {
+            label: "dev".to_string(),
+        };
         let banner = editorial_banner(&mode, Some("TOK"), 3000);
         assert!(
             banner.contains("Login URL:    http://127.0.0.1:3000/_presemble/login?token="),
             "banner: {banner}"
         );
-        assert!(banner.contains("  Cookie value: presemble_session=TOK\n"), "banner: {banner}");
+        assert!(
+            banner.contains("  Cookie value: presemble_session=TOK\n"),
+            "banner: {banner}"
+        );
         assert!(
             banner.starts_with("Session store: DevSessionStore (random key; --dev-session)\n"),
             "banner: {banner}"
@@ -5544,13 +6337,19 @@ mod tests {
     #[test]
     fn hosted_banner_warns_when_dev_session_ignored() {
         let warned = editorial_banner(
-            &EditorialMode::Hosted { key: sk(TEST_SESSION_KEY), dev_session_ignored: true },
+            &EditorialMode::Hosted {
+                key: sk(TEST_SESSION_KEY),
+                dev_session_ignored: true,
+            },
             None,
             3000,
         );
         assert!(warned.contains("is ignored"), "banner: {warned}");
         let plain = editorial_banner(
-            &EditorialMode::Hosted { key: sk(TEST_SESSION_KEY), dev_session_ignored: false },
+            &EditorialMode::Hosted {
+                key: sk(TEST_SESSION_KEY),
+                dev_session_ignored: false,
+            },
             None,
             3000,
         );
@@ -5562,14 +6361,21 @@ mod tests {
     const EDITING_DISABLED: &str = "Editing is disabled on this server";
 
     async fn body_string(resp: axum::response::Response) -> String {
-        let bytes = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
     fn closed_app(tmp: &tempfile::TempDir, client: conductor::ConductorClient) -> axum::Router {
         let out_dir = tmp.path().join("output");
         std::fs::create_dir_all(&out_dir).unwrap();
-        std::fs::write(out_dir.join("index.html"), b"<html><body>Hello</body></html>").unwrap();
+        std::fs::write(
+            out_dir.join("index.html"),
+            b"<html><body>Hello</body></html>",
+        )
+        .unwrap();
         test_app_full_with_store(
             client,
             out_dir,
@@ -5610,7 +6416,11 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::UNAUTHORIZED);
-        let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).map(str::to_string);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         assert_eq!(ct.as_deref(), Some("application/json"));
         let text = body_string(resp).await;
         assert!(text.contains(EDITING_DISABLED), "body: {text}");

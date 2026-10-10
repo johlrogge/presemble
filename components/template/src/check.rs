@@ -9,8 +9,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::dom::{parse_template_xml, Element, Form, Node};
-use crate::expression::{function, Expression, FunctionKind, Path};
+use crate::dom::{Element, Form, Node, parse_template_xml};
+use crate::expression::{Expression, FunctionKind, Path, function};
 use crate::hiccup::parse_template_hiccup;
 use schema::{Element as SchemaElement, Grammar};
 
@@ -63,7 +63,10 @@ impl CheckContext {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        CheckContext { templates: templates.into_iter().map(Into::into).collect(), collections: HashMap::new() }
+        CheckContext {
+            templates: templates.into_iter().map(Into::into).collect(),
+            collections: HashMap::new(),
+        }
     }
 
     /// Add the collection `stem`, whose items follow `item_schema`.
@@ -94,7 +97,11 @@ pub fn check_template(
     site: &CheckContext,
 ) -> Vec<CheckDiagnostic> {
     let trimmed = src.trim_start();
-    let syntax = if trimmed.starts_with(['[', '(', ';']) { Syntax::Hiccup } else { Syntax::Html };
+    let syntax = if trimmed.starts_with(['[', '(', ';']) {
+        Syntax::Hiccup
+    } else {
+        Syntax::Html
+    };
     let parsed = match syntax {
         Syntax::Hiccup => parse_template_hiccup(src),
         Syntax::Html => parse_template_xml(src),
@@ -102,7 +109,15 @@ pub fn check_template(
     let Ok(nodes) = parsed else { return Vec::new() };
     let mut locals = HashSet::new();
     collect_local_definitions(&nodes, &mut locals);
-    let mut checker = Checker { grammar, stem, syntax, site, locals, items: Vec::new(), found: Vec::new() };
+    let mut checker = Checker {
+        grammar,
+        stem,
+        syntax,
+        site,
+        locals,
+        items: Vec::new(),
+        found: Vec::new(),
+    };
     checker.walk(&nodes);
     checker.found
 }
@@ -111,7 +126,9 @@ fn collect_local_definitions(nodes: &[Node], locals: &mut HashSet<String>) {
     for node in nodes {
         if let Node::Element(el) = node {
             if el.name == "template"
-                && let Some(name) = el.attr(crate::constants::ELEM_DEFINE).or_else(|| el.attr("name"))
+                && let Some(name) = el
+                    .attr(crate::constants::ELEM_DEFINE)
+                    .or_else(|| el.attr("name"))
             {
                 locals.insert(name.to_string());
             }
@@ -136,7 +153,12 @@ struct Checker<'a> {
 
 impl Checker<'_> {
     fn report(&mut self, level: Level, message: String, snippet: &str) {
-        self.found.push(CheckDiagnostic { level, message, snippet: snippet.to_string(), slot: None });
+        self.found.push(CheckDiagnostic {
+            level,
+            message,
+            snippet: snippet.to_string(),
+            slot: None,
+        });
     }
 
     fn walk(&mut self, nodes: &[Node]) {
@@ -165,8 +187,13 @@ impl Checker<'_> {
         };
         let segments = path.segments();
         match segments.as_slice() {
-            ["input", collection] if self.site.collection(collection).is_some() && !self.is_own_field(collection) => {
-                Some((el.attr("item").unwrap_or("item").to_string(), (*collection).to_string()))
+            ["input", collection]
+                if self.site.collection(collection).is_some() && !self.is_own_field(collection) =>
+            {
+                Some((
+                    el.attr("item").unwrap_or("item").to_string(),
+                    (*collection).to_string(),
+                ))
             }
             _ => None,
         }
@@ -174,18 +201,29 @@ impl Checker<'_> {
 
     /// Whether `field` is a field of the template's own schema.
     fn is_own_field(&self, field: &str) -> bool {
-        self.grammar.preamble.iter().any(|s| s.name.as_str() == field)
+        self.grammar
+            .preamble
+            .iter()
+            .any(|s| s.name.as_str() == field)
             || (field == "body" && self.grammar.body.is_some())
     }
 
     fn element(&mut self, el: &Element) {
         if let Some(advice) = crate::constants::removed_element(&el.name) {
-            self.report(Level::Error, format!("{} was removed (ADR-067): {advice}", el.name), &el.name);
+            self.report(
+                Level::Error,
+                format!("{} was removed (ADR-067): {advice}", el.name),
+                &el.name,
+            );
             return;
         }
         for (attr, _) in &el.attrs {
             if let Some(advice) = crate::constants::removed_attribute(&el.name, attr) {
-                self.report(Level::Error, format!("{attr} was removed (ADR-067): {advice}"), attr);
+                self.report(
+                    Level::Error,
+                    format!("{attr} was removed (ADR-067): {advice}"),
+                    attr,
+                );
             }
         }
         if el.name == crate::constants::ELEM_INSERT {
@@ -205,7 +243,9 @@ impl Checker<'_> {
                 }
                 match value {
                     Form::List(_) | Form::Symbol(_) => self.form(value, Position::Attribute),
-                    Form::Str(text) if self.syntax == Syntax::Html && text.trim_start().starts_with('(') => {
+                    Form::Str(text)
+                        if self.syntax == Syntax::Html && text.trim_start().starts_with('(') =>
+                    {
                         self.report(
                             Level::Warning,
                             format!(
@@ -316,7 +356,10 @@ impl Checker<'_> {
                 }
             }
             // `((juxt a b) input)`: the templates, then the argument.
-            Expression::Call { head: inner, args: templates } => {
+            Expression::Call {
+                head: inner,
+                args: templates,
+            } => {
                 match inner.as_ref() {
                     Expression::Ref(name) if name.dotted() == "juxt" => {
                         for template in templates {
@@ -341,7 +384,11 @@ impl Checker<'_> {
                 }
             }
             Expression::Literal(_) => {
-                self.report(Level::Error, "a literal is not a function".to_string(), snippet);
+                self.report(
+                    Level::Error,
+                    "a literal is not a function".to_string(),
+                    snippet,
+                );
             }
         }
     }
@@ -352,7 +399,11 @@ impl Checker<'_> {
             Expression::Ref(path)
                 if function(&path.dotted()).is_some_and(|f| f.kind == FunctionKind::Text) => {}
             Expression::Ref(path) => {
-                self.report(Level::Error, format!("unknown function '{}'", path.dotted()), snippet);
+                self.report(
+                    Level::Error,
+                    format!("unknown function '{}'", path.dotted()),
+                    snippet,
+                );
             }
             _ => self.report(
                 Level::Error,
@@ -366,7 +417,11 @@ impl Checker<'_> {
     /// itself, a plain name is defined here or is a template of the site.
     fn template_argument(&mut self, expression: &Expression, snippet: &str) {
         let Expression::Ref(path) = expression else {
-            self.report(Level::Error, "expected the name of a template".to_string(), snippet);
+            self.report(
+                Level::Error,
+                "expected the name of a template".to_string(),
+                snippet,
+            );
             return;
         };
         let name = path.dotted();
@@ -378,7 +433,8 @@ impl Checker<'_> {
     /// Whether `name` is a template: `self/name` and a bare name defined in
     /// this template, or a template of the site.
     fn is_known(&self, name: &str) -> bool {
-        self.locals.contains(name.strip_prefix("self/").unwrap_or(name))
+        self.locals
+            .contains(name.strip_prefix("self/").unwrap_or(name))
             || (!name.starts_with("self/") && self.site.contains(name))
     }
 
@@ -389,7 +445,12 @@ impl Checker<'_> {
         let segments = path.segments();
         // `item.<field>` inside a `data-each` over a collection.
         if path.root() != "input" {
-            let bound = self.items.iter().rev().find(|(name, _)| name == path.root()).map(|(_, c)| c.clone());
+            let bound = self
+                .items
+                .iter()
+                .rev()
+                .find(|(name, _)| name == path.root())
+                .map(|(_, c)| c.clone());
             if let (Some(collection), Some(field)) = (bound, segments.get(1))
                 && let Some(item_schema) = self.site.collection(&collection)
             {
@@ -404,7 +465,11 @@ impl Checker<'_> {
             return;
         }
         let field = segments[1];
-        let slot = self.grammar.preamble.iter().find(|s| s.name.as_str() == field);
+        let slot = self
+            .grammar
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == field);
         let is_body = field == "body" && self.grammar.body.is_some();
         if slot.is_none()
             && !is_body
@@ -454,10 +519,17 @@ impl Checker<'_> {
     /// schema, or the `link` every item carries.
     fn item_field(&mut self, item_schema: &Grammar, collection: &str, field: &str, snippet: &str) {
         let known = field == "link"
-            || item_schema.preamble.iter().any(|s| s.name.as_str() == field)
+            || item_schema
+                .preamble
+                .iter()
+                .any(|s| s.name.as_str() == field)
             || (field == "body" && item_schema.body.is_some());
         if !known {
-            self.report(Level::Error, format!("unknown field '{field}' in {collection} schema"), snippet);
+            self.report(
+                Level::Error,
+                format!("unknown field '{field}' in {collection} schema"),
+                snippet,
+            );
             if let Some(last) = self.found.last_mut() {
                 last.slot = Some(field.to_string());
             }
@@ -499,10 +571,23 @@ mod tests {
 
     #[test]
     fn a_field_of_a_collection_is_checked_against_its_item_schema() {
-        let found = check_template("[:p {:title input.post.titel}]", &schema(INDEX), "index", &site());
+        let found = check_template(
+            "[:p {:title input.post.titel}]",
+            &schema(INDEX),
+            "index",
+            &site(),
+        );
         assert_eq!(found.len(), 1, "{found:#?}");
-        assert!(found[0].message.contains("titel") && found[0].message.contains("post"), "{found:#?}");
-        let ok = check_template("[:p (text input.post.title)]", &schema(INDEX), "index", &site());
+        assert!(
+            found[0].message.contains("titel") && found[0].message.contains("post"),
+            "{found:#?}"
+        );
+        let ok = check_template(
+            "[:p (text input.post.title)]",
+            &schema(INDEX),
+            "index",
+            &site(),
+        );
         assert!(ok.is_empty(), "{ok:#?}");
     }
 
@@ -529,10 +614,20 @@ mod tests {
     /// GUARD: a name that is no collection of the site is still reported.
     #[test]
     fn a_field_of_an_unknown_collection_is_still_reported() {
-        let found = check_template("[:p (text input.ghost.title)]", &schema(INDEX), "index", &site());
+        let found = check_template(
+            "[:p (text input.ghost.title)]",
+            &schema(INDEX),
+            "index",
+            &site(),
+        );
         assert_eq!(found.len(), 1, "{found:#?}");
         assert!(found[0].message.contains("ghost"), "{found:#?}");
-        let none = check_template("[:p (text input.post.title)]", &schema(INDEX), "index", &CheckContext::default());
+        let none = check_template(
+            "[:p (text input.post.title)]",
+            &schema(INDEX),
+            "index",
+            &CheckContext::default(),
+        );
         assert_eq!(none.len(), 1, "no collections known: {none:#?}");
     }
 }

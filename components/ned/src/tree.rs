@@ -50,7 +50,10 @@ impl NodeTree {
 
     /// Append a child subtree. No-op on `NodeTree::Text`.
     pub fn with_child(mut self, child: NodeTree) -> NodeTree {
-        if let NodeTree::Element { ref mut children, .. } = self {
+        if let NodeTree::Element {
+            ref mut children, ..
+        } = self
+        {
             children.push(child);
         }
         self
@@ -76,7 +79,13 @@ impl NodeTree {
                 for (attr_name, attr_value) in attrs {
                     let aname = store.intern(&attr_name);
                     let value_node = store.add_node(Node::Text(attr_value));
-                    store.add_edge(node, Edge::Attribute { name: aname, value: value_node });
+                    store.add_edge(
+                        node,
+                        Edge::Attribute {
+                            name: aname,
+                            value: value_node,
+                        },
+                    );
                 }
                 for child in children {
                     let child_id = child.materialize(store);

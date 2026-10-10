@@ -1,9 +1,9 @@
 use crate::document::{Container, ContentElement, Document, Keyword, LinkText};
 use crate::inline::AsPlainText;
-use crate::link_expression::{diagnose_paragraph, LinkExpressionDiagnostic};
+use crate::link_expression::{LinkExpressionDiagnostic, diagnose_paragraph};
 use crate::parser::diagnose_paragraph_marker;
 use crate::serializer::serialize_element;
-use crate::slot_assignment::{element_matches_slot, unassigned_reason, UnassignedReason};
+use crate::slot_assignment::{UnassignedReason, element_matches_slot, unassigned_reason};
 use schema::{
     AltRequirement, BodyRules, Constraint, ContentConstraint, CountRange, Element, Grammar,
     HeadingLevelRange, Slot, SlotName, Spanned,
@@ -94,10 +94,7 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
                 if expected.min() > 0 {
                     diagnostics.push(ValidationDiagnostic {
                         severity: Severity::Error,
-                        message: format!(
-                            "slot '{}': missing required element",
-                            grammar_slot.name
-                        ),
+                        message: format!("slot '{}': missing required element", grammar_slot.name),
                         slot: Some(grammar_slot.name.clone()),
                         span: None,
                         location: None,
@@ -111,13 +108,19 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 
         match &grammar_slot.element {
             Element::Heading { level: level_range } => {
-                let count = validate_headings(elements, level_range, grammar_slot, &mut diagnostics);
+                let count =
+                    validate_headings(elements, level_range, grammar_slot, &mut diagnostics);
                 check_occurs_count(count, grammar_slot, &mut diagnostics);
             }
 
             Element::Paragraph => {
                 let count = validate_paragraphs(elements, grammar_slot, &mut diagnostics);
-                check_occurs_count_paragraphs(count, &expected_count, grammar_slot, &mut diagnostics);
+                check_occurs_count_paragraphs(
+                    count,
+                    &expected_count,
+                    grammar_slot,
+                    &mut diagnostics,
+                );
             }
 
             Element::Link { .. } => {
@@ -145,7 +148,11 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 
     // ── Inline HTML in every container (ADR-062 D3) ────────────────────────
     for slot in &doc.preamble {
-        validate_inline_html(&slot.elements, &Container::Slot(slot.name.clone()), &mut diagnostics);
+        validate_inline_html(
+            &slot.elements,
+            &Container::Slot(slot.name.clone()),
+            &mut diagnostics,
+        );
     }
     validate_inline_html(&doc.unassigned, &Container::Unassigned, &mut diagnostics);
     validate_inline_html(&doc.body, &Container::Body, &mut diagnostics);
@@ -172,7 +179,11 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
 
     // ── Slot markers on headings ───────────────────────────────────────────
     for slot in &doc.preamble {
-        validate_heading_markers(&slot.elements, &Container::Slot(slot.name.clone()), &mut diagnostics);
+        validate_heading_markers(
+            &slot.elements,
+            &Container::Slot(slot.name.clone()),
+            &mut diagnostics,
+        );
     }
     validate_heading_markers(&doc.unassigned, &Container::Unassigned, &mut diagnostics);
     validate_heading_markers(&doc.body, &Container::Body, &mut diagnostics);
@@ -196,8 +207,16 @@ fn walk<'a>(
         spanned: &'a Spanned<ContentElement>,
         out: &mut Vec<(Location, &'a Spanned<ContentElement>)>,
     ) {
-        out.push((Location { container: container.clone(), index, path: path.clone() }, spanned));
-        let mut children = |blocks: &'a im::Vector<Spanned<ContentElement>>, path: &mut Vec<NestedStep>| {
+        out.push((
+            Location {
+                container: container.clone(),
+                index,
+                path: path.clone(),
+            },
+            spanned,
+        ));
+        let mut children = |blocks: &'a im::Vector<Spanned<ContentElement>>,
+                            path: &mut Vec<NestedStep>| {
             for (j, child) in blocks.iter().enumerate() {
                 path.push(NestedStep::Block(j));
                 visit(container, index, path, child, out);
@@ -245,7 +264,10 @@ fn validate_heading_markers(
 ) {
     let slot = slot_of(container);
     for (location, spanned) in walk(container, elements) {
-        let ContentElement::Heading { marker: Some(name), .. } = &spanned.node else {
+        let ContentElement::Heading {
+            marker: Some(name), ..
+        } = &spanned.node
+        else {
             continue;
         };
         let message = format!(
@@ -256,7 +278,10 @@ fn validate_heading_markers(
         let (message, span) = match slot {
             Some(slot_name) => (format!("slot '{slot_name}': {message}"), None),
             // Store-built documents carry zero spans.
-            None => (message, (spanned.span.end > spanned.span.start).then_some(spanned.span)),
+            None => (
+                message,
+                (spanned.span.end > spanned.span.start).then_some(spanned.span),
+            ),
         };
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
@@ -344,7 +369,11 @@ fn validate_unassigned(
             message,
             slot: None,
             span,
-            location: Some(Location { container: Container::Unassigned, index, path: Vec::new() }),
+            location: Some(Location {
+                container: Container::Unassigned,
+                index,
+                path: Vec::new(),
+            }),
         });
     }
 }
@@ -532,18 +561,29 @@ fn validate_link_expressions(
     for (location, spanned) in walk(&container, elements) {
         match &spanned.node {
             // Marker misuse is an error in any section (ADR-060 P1).
-            ContentElement::Paragraph { content, marker: Some(marker) } => {
-                push(Severity::Error, diagnose_paragraph_marker(content, marker).to_string(), location);
+            ContentElement::Paragraph {
+                content,
+                marker: Some(marker),
+            } => {
+                push(
+                    Severity::Error,
+                    diagnose_paragraph_marker(content, marker).to_string(),
+                    location,
+                );
             }
-            ContentElement::Paragraph { content, marker: None } => match diagnose_paragraph(
-                &crate::inline::paragraph_diagnosis_source(content, None),
-            ) {
-                Some(d @ LinkExpressionDiagnostic::MustStandAlone) => {
-                    push(Severity::Warning, d.to_string(), location);
+            ContentElement::Paragraph {
+                content,
+                marker: None,
+            } => {
+                match diagnose_paragraph(&crate::inline::paragraph_diagnosis_source(content, None))
+                {
+                    Some(d @ LinkExpressionDiagnostic::MustStandAlone) => {
+                        push(Severity::Warning, d.to_string(), location);
+                    }
+                    Some(d) => push(Severity::Error, d.to_string(), location),
+                    None => {}
                 }
-                Some(d) => push(Severity::Error, d.to_string(), location),
-                None => {}
-            },
+            }
             ContentElement::LinkExpression { .. } if slot.is_none() => {
                 push(
                     Severity::Warning,
@@ -552,9 +592,12 @@ fn validate_link_expressions(
                     location,
                 );
             }
-            ContentElement::LinkExpression { text, slot: marker, .. } => {
+            ContentElement::LinkExpression {
+                text, slot: marker, ..
+            } => {
                 if let Some(slot_name) = slot
-                    && let Some(message) = slot_marker_message(text, marker.as_ref(), slot_name, grammar)
+                    && let Some(message) =
+                        slot_marker_message(text, marker.as_ref(), slot_name, grammar)
                 {
                     push(Severity::Warning, message, location);
                 }
@@ -691,9 +734,13 @@ fn validate_headings(
     let mut count = 0usize;
 
     for (index, spanned) in elements.iter().enumerate() {
-        if let ContentElement::Heading { level, content, marker } = &spanned.node {
-            if level.value() >= level_range.min.value()
-                && level.value() <= level_range.max.value()
+        if let ContentElement::Heading {
+            level,
+            content,
+            marker,
+        } = &spanned.node
+        {
+            if level.value() >= level_range.min.value() && level.value() <= level_range.max.value()
             {
                 count += 1;
                 // Constraints read the plain text; messages quote the
@@ -741,7 +788,12 @@ fn validate_headings(
 /// (ADR-059 §12): the paragraph stays where it is, editable and saveable, and
 /// is reassigned when the file is read again. `expected` is `a link`,
 /// `an image` or `a paragraph`.
-fn wrong_shape(slot: &Slot, expected: &str, index: usize, diagnostics: &mut Vec<ValidationDiagnostic>) {
+fn wrong_shape(
+    slot: &Slot,
+    expected: &str,
+    index: usize,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
     diagnostics.push(ValidationDiagnostic {
         severity: Severity::Error,
         message: format!("slot '{}': expected {expected}", slot.name),
@@ -754,7 +806,11 @@ fn wrong_shape(slot: &Slot, expected: &str, index: usize, diagnostics: &mut Vec<
 /// The location of element `index` of `slot`: a diagnostic about one element
 /// of a slot says which, not just the slot.
 fn slot_element(slot: &Slot, index: usize) -> Option<Location> {
-    Some(Location { container: Container::Slot(slot.name.clone()), index, path: Vec::new() })
+    Some(Location {
+        container: Container::Slot(slot.name.clone()),
+        index,
+        path: Vec::new(),
+    })
 }
 
 /// Validate paragraphs in a slot's elements. Returns count consumed.
@@ -796,7 +852,9 @@ fn check_occurs_count_paragraphs(
             span: None,
             location: None,
         });
-    } else if let Some(limit) = max && count > limit {
+    } else if let Some(limit) = max
+        && count > limit
+    {
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message: format!(
@@ -854,7 +912,12 @@ fn validate_images(
         if let Some(image) = spanned.node.sole_image() {
             count += 1;
             let alt = image.alt.plain_text();
-            check_alt_constraints((!alt.is_empty()).then_some(alt.as_str()), slot, index, diagnostics);
+            check_alt_constraints(
+                (!alt.is_empty()).then_some(alt.as_str()),
+                slot,
+                index,
+                diagnostics,
+            );
         } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
             wrong_shape(slot, "an image", index, diagnostics);
         }
@@ -991,7 +1054,12 @@ fn validate_body(
 ) {
     if let Some(heading_range) = &body_rules.heading_range {
         for (index, spanned) in elements.iter().enumerate() {
-            if let ContentElement::Heading { level, content, marker } = &spanned.node {
+            if let ContentElement::Heading {
+                level,
+                content,
+                marker,
+            } = &spanned.node
+            {
                 let text = crate::inline::heading_source_text(content, marker.as_ref());
                 let in_range = level.value() >= heading_range.min.value()
                     && level.value() <= heading_range.max.value();
@@ -1031,8 +1099,7 @@ mod tests {
 
     /// Parse the article schema fixture.
     fn article_grammar() -> Grammar {
-        let schema_input =
-            include_str!("../../../fixtures/blog-site/schemas/article/item.md");
+        let schema_input = include_str!("../../../fixtures/blog-site/schemas/article/item.md");
         parse_schema(schema_input).expect("article schema should parse")
     }
 
@@ -1040,8 +1107,7 @@ mod tests {
 
     #[test]
     fn valid_hello_world_document_passes() {
-        let doc_input =
-            include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+        let doc_input = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let grammar = article_grammar();
         let doc = parse_and_assign(doc_input, &grammar).expect("hello-world.md should parse");
 
@@ -1088,7 +1154,11 @@ mod tests {
         let grammar = article_grammar();
         let src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let mut doc = parse_and_assign(src, &grammar).expect("hello-world.md should parse");
-        let slot = doc.preamble.iter_mut().find(|s| s.name.as_str() == name).expect("slot");
+        let slot = doc
+            .preamble
+            .iter_mut()
+            .find(|s| s.name.as_str() == name)
+            .expect("slot");
         slot.elements.front_mut().expect("an element").node =
             ContentElement::paragraph_from_markdown(md);
         (doc, grammar)
@@ -1116,7 +1186,9 @@ mod tests {
             let (doc, grammar) = hello_world_with(slot, md);
             let errors = errors(&doc, &grammar);
             assert!(
-                errors.iter().any(|m| m.contains(&format!("slot '{slot}'")) && m.contains(expected)),
+                errors
+                    .iter()
+                    .any(|m| m.contains(&format!("slot '{slot}'")) && m.contains(expected)),
                 "{slot} <- {md:?}: {errors:?}"
             );
         }
@@ -1127,7 +1199,11 @@ mod tests {
         let grammar = article_grammar();
         let src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let doc = parse_and_assign(src, &grammar).expect("parses");
-        assert!(errors(&doc, &grammar).is_empty(), "{:?}", errors(&doc, &grammar));
+        assert!(
+            errors(&doc, &grammar).is_empty(),
+            "{:?}",
+            errors(&doc, &grammar)
+        );
     }
 
     /// GUARD (stage 5b.3, not red-first): every grammar slot is a container
@@ -1144,7 +1220,11 @@ mod tests {
         )
         .expect("schema parses");
         let doc = parse_and_assign("# T\n\n----\n\nBody.\n", &grammar).expect("parses");
-        assert!(doc.preamble.iter().all(|s| s.name.as_str() == "title" || s.elements.is_empty()));
+        assert!(
+            doc.preamble
+                .iter()
+                .all(|s| s.name.as_str() == "title" || s.elements.is_empty())
+        );
         assert_eq!(doc.preamble.len(), 4, "every slot is a container");
         let messages: Vec<String> = validate(&doc, &grammar)
             .diagnostics
@@ -1156,7 +1236,10 @@ mod tests {
             "slot 'cover': missing required image",
             "slot 'summary': expected at least 1 paragraph(s), found 0",
         ] {
-            assert!(messages.iter().any(|m| m == expected), "{expected:?} not in {messages:?}");
+            assert!(
+                messages.iter().any(|m| m == expected),
+                "{expected:?} not in {messages:?}"
+            );
         }
     }
 
@@ -1202,8 +1285,7 @@ mod tests {
             "document with lowercase title should be invalid"
         );
         let has_capitalized_error = result.diagnostics.iter().any(|d| {
-            d.slot.as_ref().map(|s| s.as_str()) == Some("title")
-                && d.message.contains("uppercase")
+            d.slot.as_ref().map(|s| s.as_str()) == Some("title") && d.message.contains("uppercase")
         });
         assert!(
             has_capitalized_error,
@@ -1290,7 +1372,9 @@ mod tests {
 
     #[test]
     fn preamble_link_expression_is_clean() {
-        assert!(link_diagnostics("# T\n\n[posts](->> :post (take 2))\n\n----\n\nBody.\n").is_empty());
+        assert!(
+            link_diagnostics("# T\n\n[posts](->> :post (take 2))\n\n----\n\nBody.\n").is_empty()
+        );
     }
 
     #[test]
@@ -1298,7 +1382,11 @@ mod tests {
         let d = link_diagnostics("# T\n\n----\n\n[x](->> :post (map :title))\n");
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
-        assert!(d[0].message.contains("unknown operation `map`"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("unknown operation `map`"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
@@ -1322,7 +1410,11 @@ mod tests {
         let d = link_diagnostics("# T\n\n----\n\nSee [x](->> :post) here.\n");
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Warning);
-        assert!(d[0].message.contains("must stand alone (ADR-058)"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("must stand alone (ADR-058)"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
@@ -1330,7 +1422,11 @@ mod tests {
         let d = link_diagnostics("# T\n\n----\n\n[posts](->> :post)\n");
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Warning);
-        assert!(d[0].message.contains("move it above `----`"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("move it above `----`"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
@@ -1358,24 +1454,43 @@ mod tests {
 
     #[test]
     fn marker_that_names_no_slot_is_an_error() {
-        let d = page_diagnostics("# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n", "*");
+        let d = page_diagnostics(
+            "# Home\n\n[In the news](->> :post) {#newz}\n\n----\n\nBody.\n",
+            "*",
+        );
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
         // Positioned after the nearest preceding slot, but not attached to it.
         assert_eq!(d[0].slot, None);
-        assert!(d[0].message.starts_with("after slot 'title': "), "{}", d[0].message);
+        assert!(
+            d[0].message.starts_with("after slot 'title': "),
+            "{}",
+            d[0].message
+        );
         assert!(d[0].span.is_some());
-        assert!(d[0].message.contains("`{#newz}` does not name a slot"), "{}", d[0].message);
-        assert!(!d[0].message.contains("placed by position"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("`{#newz}` does not name a slot"),
+            "{}",
+            d[0].message
+        );
+        assert!(
+            !d[0].message.contains("placed by position"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
     fn marker_that_names_a_non_link_slot_is_an_error() {
-        let d = page_diagnostics("# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n", "*");
+        let d = page_diagnostics(
+            "# Home\n\n[Posts](->> :post) {#title}\n\n----\n\nBody.\n",
+            "*",
+        );
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
         assert!(
-            d[0].message.contains("`{#title}` names `title`, which is not a link slot"),
+            d[0].message
+                .contains("`{#title}` names `title`, which is not a link slot"),
             "{}",
             d[0].message
         );
@@ -1384,7 +1499,11 @@ mod tests {
     // ── Unassigned section-0 elements (ADR-060 P1) ───────────────────────
 
     fn summary_grammar(with_body: bool) -> Grammar {
-        let body = if with_body { "\n----\n\nBody.\nheadings\n: h3..h6\n" } else { "" };
+        let body = if with_body {
+            "\n----\n\nBody.\nheadings\n: h3..h6\n"
+        } else {
+            ""
+        };
         parse_schema(&format!(
             "# Title {{#title}}\noccurs\n: exactly once\n\n\
              Summary. {{#summary}}\noccurs\n: 1..2\n{body}"
@@ -1405,12 +1524,21 @@ mod tests {
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
         assert_eq!(d[0].slot, None);
-        assert!(d[0].message.starts_with("after slot 'summary': "), "{}", d[0].message);
+        assert!(
+            d[0].message.starts_with("after slot 'summary': "),
+            "{}",
+            d[0].message
+        );
         let span = d[0].span.expect("unassigned element has a span");
         assert_eq!(&src[span.start..span.end].trim_end(), &"Three.");
-        assert!(d[0].message.contains("paragraph `Three.`"), "{}", d[0].message);
         assert!(
-            d[0].message.contains("the schema does not allow a paragraph here in the preamble"),
+            d[0].message.contains("paragraph `Three.`"),
+            "{}",
+            d[0].message
+        );
+        assert!(
+            d[0].message
+                .contains("the schema does not allow a paragraph here in the preamble"),
             "{}",
             d[0].message
         );
@@ -1430,8 +1558,10 @@ mod tests {
             "# Title\n\nOne.\n\nTwo.\n\n[x](->> :post (map :title))\n\n----\n\nBody.\n",
             &g,
         );
-        let unassigned: Vec<_> =
-            d.iter().filter(|d| d.message.contains("not allow a paragraph")).collect();
+        let unassigned: Vec<_> = d
+            .iter()
+            .filter(|d| d.message.contains("not allow a paragraph"))
+            .collect();
         assert_eq!(unassigned.len(), 1, "{d:#?}");
         assert!(
             unassigned[0].message.contains("unknown operation `map`"),
@@ -1447,7 +1577,8 @@ mod tests {
         let d = diagnostics_for(&format!("# Title\n\nOne.\n\n{long}\n\n----\n\nBody.\n"), &g);
         assert_eq!(d.len(), 1, "{d:#?}");
         assert!(
-            d[0].message.contains("heading `## A heading that is much longer than fo…`"),
+            d[0].message
+                .contains("heading `## A heading that is much longer than fo…`"),
             "{}",
             d[0].message
         );
@@ -1459,7 +1590,12 @@ mod tests {
         let d = diagnostics_for("# Title\n\nOne.\n\n### Body heading\n", &g);
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
-        assert!(d[0].message.contains("did you forget `----` before the body?"), "{}", d[0].message);
+        assert!(
+            d[0].message
+                .contains("did you forget `----` before the body?"),
+            "{}",
+            d[0].message
+        );
         // No body in the schema: no such hint.
         let d = diagnostics_for("# Title\n\nOne.\n\n### Heading\n", &summary_grammar(false));
         assert_eq!(d.len(), 1, "{d:#?}");
@@ -1597,7 +1733,10 @@ mod tests {
         let g = summary_grammar(true);
         for heading in ["# Title {#x} more", "# see {#a} or {b}"] {
             let d = diagnostics_for(&format!("{heading}\n\nOne.\n\n----\n\nBody.\n"), &g);
-            assert!(!d.iter().any(|d| d.message.contains("slot marker")), "{heading:?}: {d:#?}");
+            assert!(
+                !d.iter().any(|d| d.message.contains("slot marker")),
+                "{heading:?}: {d:#?}"
+            );
         }
     }
 
@@ -1625,8 +1764,16 @@ mod tests {
             let d = body_diagnostics(md);
             assert_eq!(d.len(), 1, "{md:?}: {d:#?}");
             assert_eq!(d[0].severity, Severity::Error, "{md:?}");
-            assert!(d[0].message.starts_with("paragraph `"), "{md:?}: {}", d[0].message);
-            assert!(d[0].message.contains("inline HTML"), "{md:?}: {}", d[0].message);
+            assert!(
+                d[0].message.starts_with("paragraph `"),
+                "{md:?}: {}",
+                d[0].message
+            );
+            assert!(
+                d[0].message.contains("inline HTML"),
+                "{md:?}: {}",
+                d[0].message
+            );
         }
         let d = body_diagnostics("- a\n\n  <div>x</div>");
         assert_eq!(d.len(), 1, "{d:#?}");
@@ -1654,7 +1801,11 @@ mod tests {
             let src = format!("# Title\n\nOne.\n\n----\n\n{body}\n");
             let before = diagnostics(&src);
             assert_eq!(before.len(), 1, "{body:?}: {before:#?}");
-            assert!(before[0].message.contains("inline HTML"), "{body:?}: {}", before[0].message);
+            assert!(
+                before[0].message.contains("inline HTML"),
+                "{body:?}: {}",
+                before[0].message
+            );
             let saved = crate::serialize_document(&parse_and_assign(&src, &g).expect("parses"));
             assert_eq!(saved, src, "{body:?}: the save changes the text");
             let after = diagnostics(&saved);
@@ -1678,7 +1829,12 @@ mod tests {
         };
         let top = body_diagnostics("a {#tags}");
         assert_eq!(top.len(), 1, "{top:#?}");
-        for md in ["- a {#tags}", "1. a {#tags}", "- a\n\n  b {#tags}", "- x\n  - a {#tags}"] {
+        for md in [
+            "- a {#tags}",
+            "1. a {#tags}",
+            "- a\n\n  b {#tags}",
+            "- x\n  - a {#tags}",
+        ] {
             let d = body_diagnostics(md);
             assert_eq!(d.len(), 1, "{md:?}: {d:#?}");
             assert_eq!(d[0].severity, Severity::Error, "{md:?}");
@@ -1728,7 +1884,11 @@ mod tests {
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
         assert!(d[0].message.starts_with("paragraph"), "{}", d[0].message);
-        assert!(d[0].message.contains("inline HTML `<i>`"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("inline HTML `<i>`"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
@@ -1737,18 +1897,25 @@ mod tests {
         let src = "# Title\n\nSummary text {#summary}\n\n----\n\nBody.\n";
         let doc = parse_and_assign(src, &g).expect("parses");
         assert_eq!(
-            doc.unassigned.iter().map(|e| e.node.clone()).collect::<Vec<_>>(),
-            vec![ContentElement::paragraph_from_markdown("Summary text {#summary}")]
+            doc.unassigned
+                .iter()
+                .map(|e| e.node.clone())
+                .collect::<Vec<_>>(),
+            vec![ContentElement::paragraph_from_markdown(
+                "Summary text {#summary}"
+            )]
         );
         let d = validate(&doc, &g).diagnostics;
         assert_eq!(d.len(), 2, "{d:#?}");
         assert!(d.iter().all(|d| d.severity == Severity::Error), "{d:#?}");
         assert!(
-            d.iter().any(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary")),
+            d.iter()
+                .any(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary")),
             "{d:#?}"
         );
         assert!(
-            d.iter().any(|d| d.message.contains("`{#summary}`: slot markers")),
+            d.iter()
+                .any(|d| d.message.contains("`{#summary}`: slot markers")),
             "{d:#?}"
         );
     }
@@ -1771,8 +1938,15 @@ mod tests {
             format!("HTML block `<div class=\"x\"> hi </div>`{HTML_MESSAGE_TAIL}")
         );
         let span = d[0].span.expect("body HTML block has a span");
-        assert_eq!(src[span.start..span.end].trim_end(), "<div class=\"x\">\nhi\n</div>");
-        assert_eq!(crate::parser::byte_to_position(src, span.start).0, 8, "line (0-based)");
+        assert_eq!(
+            src[span.start..span.end].trim_end(),
+            "<div class=\"x\">\nhi\n</div>"
+        );
+        assert_eq!(
+            crate::parser::byte_to_position(src, span.start).0,
+            8,
+            "line (0-based)"
+        );
     }
 
     #[test]
@@ -1790,11 +1964,19 @@ mod tests {
             d[0].message,
             format!("after slot 'title': HTML block `<div>x</div>`{HTML_MESSAGE_TAIL}")
         );
-        assert!(!d[0].message.contains("not allowed here"), "{}", d[0].message);
+        assert!(
+            !d[0].message.contains("not allowed here"),
+            "{}",
+            d[0].message
+        );
         assert!(!d[0].message.contains("does not allow"), "{}", d[0].message);
         let span = d[0].span.expect("unassigned HTML block has a span");
         assert_eq!(src[span.start..span.end].trim_end(), "<div>x</div>");
-        assert_eq!(crate::parser::byte_to_position(src, span.start).0, 2, "line (0-based)");
+        assert_eq!(
+            crate::parser::byte_to_position(src, span.start).0,
+            2,
+            "line (0-based)"
+        );
     }
 
     // ── Inline HTML (ADR-062 D3) ─────────────────────────────────────────
@@ -1830,12 +2012,21 @@ mod tests {
         let d = body_diagnostics("t <b>x</b> ![i](i.png)");
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
-        assert!(d[0].message.contains("inline HTML `<b>`"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("inline HTML `<b>`"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
     fn inline_comments_escapes_code_and_autolinks_are_not_errors() {
-        for body in ["a <!-- c --> b", "a \\<b> b", "a `<b>` b", "see <https://x> here"] {
+        for body in [
+            "a <!-- c --> b",
+            "a \\<b> b",
+            "a `<b>` b",
+            "see <https://x> here",
+        ] {
             let d = body_diagnostics(body);
             assert!(d.is_empty(), "{body:?}: {d:#?}");
         }
@@ -1845,14 +2036,22 @@ mod tests {
     fn inline_html_only_paragraph_is_kept_and_an_error() {
         let d = body_diagnostics("<img src=a> <img src=b>");
         assert_eq!(d.len(), 1, "{d:#?}");
-        assert!(d[0].message.contains("inline HTML `<img src=a>`"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("inline HTML `<img src=a>`"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
     fn inline_html_in_a_list_is_an_error() {
         let d = body_diagnostics("- item <span>s</span>");
         assert_eq!(d.len(), 1, "{d:#?}");
-        assert!(d[0].message.contains("inline HTML `<span>`"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("inline HTML `<span>`"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
@@ -1877,12 +2076,22 @@ mod tests {
         let d = body_diagnostics("### a <b>x</b>");
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
-        assert_eq!(d[0].message, format!("heading `### a <b>x</b>`: inline HTML `<b>`{INLINE_TAIL}"));
+        assert_eq!(
+            d[0].message,
+            format!("heading `### a <b>x</b>`: inline HTML `<b>`{INLINE_TAIL}")
+        );
         // In a slot it is reported against the slot.
-        let d = diagnostics_for("# T <i>x</i>\n\nOne.\n\n----\n\nBody.\n", &summary_grammar(true));
+        let d = diagnostics_for(
+            "# T <i>x</i>\n\nOne.\n\n----\n\nBody.\n",
+            &summary_grammar(true),
+        );
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("title"));
-        assert!(d[0].message.starts_with("slot 'title': heading"), "{}", d[0].message);
+        assert!(
+            d[0].message.starts_with("slot 'title': heading"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
@@ -1915,10 +2124,17 @@ mod tests {
 
     #[test]
     fn inline_html_in_a_slot_is_reported_against_the_slot() {
-        let d = diagnostics_for("# Title\n\nOne <b>x</b>.\n\n----\n\nBody.\n", &summary_grammar(true));
+        let d = diagnostics_for(
+            "# Title\n\nOne <b>x</b>.\n\n----\n\nBody.\n",
+            &summary_grammar(true),
+        );
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("summary"));
-        assert!(d[0].message.starts_with("slot 'summary': paragraph"), "{}", d[0].message);
+        assert!(
+            d[0].message.starts_with("slot 'summary': paragraph"),
+            "{}",
+            d[0].message
+        );
     }
 
     #[test]
@@ -1976,7 +2192,10 @@ mod tests {
 
     #[test]
     fn free_text_label_does_not_warn() {
-        let d = page_diagnostics("# Home\n\n[Latest posts](->> :post)\n\n----\n\nBody.\n", "*");
+        let d = page_diagnostics(
+            "# Home\n\n[Latest posts](->> :post)\n\n----\n\nBody.\n",
+            "*",
+        );
         assert!(d.is_empty(), "{d:#?}");
     }
 
@@ -2011,7 +2230,11 @@ mod tests {
         let d = link_diagnostics("# T\n\n[x](->> :post) {#a b}\n\n----\n\nBody.\n");
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].severity, Severity::Error);
-        assert!(d[0].message.contains("invalid slot marker `{#a b}`"), "{}", d[0].message);
+        assert!(
+            d[0].message.contains("invalid slot marker `{#a b}`"),
+            "{}",
+            d[0].message
+        );
 
         let d = link_diagnostics("# T\n\n[x](->> :post)\n{#posts}\n\n----\n\nBody.\n");
         assert_eq!(d.len(), 1, "{d:#?}");
@@ -2053,7 +2276,11 @@ mod tests {
     // ── Where a diagnostic belongs (FU-7b) ───────────────────────────────
 
     fn located(container: Container, index: usize, path: Vec<NestedStep>) -> Option<Location> {
-        Some(Location { container, index, path })
+        Some(Location {
+            container,
+            index,
+            path,
+        })
     }
 
     #[test]
@@ -2070,7 +2297,11 @@ mod tests {
         // The list is the second block; the paragraph is the first block of its second item.
         assert_eq!(
             d[0].location,
-            located(Container::Body, 1, vec![NestedStep::Item(1), NestedStep::Block(0)])
+            located(
+                Container::Body,
+                1,
+                vec![NestedStep::Item(1), NestedStep::Block(0)]
+            )
         );
     }
 
@@ -2078,7 +2309,10 @@ mod tests {
     fn a_quote_diagnostic_has_its_nested_location() {
         let d = body_diagnostics("Intro.\n\n> fine\n>\n> a <b>x</b> b");
         assert_eq!(d.len(), 1, "{d:#?}");
-        assert_eq!(d[0].location, located(Container::Body, 1, vec![NestedStep::Block(1)]));
+        assert_eq!(
+            d[0].location,
+            located(Container::Body, 1, vec![NestedStep::Block(1)])
+        );
     }
 
     #[test]
@@ -2095,8 +2329,10 @@ mod tests {
     fn a_missing_slot_has_no_location_but_names_the_slot() {
         let g = summary_grammar(true);
         let d = diagnostics_for("# Title\n\n----\n\nBody.\n", &g);
-        let missing: Vec<&ValidationDiagnostic> =
-            d.iter().filter(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary")).collect();
+        let missing: Vec<&ValidationDiagnostic> = d
+            .iter()
+            .filter(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary"))
+            .collect();
         assert!(!missing.is_empty(), "{d:#?}");
         assert!(missing.iter().all(|d| d.location.is_none()), "{missing:#?}");
     }
@@ -2105,7 +2341,9 @@ mod tests {
 
     fn hello_world_doc(edit: impl FnOnce(&str) -> String) -> (Document, Grammar) {
         let grammar = article_grammar();
-        let src = edit(include_str!("../../../fixtures/blog-site/content/article/hello-world.md"));
+        let src = edit(include_str!(
+            "../../../fixtures/blog-site/content/article/hello-world.md"
+        ));
         (parse_and_assign(&src, &grammar).expect("parses"), grammar)
     }
 
@@ -2115,14 +2353,26 @@ mod tests {
 
     /// The diagnostics of the document whose message contains `part`.
     fn about(doc: &Document, grammar: &Grammar, part: &str) -> Vec<ValidationDiagnostic> {
-        validate(doc, grammar).diagnostics.into_iter().filter(|d| d.message.contains(part)).collect()
+        validate(doc, grammar)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.message.contains(part))
+            .collect()
     }
 
     #[test]
     fn a_heading_level_out_of_range_is_located_on_its_heading() {
         let (mut doc, grammar) = hello_world_doc(str::to_string);
-        let h2 = crate::parser::parse_document("## Hello\n").expect("parses").elements[0].node.clone();
-        let title = doc.preamble.iter_mut().find(|s| s.name.as_str() == "title").expect("title");
+        let h2 = crate::parser::parse_document("## Hello\n")
+            .expect("parses")
+            .elements[0]
+            .node
+            .clone();
+        let title = doc
+            .preamble
+            .iter_mut()
+            .find(|s| s.name.as_str() == "title")
+            .expect("title");
         title.elements.front_mut().expect("a heading").node = h2;
         let d = about(&doc, &grammar, "is not in allowed range");
         assert_eq!(d.len(), 1, "{d:#?}");
@@ -2141,10 +2391,17 @@ mod tests {
     fn a_wrong_shape_error_is_located_on_its_element() {
         // The summary slot holds three paragraphs; the second is a lone link.
         let (mut doc, grammar) = hello_world_doc(str::to_string);
-        let summary = doc.preamble.iter_mut().find(|s| s.name.as_str() == "summary").expect("summary");
+        let summary = doc
+            .preamble
+            .iter_mut()
+            .find(|s| s.name.as_str() == "summary")
+            .expect("summary");
         assert_eq!(summary.elements.len(), 3);
-        summary.elements.get_mut(1).expect("a second paragraph").node =
-            ContentElement::paragraph_from_markdown("[Jo](/author/jo)");
+        summary
+            .elements
+            .get_mut(1)
+            .expect("a second paragraph")
+            .node = ContentElement::paragraph_from_markdown("[Jo](/author/jo)");
         let d = about(&doc, &grammar, "expected a paragraph");
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].location, slot_location("summary", 1));
@@ -2153,7 +2410,10 @@ mod tests {
     #[test]
     fn an_alt_constraint_error_is_located_on_its_image() {
         let (doc, grammar) = hello_world_doc(|s| {
-            s.replace("![A landscape photo of a desk with a laptop and notebook open side by side]", "![]")
+            s.replace(
+                "![A landscape photo of a desk with a laptop and notebook open side by side]",
+                "![]",
+            )
         });
         let d = about(&doc, &grammar, "non-empty alt text");
         assert_eq!(d.len(), 1, "{d:#?}");
@@ -2164,7 +2424,11 @@ mod tests {
     #[test]
     fn an_occurs_count_error_has_no_location_but_names_the_slot() {
         let (mut doc, grammar) = hello_world_doc(str::to_string);
-        let summary = doc.preamble.iter_mut().find(|s| s.name.as_str() == "summary").expect("summary");
+        let summary = doc
+            .preamble
+            .iter_mut()
+            .find(|s| s.name.as_str() == "summary")
+            .expect("summary");
         let extra = summary.elements.back().cloned().expect("a paragraph");
         summary.elements.push_back(extra);
         let d = about(&doc, &grammar, "expected at most 3");

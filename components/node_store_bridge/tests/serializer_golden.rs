@@ -43,7 +43,11 @@ fn grammar_for_file(content_path: &Path, site_root: &Path) -> Option<Grammar> {
         // content/{slug}.md (root item, not index)
         [_file] => {
             let candidate = schemas_dir.join("item.md");
-            if candidate.exists() { candidate } else { schemas_dir.join("index.md") }
+            if candidate.exists() {
+                candidate
+            } else {
+                schemas_dir.join("index.md")
+            }
         }
 
         // content/{stem}/index.md → schemas/{stem}/index.md
@@ -67,10 +71,7 @@ fn grammar_for_file(content_path: &Path, site_root: &Path) -> Option<Grammar> {
     };
 
     if !schema_path.exists() {
-        eprintln!(
-            "  [skip] schema not found: {}",
-            schema_path.display()
-        );
+        eprintln!("  [skip] schema not found: {}", schema_path.display());
         return None;
     }
 
@@ -92,7 +93,9 @@ fn collect_content_files(site_root: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_md_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -113,10 +116,7 @@ struct FixedPointFailure {
     second: String,
 }
 
-fn check_fixed_point(
-    content_path: &Path,
-    site_root: &Path,
-) -> Result<(), FixedPointFailure> {
+fn check_fixed_point(content_path: &Path, site_root: &Path) -> Result<(), FixedPointFailure> {
     let src = std::fs::read_to_string(content_path).expect("content file readable");
 
     let grammar = match grammar_for_file(content_path, site_root) {
@@ -208,9 +208,7 @@ fn serializer_reaches_fixed_point_on_all_fixtures() {
     ];
 
     // Files to skip (intentionally invalid)
-    let skip_files = [
-        workspace_root.join("fixtures/blog-site/content/article/invalid-post.md"),
-    ];
+    let skip_files = [workspace_root.join("fixtures/blog-site/content/article/invalid-post.md")];
 
     let mut existing_sites: Vec<PathBuf> = Vec::new();
     for site in &candidate_sites {
@@ -224,7 +222,10 @@ fn serializer_reaches_fixed_point_on_all_fixtures() {
     if existing_sites.is_empty() {
         panic!(
             "No fixture site directories found. Expected at least one of: {:?}",
-            candidate_sites.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()
+            candidate_sites
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
         );
     }
 

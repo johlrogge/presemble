@@ -12,11 +12,16 @@ fn repo_root() -> PathBuf {
 }
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target" || n == ".git") {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "target" || n == ".git")
+            {
                 continue;
             }
             rust_sources(&path, out);
@@ -33,16 +38,32 @@ fn no_crate_level_allow_deprecated() {
     for top in ["components", "bases", "projects"] {
         rust_sources(&root.join(top), &mut files);
     }
-    assert!(files.len() > 100, "found only {} source files; is the root right?", files.len());
+    assert!(
+        files.len() > 100,
+        "found only {} source files; is the root right?",
+        files.len()
+    );
     let offenders: Vec<String> = files
         .iter()
         .filter(|path| {
             fs::read_to_string(path)
                 .unwrap_or_default()
                 .lines()
-                .any(|line| line.trim().replace(' ', "").starts_with("#![allow(deprecated"))
+                .any(|line| {
+                    line.trim()
+                        .replace(' ', "")
+                        .starts_with("#![allow(deprecated")
+                })
         })
-        .map(|path| path.strip_prefix(&root).unwrap_or(path).display().to_string())
+        .map(|path| {
+            path.strip_prefix(&root)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        })
         .collect();
-    assert!(offenders.is_empty(), "crate-level allow(deprecated): {offenders:?}");
+    assert!(
+        offenders.is_empty(),
+        "crate-level allow(deprecated): {offenders:?}"
+    );
 }

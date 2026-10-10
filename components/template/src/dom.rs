@@ -1,5 +1,5 @@
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 
 /// An EDN form — the output of reading EDN text.
 /// Named `Form` after the Lisp tradition: the reader produces forms,
@@ -8,7 +8,10 @@ use quick_xml::Reader;
 pub enum Form {
     Str(String),
     Symbol(String),
-    Keyword { namespace: Option<String>, name: String },
+    Keyword {
+        namespace: Option<String>,
+        name: String,
+    },
     List(Vec<Form>),
     Vector(Vec<Form>),
     Map(Vec<(Form, Form)>),
@@ -45,8 +48,14 @@ impl Form {
         match self {
             Form::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
             Form::Symbol(s) => s.clone(),
-            Form::Keyword { namespace: Some(ns), name } => format!(":{ns}/{name}"),
-            Form::Keyword { namespace: None, name } => format!(":{name}"),
+            Form::Keyword {
+                namespace: Some(ns),
+                name,
+            } => format!(":{ns}/{name}"),
+            Form::Keyword {
+                namespace: None,
+                name,
+            } => format!(":{name}"),
             Form::Integer(n) => n.to_string(),
             Form::Nil => "nil".to_string(),
             Form::List(items) => {
@@ -58,7 +67,8 @@ impl Form {
                 format!("[{}]", inner.join(" "))
             }
             Form::Map(pairs) => {
-                let inner: Vec<String> = pairs.iter()
+                let inner: Vec<String> = pairs
+                    .iter()
                     .map(|(k, v)| format!("{} {}", k.to_edn_string(), v.to_edn_string()))
                     .collect();
                 format!("{{{}}}", inner.join(" "))
@@ -107,10 +117,7 @@ impl Element {
 
     /// Get an attribute form by name.
     pub fn attr_form(&self, name: &str) -> Option<&Form> {
-        self.attrs
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v)
+        self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v)
     }
 }
 
@@ -136,13 +143,17 @@ pub fn parse_template_xml(src: &str) -> Result<Vec<Node>, crate::error::Template
             }
 
             Ok(Event::End(_)) => {
-                let (name, attrs, children) = stack
-                    .pop()
-                    .ok_or_else(|| crate::error::TemplateError::ParseError(
+                let (name, attrs, children) = stack.pop().ok_or_else(|| {
+                    crate::error::TemplateError::ParseError(
                         "unexpected end tag without matching start".into(),
-                    ))?;
+                    )
+                })?;
 
-                let element = Element { name, attrs, children };
+                let element = Element {
+                    name,
+                    attrs,
+                    children,
+                };
 
                 if let Some(parent) = stack.last_mut() {
                     parent.2.push(Node::Element(element));
@@ -155,7 +166,11 @@ pub fn parse_template_xml(src: &str) -> Result<Vec<Node>, crate::error::Template
             Ok(Event::Empty(ref e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 let attrs = parse_attrs(e)?;
-                let element = Element { name, attrs, children: Vec::new() };
+                let element = Element {
+                    name,
+                    attrs,
+                    children: Vec::new(),
+                };
 
                 if let Some(parent) = stack.last_mut() {
                     parent.2.push(Node::Element(element));
@@ -202,8 +217,8 @@ fn parse_attrs<'a>(
 ) -> Result<Vec<(String, Form)>, crate::error::TemplateError> {
     let mut attrs = Vec::new();
     for attr_result in e.attributes() {
-        let attr = attr_result
-            .map_err(|err| crate::error::TemplateError::ParseError(err.to_string()))?;
+        let attr =
+            attr_result.map_err(|err| crate::error::TemplateError::ParseError(err.to_string()))?;
         let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
         let value = attr
             .unescape_value()
@@ -420,7 +435,10 @@ pub fn rewrite_urls(nodes: Vec<Node>, rewriter: &UrlRewriter) -> Vec<Node> {
     if matches!(rewriter, UrlRewriter::Identity) {
         return nodes; // fast path: no work needed
     }
-    nodes.into_iter().map(|node| rewrite_node(node, rewriter)).collect()
+    nodes
+        .into_iter()
+        .map(|node| rewrite_node(node, rewriter))
+        .collect()
 }
 
 fn rewrite_node(node: Node, rewriter: &UrlRewriter) -> Node {
@@ -434,13 +452,17 @@ fn rewrite_node(node: Node, rewriter: &UrlRewriter) -> Node {
                 .map(|(_, attrs)| *attrs)
             {
                 for (key, value) in &mut el.attrs {
-                    if attr_names.contains(&key.as_str()) && let Form::Str(s) = value {
+                    if attr_names.contains(&key.as_str())
+                        && let Form::Str(s) = value
+                    {
                         *s = rewriter.rewrite(s);
                     }
                 }
             }
             // Recurse into children
-            el.children = el.children.into_iter()
+            el.children = el
+                .children
+                .into_iter()
                 .map(|child| rewrite_node(child, rewriter))
                 .collect();
             Node::Element(el)
@@ -450,11 +472,7 @@ fn rewrite_node(node: Node, rewriter: &UrlRewriter) -> Node {
 
 /// Attribute names on specific elements that may contain local asset paths.
 /// (element_name, attr_name)
-const ASSET_ATTRS: &[(&str, &str)] = &[
-    ("link", "href"),
-    ("img", "src"),
-    ("script", "src"),
-];
+const ASSET_ATTRS: &[(&str, &str)] = &[("link", "href"), ("img", "src"), ("script", "src")];
 
 /// Extract local asset paths referenced in element attributes.
 ///
@@ -480,7 +498,8 @@ fn extract_asset_paths_recursive(nodes: &[Node], found: &mut std::collections::H
             for (elem_name, attr_name) in ASSET_ATTRS {
                 if el.name == *elem_name
                     && let Some(value) = el.attr(attr_name)
-                    && value.starts_with('/') && !value.contains("://")
+                    && value.starts_with('/')
+                    && !value.contains("://")
                 {
                     found.insert(value.to_string());
                 }
@@ -523,7 +542,10 @@ mod tests {
         let src = "<div><p>Hello</p></div>";
         let nodes = parse_template_xml(src).unwrap();
         let out = serialize_nodes(&nodes);
-        assert!(out.contains("<div>") && out.contains("<p>Hello</p>"), "{out}");
+        assert!(
+            out.contains("<div>") && out.contains("<p>Hello</p>"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -653,7 +675,10 @@ mod tests {
         let src = "<p>Use &lt;div&gt; for blocks</p>";
         let nodes = parse_template_xml(src).unwrap();
         let out = serialize_nodes(&nodes);
-        assert!(out.contains("&lt;div&gt;"), "angle brackets must be escaped: {out}");
+        assert!(
+            out.contains("&lt;div&gt;"),
+            "angle brackets must be escaped: {out}"
+        );
         assert!(!out.contains("<div>"), "raw tag must not appear: {out}");
     }
 
@@ -663,7 +688,10 @@ mod tests {
         let src = "<pre><code>&lt;presemble:insert data=\"title\" /&gt;</code></pre>";
         let nodes = parse_template_xml(src).unwrap();
         let out = serialize_nodes(&nodes);
-        assert!(out.contains("&lt;presemble:insert"), "presemble tag must be escaped in output: {out}");
+        assert!(
+            out.contains("&lt;presemble:insert"),
+            "presemble tag must be escaped in output: {out}"
+        );
     }
 
     #[test]
@@ -688,21 +716,30 @@ mod tests {
     #[test]
     fn rewrite_root_with_base() {
         let r = UrlRewriter::RootWithBase("/presemble".to_string());
-        assert_eq!(r.rewrite("/assets/style.css"), "/presemble/assets/style.css");
+        assert_eq!(
+            r.rewrite("/assets/style.css"),
+            "/presemble/assets/style.css"
+        );
         assert_eq!(r.rewrite("/feature/slug"), "/presemble/feature/slug");
     }
 
     #[test]
     fn rewrite_absolute() {
         let r = UrlRewriter::Absolute("https://presemble.io".to_string());
-        assert_eq!(r.rewrite("/assets/style.css"), "https://presemble.io/assets/style.css");
+        assert_eq!(
+            r.rewrite("/assets/style.css"),
+            "https://presemble.io/assets/style.css"
+        );
     }
 
     #[test]
     fn rewrite_skips_external_urls() {
         let r = UrlRewriter::Relative("/article/hello".to_string());
         assert_eq!(r.rewrite("https://example.com"), "https://example.com");
-        assert_eq!(r.rewrite("mailto:info@example.com"), "mailto:info@example.com");
+        assert_eq!(
+            r.rewrite("mailto:info@example.com"),
+            "mailto:info@example.com"
+        );
     }
 
     #[test]
@@ -719,6 +756,9 @@ mod tests {
         let rewritten = rewrite_urls(nodes, &r);
         let html = serialize_nodes(&rewritten);
         assert!(html.contains(r#"href="../../author/jo""#), "got: {html}");
-        assert!(html.contains(r#"href="../../assets/style.css""#), "got: {html}");
+        assert!(
+            html.contains(r#"href="../../assets/style.css""#),
+            "got: {html}"
+        );
     }
 }

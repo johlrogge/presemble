@@ -57,7 +57,10 @@ impl std::fmt::Display for Path {
 pub enum Literal {
     Str(String),
     Integer(i64),
-    Keyword { namespace: Option<String>, name: String },
+    Keyword {
+        namespace: Option<String>,
+        name: String,
+    },
 }
 
 /// A template expression.
@@ -68,7 +71,10 @@ pub enum Expression {
     /// A call of a pure function or of a template. The head is a `Ref` naming
     /// the function or template, or a call that returns a function
     /// (`(juxt header footer)`).
-    Call { head: Box<Expression>, args: Vec<Expression> },
+    Call {
+        head: Box<Expression>,
+        args: Vec<Expression>,
+    },
     Literal(Literal),
 }
 
@@ -120,14 +126,46 @@ pub struct FunctionSpec {
 
 /// The one function table. The evaluator and the checker both read it.
 pub const FUNCTIONS: &[FunctionSpec] = &[
-    FunctionSpec { name: "ref", arity: Arity::Exactly(1), kind: FunctionKind::Identity },
-    FunctionSpec { name: "text", arity: Arity::Exactly(1), kind: FunctionKind::Text },
-    FunctionSpec { name: "to_lower", arity: Arity::Exactly(1), kind: FunctionKind::Text },
-    FunctionSpec { name: "to_upper", arity: Arity::Exactly(1), kind: FunctionKind::Text },
-    FunctionSpec { name: "capitalize", arity: Arity::Exactly(1), kind: FunctionKind::Text },
-    FunctionSpec { name: "truncate", arity: Arity::Exactly(1), kind: FunctionKind::Text },
-    FunctionSpec { name: "juxt", arity: Arity::AtLeast(1), kind: FunctionKind::Juxt },
-    FunctionSpec { name: "->", arity: Arity::AtLeast(2), kind: FunctionKind::Thread },
+    FunctionSpec {
+        name: "ref",
+        arity: Arity::Exactly(1),
+        kind: FunctionKind::Identity,
+    },
+    FunctionSpec {
+        name: "text",
+        arity: Arity::Exactly(1),
+        kind: FunctionKind::Text,
+    },
+    FunctionSpec {
+        name: "to_lower",
+        arity: Arity::Exactly(1),
+        kind: FunctionKind::Text,
+    },
+    FunctionSpec {
+        name: "to_upper",
+        arity: Arity::Exactly(1),
+        kind: FunctionKind::Text,
+    },
+    FunctionSpec {
+        name: "capitalize",
+        arity: Arity::Exactly(1),
+        kind: FunctionKind::Text,
+    },
+    FunctionSpec {
+        name: "truncate",
+        arity: Arity::Exactly(1),
+        kind: FunctionKind::Text,
+    },
+    FunctionSpec {
+        name: "juxt",
+        arity: Arity::AtLeast(1),
+        kind: FunctionKind::Juxt,
+    },
+    FunctionSpec {
+        name: "->",
+        arity: Arity::AtLeast(2),
+        kind: FunctionKind::Thread,
+    },
 ];
 
 /// The function called `name`, if there is one.
@@ -141,7 +179,11 @@ pub enum ExpressionError {
     /// `()`.
     Empty,
     /// A function given the wrong number of arguments.
-    Arity { function: String, expected: Arity, given: usize },
+    Arity {
+        function: String,
+        expected: Arity,
+        given: usize,
+    },
     /// A form that is no expression: a vector, a map, a set or `nil`.
     Unsupported(String),
 }
@@ -150,7 +192,11 @@ impl std::fmt::Display for ExpressionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExpressionError::Empty => f.write_str("an empty list is not an expression"),
-            ExpressionError::Arity { function, expected, given } => write!(
+            ExpressionError::Arity {
+                function,
+                expected,
+                given,
+            } => write!(
                 f,
                 "wrong number of arguments to '{function}': expected {expected}, given {given}"
             ),
@@ -198,7 +244,10 @@ impl Expression {
                     .iter()
                     .map(Expression::from_form)
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(Expression::Call { head: Box::new(head), args })
+                Ok(Expression::Call {
+                    head: Box::new(head),
+                    args,
+                })
             }
             other => Err(ExpressionError::Unsupported(other.to_edn_string())),
         }
@@ -303,9 +352,10 @@ pub fn evaluate(
         Expression::Literal(literal) => Ok(Evaluated::Value(match literal {
             Literal::Str(s) => Value::Text(s.clone()),
             Literal::Integer(n) => Value::Integer(*n),
-            Literal::Keyword { namespace, name } => {
-                Value::Keyword { namespace: namespace.clone(), name: name.clone() }
-            }
+            Literal::Keyword { namespace, name } => Value::Keyword {
+                namespace: namespace.clone(),
+                name: name.clone(),
+            },
         })),
         Expression::Ref(path) => Ok(Evaluated::Value(resolve(path, graph))),
         Expression::Call { head, args } => call(head, args, graph, ctx),
@@ -351,7 +401,10 @@ fn call(
             }
         }
         // An expression that gives a function: `(juxt a b)`, applied.
-        Expression::Call { head: inner, args: names } => match inner.as_ref() {
+        Expression::Call {
+            head: inner,
+            args: names,
+        } => match inner.as_ref() {
             Expression::Ref(path) if path.dotted() == "juxt" => {
                 if args.len() > 1 {
                     return Err(RenderError::Render(format!(
@@ -382,22 +435,28 @@ fn call_function(
         FunctionKind::Text => {
             let value = plain_value(evaluate(&args[0], graph, ctx)?);
             let text = apply_to_value(spec.name, Some(&value)).flatten();
-            Ok(Evaluated::Value(text.map(Value::Text).unwrap_or(Value::Absent)))
+            Ok(Evaluated::Value(
+                text.map(Value::Text).unwrap_or(Value::Absent),
+            ))
         }
         FunctionKind::Thread => {
             let value = plain_value(evaluate(&args[0], graph, ctx)?);
             let mut names = args[1..].iter().map(function_name);
             let first = names.next().expect("arity guarantees one function")?;
-            let mut current = apply_to_value(&first, Some(&value))
-                .ok_or_else(|| unknown_function(&first))?;
+            let mut current =
+                apply_to_value(&first, Some(&value)).ok_or_else(|| unknown_function(&first))?;
             for name in names {
                 let name = name?;
                 current = match current {
-                    Some(text) => Some(apply_to_text(&name, &text).ok_or_else(|| unknown_function(&name))?),
+                    Some(text) => {
+                        Some(apply_to_text(&name, &text).ok_or_else(|| unknown_function(&name))?)
+                    }
                     None => None,
                 };
             }
-            Ok(Evaluated::Value(current.map(Value::Text).unwrap_or(Value::Absent)))
+            Ok(Evaluated::Value(
+                current.map(Value::Text).unwrap_or(Value::Absent),
+            ))
         }
         FunctionKind::Juxt => apply_templates(&template_names(args)?, None, graph, ctx),
     }
@@ -431,7 +490,9 @@ fn template_names(args: &[Expression]) -> Result<Vec<String>, RenderError> {
     args.iter()
         .map(|arg| match arg {
             Expression::Ref(path) => Ok(path.dotted()),
-            _ => Err(RenderError::Render("expected the name of a template".to_string())),
+            _ => Err(RenderError::Render(
+                "expected the name of a template".to_string(),
+            )),
         })
         .collect()
 }
@@ -485,9 +546,9 @@ fn render_named(
         )));
     }
     let local = name.strip_prefix("self/").unwrap_or(name);
-    let nodes = ctx.resolve_callable(local).ok_or_else(|| {
-        RenderError::Render(format!("unknown function or template '{name}'"))
-    })?;
+    let nodes = ctx
+        .resolve_callable(local)
+        .ok_or_else(|| RenderError::Render(format!("unknown function or template '{name}'")))?;
     crate::transformer::transform(nodes, graph, &ctx.descend())
 }
 
@@ -513,7 +574,11 @@ pub fn attribute_text(
     match value {
         Value::Record(_) | Value::List(_) => {
             let label = expression.label();
-            let kind = if matches!(value, Value::Record(_)) { "record" } else { "list" };
+            let kind = if matches!(value, Value::Record(_)) {
+                "record"
+            } else {
+                "list"
+            };
             Err(RenderError::Render(format!(
                 "{label} is {} and cannot be an attribute value; name a field of it (for example {label}.href)",
                 schema::with_article(kind)
@@ -539,12 +604,18 @@ mod tests {
 
     #[test]
     fn a_bare_symbol_is_a_ref() {
-        assert_eq!(expression("item.link.href"), Expression::Ref(Path::parse("item.link.href")));
+        assert_eq!(
+            expression("item.link.href"),
+            Expression::Ref(Path::parse("item.link.href"))
+        );
     }
 
     #[test]
     fn ref_of_a_path_is_a_ref() {
-        assert_eq!(expression("(ref item.link.href)"), expression("item.link.href"));
+        assert_eq!(
+            expression("(ref item.link.href)"),
+            expression("item.link.href")
+        );
     }
 
     #[test]
@@ -553,7 +624,10 @@ mod tests {
             expression(r#"(ref "(draft)")"#),
             Expression::Literal(Literal::Str("(draft)".to_string()))
         );
-        assert_eq!(expression("(ref 3)"), Expression::Literal(Literal::Integer(3)));
+        assert_eq!(
+            expression("(ref 3)"),
+            Expression::Literal(Literal::Integer(3))
+        );
     }
 
     #[test]
@@ -584,7 +658,9 @@ mod tests {
     #[test]
     fn a_juxt_applied_to_the_input_is_a_call_of_a_call() {
         let e = expression("((juxt header self/body footer) input)");
-        let Expression::Call { head, args } = e else { panic!("a call") };
+        let Expression::Call { head, args } = e else {
+            panic!("a call")
+        };
         assert!(matches!(*head, Expression::Call { .. }));
         assert_eq!(args, vec![Expression::Ref(Path::parse("input"))]);
     }
@@ -592,7 +668,10 @@ mod tests {
     #[test]
     fn empty_list_and_other_forms_are_not_expressions() {
         for src in ["()", "[a]", "nil", "#{a}"] {
-            assert!(Expression::from_form(&read_form(src).unwrap()).is_err(), "{src}");
+            assert!(
+                Expression::from_form(&read_form(src).unwrap()).is_err(),
+                "{src}"
+            );
         }
     }
 
@@ -602,8 +681,14 @@ mod tests {
             r#"<a href="(ref x.y)" title="(draft" class="c" id="/x">t</a>"#,
         )
         .unwrap();
-        let Node::Element(a) = &nodes[0] else { panic!("an element") };
-        assert!(matches!(a.attr_form("href"), Some(Form::List(_))), "{:?}", a.attrs);
+        let Node::Element(a) = &nodes[0] else {
+            panic!("an element")
+        };
+        assert!(
+            matches!(a.attr_form("href"), Some(Form::List(_))),
+            "{:?}",
+            a.attrs
+        );
         // Unbalanced: not a form, so literal text.
         assert_eq!(a.attr_form("title"), Some(&Form::Str("(draft".to_string())));
         assert_eq!(a.attr_form("class"), Some(&Form::Str("c".to_string())));
@@ -612,12 +697,22 @@ mod tests {
 
     #[test]
     fn the_subject_is_the_path_of_the_first_argument() {
-        assert_eq!(expression("input.title").subject().map(Path::dotted), Some("input.title".into()));
         assert_eq!(
-            expression("(-> input.title text to_upper)").subject().map(Path::dotted),
+            expression("input.title").subject().map(Path::dotted),
             Some("input.title".into())
         );
-        assert_eq!(expression("(text item.summary)").subject().map(Path::dotted), Some("item.summary".into()));
+        assert_eq!(
+            expression("(-> input.title text to_upper)")
+                .subject()
+                .map(Path::dotted),
+            Some("input.title".into())
+        );
+        assert_eq!(
+            expression("(text item.summary)")
+                .subject()
+                .map(Path::dotted),
+            Some("item.summary".into())
+        );
         assert_eq!(expression(r#"(ref "x")"#).subject(), None);
     }
 }
@@ -629,7 +724,7 @@ mod rendering_tests {
     use crate::data::DataGraph;
     use crate::dom::{parse_template_xml, serialize_nodes};
     use crate::hiccup::parse_template_hiccup;
-    use crate::registry::{extract_definitions, RenderContext, TemplateRegistry};
+    use crate::registry::{RenderContext, TemplateRegistry, extract_definitions};
     use crate::transformer::transform;
     use std::collections::HashMap;
 
@@ -643,7 +738,10 @@ mod rendering_tests {
         article.insert("count", Value::Integer(3));
         article.insert(
             "tags",
-            Value::List(vec![Value::Text("a".to_string()), Value::Text("b".to_string())]),
+            Value::List(vec![
+                Value::Text("a".to_string()),
+                Value::Text("b".to_string()),
+            ]),
         );
         let mut graph = DataGraph::new();
         graph.insert("article", Value::Record(article));
@@ -651,7 +749,10 @@ mod rendering_tests {
         one.insert("title", Value::Text("One".to_string()));
         let mut two = DataGraph::new();
         two.insert("title", Value::Text("Two".to_string()));
-        graph.insert("articles", Value::List(vec![Value::Record(one), Value::Record(two)]));
+        graph.insert(
+            "articles",
+            Value::List(vec![Value::Record(one), Value::Record(two)]),
+        );
         graph
     }
 
@@ -659,7 +760,9 @@ mod rendering_tests {
 
     impl TemplateRegistry for Templates {
         fn resolve(&self, name: &str) -> Option<Vec<Node>> {
-            self.0.get(name).map(|src| parse_template_hiccup(src).expect("hiccup"))
+            self.0
+                .get(name)
+                .map(|src| parse_template_hiccup(src).expect("hiccup"))
         }
     }
 
@@ -669,7 +772,8 @@ mod rendering_tests {
         registry: &dyn TemplateRegistry,
     ) -> Result<String, RenderError> {
         let (nodes, defs) = extract_definitions(nodes);
-        let ctx = RenderContext::with_local_defs(registry, &defs, crate::data::OutputMode::Editorial);
+        let ctx =
+            RenderContext::with_local_defs(registry, &defs, crate::data::OutputMode::Editorial);
         Ok(serialize_nodes(&transform(nodes, graph, &ctx)?))
     }
 
@@ -688,10 +792,20 @@ mod rendering_tests {
     #[test]
     fn insert_without_as_places_text_as_is() {
         let g = graph();
-        assert_eq!(hiccup(&g, "[:h1 [:presemble/insert {:data article.title}]]").unwrap(), "<h1>Hello</h1>");
-        assert_eq!(hiccup(&g, "[:h1 [:presemble/insert {:data (text article.title)}]]").unwrap(), "<h1>Hello</h1>");
         assert_eq!(
-            html(&g, r#"<h1><presemble:insert data="(ref article.title)" /></h1>"#).unwrap(),
+            hiccup(&g, "[:h1 [:presemble/insert {:data article.title}]]").unwrap(),
+            "<h1>Hello</h1>"
+        );
+        assert_eq!(
+            hiccup(&g, "[:h1 [:presemble/insert {:data (text article.title)}]]").unwrap(),
+            "<h1>Hello</h1>"
+        );
+        assert_eq!(
+            html(
+                &g,
+                r#"<h1><presemble:insert data="(ref article.title)" /></h1>"#
+            )
+            .unwrap(),
             "<h1>Hello</h1>"
         );
     }
@@ -699,14 +813,23 @@ mod rendering_tests {
     #[test]
     fn child_call_places_text_as_is() {
         let g = graph();
-        assert_eq!(hiccup(&g, "[:title (text article.title)]").unwrap(), "<title>Hello</title>");
+        assert_eq!(
+            hiccup(&g, "[:title (text article.title)]").unwrap(),
+            "<title>Hello</title>"
+        );
     }
 
     #[test]
     fn insert_without_as_places_nothing_for_an_absent_value() {
         let g = graph();
-        assert_eq!(hiccup(&g, "[:p [:presemble/insert {:data article.nothing}]]").unwrap(), "<p></p>");
-        assert_eq!(hiccup(&g, "[:p (text article.nothing)]").unwrap(), "<p></p>");
+        assert_eq!(
+            hiccup(&g, "[:p [:presemble/insert {:data article.nothing}]]").unwrap(),
+            "<p></p>"
+        );
+        assert_eq!(
+            hiccup(&g, "[:p (text article.nothing)]").unwrap(),
+            "<p></p>"
+        );
     }
 
     /// GUARD: with :as the value is its own element, with class and editor data.
@@ -718,7 +841,11 @@ mod rendering_tests {
             r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello</h1>"#
         );
         assert_eq!(
-            hiccup(&g, r#"[:presemble/insert {:data (text article.title) :as "h1"}]"#).unwrap(),
+            hiccup(
+                &g,
+                r#"[:presemble/insert {:data (text article.title) :as "h1"}]"#
+            )
+            .unwrap(),
             r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello</h1>"#
         );
     }
@@ -728,7 +855,10 @@ mod rendering_tests {
     fn record_without_as_is_its_own_element() {
         let g = graph();
         let html = hiccup(&g, "[:p [:presemble/insert {:data article.author}]]").unwrap();
-        assert!(html.starts_with(r#"<p><a href="/authors/jo""#) && html.ends_with(">Jo</a></p>"), "{html}");
+        assert!(
+            html.starts_with(r#"<p><a href="/authors/jo""#) && html.ends_with(">Jo</a></p>"),
+            "{html}"
+        );
         assert!(!html.contains("<span"), "{html}");
     }
 
@@ -736,8 +866,14 @@ mod rendering_tests {
     fn attribute_expression_references_the_input() {
         let g = graph();
         let want = r#"<a href="/authors/jo">x</a>"#;
-        assert_eq!(hiccup(&g, r#"[:a {:href article.author.href} "x"]"#).unwrap(), want);
-        assert_eq!(hiccup(&g, r#"[:a {:href (ref article.author.href)} "x"]"#).unwrap(), want);
+        assert_eq!(
+            hiccup(&g, r#"[:a {:href article.author.href} "x"]"#).unwrap(),
+            want
+        );
+        assert_eq!(
+            hiccup(&g, r#"[:a {:href (ref article.author.href)} "x"]"#).unwrap(),
+            want
+        );
     }
 
     #[test]
@@ -808,20 +944,36 @@ mod rendering_tests {
             r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello</h1>"#
         );
         assert_eq!(
-            hiccup(&g, r#"[:presemble/insert {:data (ref article.title) :as "h1"}]"#).unwrap(),
+            hiccup(
+                &g,
+                r#"[:presemble/insert {:data (ref article.title) :as "h1"}]"#
+            )
+            .unwrap(),
             legacy
         );
         assert_eq!(
-            html(&g, r#"<presemble:insert data="(ref article.title)" as="h1" />"#).unwrap(),
+            html(
+                &g,
+                r#"<presemble:insert data="(ref article.title)" as="h1" />"#
+            )
+            .unwrap(),
             legacy
         );
         // A call: the subject is the path it reads.
         assert_eq!(
-            hiccup(&g, r#"[:presemble/insert {:data (to_upper article.title) :as "h1"}]"#).unwrap(),
+            hiccup(
+                &g,
+                r#"[:presemble/insert {:data (to_upper article.title) :as "h1"}]"#
+            )
+            .unwrap(),
             r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">HELLO</h1>"#
         );
         assert_eq!(
-            html(&g, r#"<presemble:insert data="(-> article.title text to_upper)" as="h1" />"#).unwrap(),
+            html(
+                &g,
+                r#"<presemble:insert data="(-> article.title text to_upper)" as="h1" />"#
+            )
+            .unwrap(),
             r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">HELLO</h1>"#
         );
     }
@@ -854,11 +1006,19 @@ mod rendering_tests {
     fn data_slot_takes_an_expression() {
         let g = graph();
         assert_eq!(
-            hiccup(&g, r#"[:template {:data-slot (ref article.author)} [:p "has"]]"#).unwrap(),
+            hiccup(
+                &g,
+                r#"[:template {:data-slot (ref article.author)} [:p "has"]]"#
+            )
+            .unwrap(),
             "<p>has</p>"
         );
         assert_eq!(
-            hiccup(&g, r#"[:template {:data-slot (ref article.nothing)} [:p "has"]]"#).unwrap(),
+            hiccup(
+                &g,
+                r#"[:template {:data-slot (ref article.nothing)} [:p "has"]]"#
+            )
+            .unwrap(),
             ""
         );
     }
@@ -867,10 +1027,16 @@ mod rendering_tests {
     fn child_list_is_an_insert_of_the_call() {
         let nodes = parse_template_hiccup("((juxt header self/body footer) input)").unwrap();
         assert_eq!(nodes.len(), 1);
-        let Node::Element(insert) = &nodes[0] else { panic!("an element") };
+        let Node::Element(insert) = &nodes[0] else {
+            panic!("an element")
+        };
         assert_eq!(insert.name, "presemble:insert");
         assert!(insert.children.is_empty());
-        assert!(matches!(insert.attr_form("data"), Some(Form::List(_))), "{:?}", insert.attrs);
+        assert!(
+            matches!(insert.attr_form("data"), Some(Form::List(_))),
+            "{:?}",
+            insert.attrs
+        );
     }
 
     #[test]
@@ -896,7 +1062,10 @@ mod rendering_tests {
         let g = graph();
         let registry = Templates(HashMap::from([("card", r#"[:b {:title input.text}]"#)]));
         let nodes = parse_template_hiccup("[:p (card article.author)]").unwrap();
-        assert_eq!(render_nodes(&g, nodes, &registry).unwrap(), r#"<p><b title="Jo"></b></p>"#);
+        assert_eq!(
+            render_nodes(&g, nodes, &registry).unwrap(),
+            r#"<p><b title="Jo"></b></p>"#
+        );
     }
 
     #[test]
@@ -928,8 +1097,14 @@ mod rendering_tests {
         for (src, mentions) in [
             (r#"<presemble:include src="card" />"#, "presemble:include"),
             (r#"<presemble:apply template="card" />"#, "presemble:apply"),
-            (r#"<presemble:insert data="(ref article.title)" apply="text" />"#, "apply"),
-            (r#"<div presemble:class="article.title">x</div>"#, "presemble:class"),
+            (
+                r#"<presemble:insert data="(ref article.title)" apply="text" />"#,
+                "apply",
+            ),
+            (
+                r#"<div presemble:class="article.title">x</div>"#,
+                "presemble:class",
+            ),
         ] {
             let err = render(src).expect_err(src);
             assert!(err.to_string().contains(mentions), "{src}: {err}");
@@ -960,8 +1135,9 @@ mod rendering_tests {
             "# Title {#title}\noccurs\n: exactly once\n\n- Tags {#tags}\n\n----\n\nBody.\n",
         )
         .expect("schema");
-        let doc = content::parse_and_assign(&format!("# T\n\n{list_md}\n\n----\n\nBody.\n"), &grammar)
-            .expect("parses");
+        let doc =
+            content::parse_and_assign(&format!("# T\n\n{list_md}\n\n----\n\nBody.\n"), &grammar)
+                .expect("parses");
         crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Published)
     }
 
@@ -972,9 +1148,14 @@ mod rendering_tests {
     #[test]
     fn list_slot_items_are_nodes_and_text_reads_them() {
         let g = list_slot_graph("1. one\n2. **two**\n   - nested\n3. three");
-        let Some(Value::List(items)) = g.resolve(&["tags"]) else { panic!("a list: {:?}", g.resolve(&["tags"])) };
+        let Some(Value::List(items)) = g.resolve(&["tags"]) else {
+            panic!("a list: {:?}", g.resolve(&["tags"]))
+        };
         assert_eq!(items.len(), 3, "one item per entry, ordered or not");
-        assert!(items.iter().all(|item| matches!(item, Value::Nodes(_))), "{items:?}");
+        assert!(
+            items.iter().all(|item| matches!(item, Value::Nodes(_))),
+            "{items:?}"
+        );
 
         // Inserting an item places its blocks (tight: no <p>).
         assert_eq!(
@@ -996,7 +1177,9 @@ mod rendering_tests {
         );
         // A bullet list is the same, and a loose item keeps its paragraphs.
         let g = list_slot_graph("- a\n\n  b\n- c");
-        let Some(Value::List(items)) = g.resolve(&["tags"]) else { panic!("a list") };
+        let Some(Value::List(items)) = g.resolve(&["tags"]) else {
+            panic!("a list")
+        };
         assert_eq!(items.len(), 2);
         assert_eq!(
             html(

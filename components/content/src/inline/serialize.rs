@@ -24,7 +24,11 @@ pub struct NotWritable {
 
 impl std::fmt::Display for NotWritable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the inlines do not read back as themselves in a {:?} context", self.ctx)
+        write!(
+            f,
+            "the inlines do not read back as themselves in a {:?} context",
+            self.ctx
+        )
     }
 }
 
@@ -172,7 +176,11 @@ fn flatten_text(items: &[Inline], flat: &mut String) {
         match item {
             Inline::Text(s) => flat.push_str(s),
             Inline::Emph(inner) | Inline::Strong(inner) => flatten_text(inner.as_slice(), flat),
-            Inline::Link { destination, title, text } => {
+            Inline::Link {
+                destination,
+                title,
+                text,
+            } => {
                 if autolink_label(destination.as_str(), title.as_deref(), text).is_none() {
                     flatten_text(text.as_slice(), flat);
                     flat.push_str("](");
@@ -200,15 +208,21 @@ fn count_backticks(items: &[Inline]) -> usize {
             Inline::Code(_) => 2,
             Inline::LineBreak => 0,
             Inline::Emph(inner) | Inline::Strong(inner) => count_backticks(inner.as_slice()),
-            Inline::Link { destination, title, text } => {
+            Inline::Link {
+                destination,
+                title,
+                text,
+            } => {
                 if let Some(label) = autolink_label(destination.as_str(), title.as_deref(), text) {
                     backticks_in(label)
                 } else {
-                    count_backticks(text.as_slice()) + link_tail_backticks(destination.as_str(), title.as_deref())
+                    count_backticks(text.as_slice())
+                        + link_tail_backticks(destination.as_str(), title.as_deref())
                 }
             }
             Inline::Image { source, title, alt } => {
-                count_backticks(alt.as_slice()) + link_tail_backticks(source.as_str(), title.as_deref())
+                count_backticks(alt.as_slice())
+                    + link_tail_backticks(source.as_str(), title.as_deref())
             }
             Inline::Html(h) => backticks_in(h.as_str()),
             Inline::Comment(c) => backticks_in(c.as_str()),
@@ -228,11 +242,16 @@ fn count_gts(items: &[Inline]) -> usize {
             Inline::Text(s) | Inline::Code(s) => gts_in(s),
             Inline::LineBreak => 0,
             Inline::Emph(inner) | Inline::Strong(inner) => count_gts(inner.as_slice()),
-            Inline::Link { destination, title, text } => {
+            Inline::Link {
+                destination,
+                title,
+                text,
+            } => {
                 if let Some(label) = autolink_label(destination.as_str(), title.as_deref(), text) {
                     1 + gts_in(label)
                 } else {
-                    count_gts(text.as_slice()) + destination_gts(destination.as_str(), title.as_deref())
+                    count_gts(text.as_slice())
+                        + destination_gts(destination.as_str(), title.as_deref())
                 }
             }
             Inline::Image { source, title, alt } => {
@@ -270,12 +289,28 @@ fn write_run(items: &[Inline], place: Place, ahead: &mut Ahead, out: &mut String
             }
             Inline::Emph(inner) => {
                 out.push('*');
-                write_run(inner.as_slice(), Place { marker: false, ..place }, ahead, out);
+                write_run(
+                    inner.as_slice(),
+                    Place {
+                        marker: false,
+                        ..place
+                    },
+                    ahead,
+                    out,
+                );
                 out.push('*');
             }
             Inline::Strong(inner) => {
                 out.push_str("**");
-                write_run(inner.as_slice(), Place { marker: false, ..place }, ahead, out);
+                write_run(
+                    inner.as_slice(),
+                    Place {
+                        marker: false,
+                        ..place
+                    },
+                    ahead,
+                    out,
+                );
                 out.push_str("**");
             }
             Inline::Code(s) => {
@@ -284,7 +319,11 @@ fn write_run(items: &[Inline], place: Place, ahead: &mut Ahead, out: &mut String
                 write_code(s, place, out);
             }
             Inline::LineBreak => out.push_str("\\\n"),
-            Inline::Link { destination, title, text } => {
+            Inline::Link {
+                destination,
+                title,
+                text,
+            } => {
                 if let Some(label) = autolink_label(destination.as_str(), title.as_deref(), text) {
                     ahead.pass_backticks(backticks_in(label));
                     ahead.pass_gts(1 + gts_in(label));
@@ -293,10 +332,17 @@ fn write_run(items: &[Inline], place: Place, ahead: &mut Ahead, out: &mut String
                     out.push('>');
                 } else {
                     out.push('[');
-                    let inner = Place { bracket: true, marker: false, ..place };
+                    let inner = Place {
+                        bracket: true,
+                        marker: false,
+                        ..place
+                    };
                     write_run(text.as_slice(), inner, ahead, out);
                     ahead.flat_pos += 2;
-                    ahead.pass_backticks(link_tail_backticks(destination.as_str(), title.as_deref()));
+                    ahead.pass_backticks(link_tail_backticks(
+                        destination.as_str(),
+                        title.as_deref(),
+                    ));
                     ahead.pass_gts(destination_gts(destination.as_str(), title.as_deref()));
                     out.push_str("](");
                     write_destination(destination.as_str(), title.is_some(), out);
@@ -306,7 +352,16 @@ fn write_run(items: &[Inline], place: Place, ahead: &mut Ahead, out: &mut String
             }
             Inline::Image { source, title, alt } => {
                 out.push_str("![");
-                write_run(alt.as_slice(), Place { bracket: true, marker: false, ..place }, ahead, out);
+                write_run(
+                    alt.as_slice(),
+                    Place {
+                        bracket: true,
+                        marker: false,
+                        ..place
+                    },
+                    ahead,
+                    out,
+                );
                 ahead.flat_pos += 2;
                 ahead.pass_backticks(link_tail_backticks(source.as_str(), title.as_deref()));
                 ahead.pass_gts(destination_gts(source.as_str(), title.as_deref()));
@@ -381,16 +436,17 @@ fn write_text(s: &str, ctx: TextContext, place: Place, ahead: &mut Ahead, out: &
             ahead.pass_gts(1);
         }
         let escape = match c {
-            '\\' => next_char.is_none_or(|n| {
-                n.is_ascii_punctuation() || n == '\n' || entity_for(n).is_some()
-            }),
+            '\\' => next_char
+                .is_none_or(|n| n.is_ascii_punctuation() || n == '\n' || entity_for(n).is_some()),
             '*' => !both(is_plain_space),
             '_' => !(both(is_plain_space) || both(char::is_alphanumeric)),
             '`' => {
                 ahead.pass_backticks(1);
                 ahead.backticks > 0 || (i == 0 && ctx.after_code)
             }
-            '[' => ahead.last_close_paren.is_some_and(|close| close > ahead.flat_pos),
+            '[' => ahead
+                .last_close_paren
+                .is_some_and(|close| close > ahead.flat_pos),
             ']' => place.bracket,
             // A tag, a closing tag, a comment, a declaration, a processing
             // instruction or an autolink needs a `>` later in the output.
@@ -433,16 +489,18 @@ fn trailing_marker(s: &str) -> Option<usize> {
 /// space where the content starts or ends with a backtick, or starts and ends
 /// with a space (which a reader would strip).
 fn write_code(s: &str, place: Place, out: &mut String) {
-    let content = if place.cell { s.replace('|', "\\|") } else { s.to_string() };
-    let longest = content
-        .split(|c| c != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
+    let content = if place.cell {
+        s.replace('|', "\\|")
+    } else {
+        s.to_string()
+    };
+    let longest = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat(longest + 1);
     let pad = content.starts_with('`')
         || content.ends_with('`')
-        || (content.starts_with(' ') && content.ends_with(' ') && content.chars().any(|c| c != ' '));
+        || (content.starts_with(' ')
+            && content.ends_with(' ')
+            && content.chars().any(|c| c != ' '));
     out.push_str(&fence);
     if pad {
         out.push(' ');
@@ -458,7 +516,11 @@ fn write_code(s: &str, place: Place, out: &mut String) {
 
 /// C4: the autolink content for a link whose text is one text equal to its
 /// absolute destination, or to `mailto:` followed by that text.
-fn autolink_label<'a>(destination: &str, title: Option<&str>, text: &'a Inlines) -> Option<&'a str> {
+fn autolink_label<'a>(
+    destination: &str,
+    title: Option<&str>,
+    text: &'a Inlines,
+) -> Option<&'a str> {
     // An autolink has no title.
     if title.is_some() {
         return None;
@@ -467,27 +529,36 @@ fn autolink_label<'a>(destination: &str, title: Option<&str>, text: &'a Inlines)
 }
 
 fn autolink<'a>(destination: &str, text: &'a Inlines) -> Option<&'a str> {
-    let [Inline::Text(label)] = text.as_slice() else { return None };
+    let [Inline::Text(label)] = text.as_slice() else {
+        return None;
+    };
     if label == destination && is_absolute_uri(label) {
         return Some(label);
     }
-    (destination.strip_prefix("mailto:") == Some(label) && is_email(label)).then_some(label.as_str())
+    (destination.strip_prefix("mailto:") == Some(label) && is_email(label))
+        .then_some(label.as_str())
 }
 
 /// A CommonMark absolute URI: a scheme of 2-32 characters, a colon, and no
 /// whitespace, control character, `<` or `>`.
 fn is_absolute_uri(s: &str) -> bool {
-    let Some((scheme, rest)) = s.split_once(':') else { return false };
+    let Some((scheme, rest)) = s.split_once(':') else {
+        return false;
+    };
     let mut chars = scheme.chars();
     (2..=32).contains(&scheme.len())
         && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        && !rest.chars().any(|c| c.is_ascii_control() || c == ' ' || c == '<' || c == '>')
+        && !rest
+            .chars()
+            .any(|c| c.is_ascii_control() || c == ' ' || c == '<' || c == '>')
 }
 
 /// A CommonMark email autolink address.
 fn is_email(s: &str) -> bool {
-    let Some((local, domain)) = s.split_once('@') else { return false };
+    let Some((local, domain)) = s.split_once('@') else {
+        return false;
+    };
     let local_ok = !local.is_empty()
         && local
             .chars()
@@ -587,7 +658,9 @@ fn escape_line_starts(text: &str, first_is_block: bool) -> String {
 /// Whether `text` starts with `[label]:` (the label non-blank, with no
 /// unescaped brackets; it may span lines).
 fn starts_link_reference_definition(text: &str) -> bool {
-    let Some(after) = text.strip_prefix('[') else { return false };
+    let Some(after) = text.strip_prefix('[') else {
+        return false;
+    };
     let mut chars = after.char_indices();
     let mut blank = true;
     while let Some((i, c)) = chars.next() {
@@ -615,10 +688,17 @@ fn opener_escape_at(line: &str, first: bool) -> Option<usize> {
     if is_thematic_break(stripped) {
         return Some(0);
     }
-    if !stripped.is_empty() && (stripped.chars().all(|c| c == '=') || stripped.chars().all(|c| c == '-')) {
+    if !stripped.is_empty()
+        && (stripped.chars().all(|c| c == '=') || stripped.chars().all(|c| c == '-'))
+    {
         return Some(0); // setext underline
     }
-    if !first && stripped.contains('-') && stripped.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')) {
+    if !first
+        && stripped.contains('-')
+        && stripped
+            .chars()
+            .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+    {
         return Some(0); // table delimiter row
     }
     match c {
@@ -652,17 +732,23 @@ fn opener_escape_at(line: &str, first: bool) -> Option<usize> {
 
 /// Three or more `*`, `-` or `_`, all the same, with spaces and tabs between.
 fn is_thematic_break(stripped: &str) -> bool {
-    let Some(marker) = stripped.chars().next().filter(|c| matches!(c, '*' | '-' | '_')) else {
+    let Some(marker) = stripped
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '*' | '-' | '_'))
+    else {
         return false;
     };
     stripped.chars().filter(|&c| c == marker).count() >= 3
-        && stripped.chars().all(|c| c == marker || c == ' ' || c == '\t')
+        && stripped
+            .chars()
+            .all(|c| c == marker || c == ' ' || c == '\t')
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::{
-        parse_inlines, AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination,
+        AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination, parse_inlines,
     };
     use super::*;
     use crate::Comment;
@@ -680,7 +766,10 @@ mod tests {
     }
 
     fn text_para(s: &str) -> String {
-        serialize_inlines(&Inlines::new(vec![t(s)], InlineContext::Paragraph), InlineContext::Paragraph)
+        serialize_inlines(
+            &Inlines::new(vec![t(s)], InlineContext::Paragraph),
+            InlineContext::Paragraph,
+        )
     }
 
     #[test]
@@ -701,8 +790,14 @@ mod tests {
             ("[https://x.y](https://x.y)", "<https://x.y>"),
             ("<https://x.y>", "<https://x.y>"),
             ("<me@example.com>", "<me@example.com>"),
-            ("[me@example.com](mailto:me@example.com)", "<me@example.com>"),
-            ("[https://x.y](https://x.y \"t\")", "[https://x.y](https://x.y \"t\")"),
+            (
+                "[me@example.com](mailto:me@example.com)",
+                "<me@example.com>",
+            ),
+            (
+                "[https://x.y](https://x.y \"t\")",
+                "[https://x.y](https://x.y \"t\")",
+            ),
             ("[a](https://x.y)", "[a](https://x.y)"),
             // C5: code spans.
             ("`a`", "`a`"),
@@ -732,7 +827,10 @@ mod tests {
         }
         // C9 is the block's job; a heading's content is written as one line.
         let heading = parse_inlines("Title \\#", InlineContext::Heading).unwrap();
-        assert_eq!(serialize_inlines(&heading, InlineContext::Heading), "Title \\#");
+        assert_eq!(
+            serialize_inlines(&heading, InlineContext::Heading),
+            "Title \\#"
+        );
     }
 
     #[test]
@@ -795,17 +893,33 @@ mod tests {
             text: Inlines::new(vec![t("a]b")], InlineContext::LinkText),
         };
         let run = Inlines::new(vec![t("a!"), link.clone()], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "a\\![a\\]b](/x)");
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "a\\![a\\]b](/x)"
+        );
         // A heading escapes a trailing marker and a closing run of hashes.
         let heading = Inlines::new(vec![t("see {#x}")], InlineContext::Heading);
-        assert_eq!(serialize_inlines(&heading, InlineContext::Heading), "see \\{#x}");
+        assert_eq!(
+            serialize_inlines(&heading, InlineContext::Heading),
+            "see \\{#x}"
+        );
         let heading = Inlines::new(vec![t("C #")], InlineContext::Heading);
         assert_eq!(serialize_inlines(&heading, InlineContext::Heading), "C \\#");
     }
 
     #[test]
     fn prose_brackets_backticks_and_angles_stay_unescaped() {
-        for s in ["[1]", "[sic]", "a<b", "x < y", "`", "see [1] and [2]", "a<3", "1 < 2 > 0", "a ] b ( c"] {
+        for s in [
+            "[1]",
+            "[sic]",
+            "a<b",
+            "x < y",
+            "`",
+            "see [1] and [2]",
+            "a<3",
+            "1 < 2 > 0",
+            "a ] b ( c",
+        ] {
             assert_eq!(text_para(s), s, "{s:?} is prose");
         }
         let escaped: &[(&str, &str)] = &[
@@ -830,14 +944,29 @@ mod tests {
         // The lookahead runs over the whole top-level run, at any depth.
         let em = |s: &str| Inline::Emph(Inlines::new(vec![t(s)], InlineContext::Paragraph));
         let run = Inlines::new(vec![t("a ["), em("b"), t("](c)")], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "a \\[*b*](c)");
-        let run = Inlines::new(vec![t("a `"), Inline::Code("x".into())], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "a \\``x`");
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "a \\[*b*](c)"
+        );
+        let run = Inlines::new(
+            vec![t("a `"), Inline::Code("x".into())],
+            InlineContext::Paragraph,
+        );
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "a \\``x`"
+        );
         let run = Inlines::new(vec![t("a `"), em("b")], InlineContext::Paragraph);
         assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "a `*b*");
         // A backtick right after a code span would extend its fence.
-        let run = Inlines::new(vec![t("a "), Inline::Code("x".into()), t("`")], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "a `x`\\`");
+        let run = Inlines::new(
+            vec![t("a "), Inline::Code("x".into()), t("`")],
+            InlineContext::Paragraph,
+        );
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "a `x`\\`"
+        );
         // A `[` in link text always has its own `](` after it.
         let link = Inline::Link {
             destination: LinkDestination::new("/x"),
@@ -845,8 +974,17 @@ mod tests {
             text: Inlines::new(vec![t("a[b")], InlineContext::LinkText),
         };
         let run = Inlines::new(vec![link], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "[a\\[b](/x)");
-        for run in [&run, &Inlines::new(vec![t("a `"), Inline::Code("x".into())], InlineContext::Paragraph)] {
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "[a\\[b](/x)"
+        );
+        for run in [
+            &run,
+            &Inlines::new(
+                vec![t("a `"), Inline::Code("x".into())],
+                InlineContext::Paragraph,
+            ),
+        ] {
             assert_eq!(run.check_writable(InlineContext::Paragraph), Ok(()));
         }
     }
@@ -855,18 +993,33 @@ mod tests {
     fn angle_closed_in_a_later_node_is_escaped() {
         let em = |s: &str| Inline::Emph(Inlines::new(vec![t(s)], InlineContext::Paragraph));
         // `a <b c=*x*>` is a valid HTML tag: the attribute value holds emphasis.
-        let run = Inlines::new(vec![t("a <b c="), em("x"), t(">")], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "a \\<b c=*x*>");
+        let run = Inlines::new(
+            vec![t("a <b c="), em("x"), t(">")],
+            InlineContext::Paragraph,
+        );
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "a \\<b c=*x*>"
+        );
         assert_eq!(run.check_writable(InlineContext::Paragraph), Ok(()));
         // A `>` in a later HTML node, code span or link destination counts too.
         let html = Inline::Html(InlineHtml::new("</b>").unwrap());
         let run = Inlines::new(vec![t("a <b"), em("x"), html], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "a \\<b*x*</b>");
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "a \\<b*x*</b>"
+        );
         // Without a `>` later, it is prose.
         let run = Inlines::new(vec![t("a<b "), em("x"), t(" y")], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "a<b *x* y");
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "a<b *x* y"
+        );
         let run = Inlines::new(vec![t("x < y "), em("z")], InlineContext::Paragraph);
-        assert_eq!(serialize_inlines(&run, InlineContext::Paragraph), "x < y *z*");
+        assert_eq!(
+            serialize_inlines(&run, InlineContext::Paragraph),
+            "x < y *z*"
+        );
         // A `>` before the `<` does not count.
         assert_eq!(text_para("a > b <c"), "a > b <c");
     }
@@ -899,7 +1052,10 @@ mod tests {
             (" ", "` `"),
         ];
         for (code, expected) in cases {
-            let inlines = Inlines::new(vec![Inline::Code(code.to_string())], InlineContext::Paragraph);
+            let inlines = Inlines::new(
+                vec![Inline::Code(code.to_string())],
+                InlineContext::Paragraph,
+            );
             let written = serialize_inlines(&inlines, InlineContext::Paragraph);
             assert_eq!(written, *expected, "code {code:?}");
             assert_eq!(para(&written), inlines, "code {code:?} reads back");
@@ -922,7 +1078,9 @@ mod tests {
         );
         assert_eq!(
             tree.check_writable(InlineContext::Paragraph),
-            Err(NotWritable { ctx: InlineContext::Paragraph })
+            Err(NotWritable {
+                ctx: InlineContext::Paragraph
+            })
         );
         let tree = Inlines::new(
             vec![
@@ -936,7 +1094,10 @@ mod tests {
         // Two code spans that touch share a fence (the parser never produces
         // them; a mutation that would is refused).
         let code = |s: &str| Inline::Code(s.to_string());
-        let tree = Inlines::new(vec![t("x "), code("a"), code("b")], InlineContext::Paragraph);
+        let tree = Inlines::new(
+            vec![t("x "), code("a"), code("b")],
+            InlineContext::Paragraph,
+        );
         assert!(tree.check_writable(InlineContext::Paragraph).is_err());
         // Two emphases that touch are one (N9).
         let em = |s: &str| Inline::Emph(Inlines::new(vec![t(s)], InlineContext::Paragraph));
@@ -974,7 +1135,9 @@ mod tests {
             let tree = Inlines::new(items.clone(), InlineContext::Paragraph);
             assert_eq!(
                 tree.check_writable(InlineContext::Paragraph),
-                Err(NotWritable { ctx: InlineContext::Paragraph }),
+                Err(NotWritable {
+                    ctx: InlineContext::Paragraph
+                }),
                 "{items:?}"
             );
         }
@@ -994,7 +1157,11 @@ mod tests {
         ];
         for items in writable {
             let tree = Inlines::new(items.clone(), InlineContext::Paragraph);
-            assert_eq!(tree.check_writable(InlineContext::Paragraph), Ok(()), "{items:?}");
+            assert_eq!(
+                tree.check_writable(InlineContext::Paragraph),
+                Ok(()),
+                "{items:?}"
+            );
         }
     }
 
@@ -1007,7 +1174,9 @@ mod tests {
         );
         assert_eq!(
             tree.check_writable(InlineContext::Paragraph),
-            Err(NotWritable { ctx: InlineContext::Paragraph })
+            Err(NotWritable {
+                ctx: InlineContext::Paragraph
+            })
         );
         let tree = Inlines::new(
             vec![t("a "), Inline::Emph(raw(vec![Inline::LineBreak, t("b")]))],
@@ -1018,7 +1187,11 @@ mod tests {
         assert_eq!(tree.check_writable(InlineContext::Paragraph), Ok(()));
         // In the middle of the emphasis it is fine.
         let tree = Inlines::new(
-            vec![t("a "), Inline::Emph(raw(vec![t("b"), Inline::LineBreak, t("c")])), t(" d")],
+            vec![
+                t("a "),
+                Inline::Emph(raw(vec![t("b"), Inline::LineBreak, t("c")])),
+                t(" d"),
+            ],
             InlineContext::Paragraph,
         );
         assert_eq!(tree.check_writable(InlineContext::Paragraph), Ok(()));

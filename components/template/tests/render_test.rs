@@ -2,8 +2,11 @@
 /// carries `data-presemble-schema-constraints-occurs` when the grammar specifies it.
 #[test]
 fn render_schema_derived_slot_emits_constraint_attributes() {
-    use schema::{Constraint, CountRange, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
     use content::parse_and_assign;
+    use schema::{
+        Constraint, CountRange, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName,
+        Span,
+    };
 
     // A minimal grammar: title slot with Occurs(Exactly(1)).
     let grammar = Grammar {
@@ -57,19 +60,37 @@ fn render_article_with_dom_transformer() {
         .expect("render should succeed");
 
     // Title with semantic class
-    assert!(html.contains("input-title"), "title class in output: {html}");
-    assert!(html.contains("Hello, World: Getting Started With Presemble"), "title text in output: {html}");
+    assert!(
+        html.contains("input-title"),
+        "title class in output: {html}"
+    );
+    assert!(
+        html.contains("Hello, World: Getting Started With Presemble"),
+        "title text in output: {html}"
+    );
 
     // Author with semantic class and link
-    assert!(html.contains("input-author"), "author class in output: {html}");
+    assert!(
+        html.contains("input-author"),
+        "author class in output: {html}"
+    );
     assert!(html.contains("johlrogge"), "author href in output: {html}");
 
     // Cover image with semantic class
-    assert!(html.contains("input-cover"), "cover class in output: {html}");
-    assert!(html.contains("images/cover.jpg"), "cover src in output: {html}");
+    assert!(
+        html.contains("input-cover"),
+        "cover class in output: {html}"
+    );
+    assert!(
+        html.contains("images/cover.jpg"),
+        "cover src in output: {html}"
+    );
 
     // Body content
-    assert!(html.contains("What Is Presemble"), "body heading in output: {html}");
+    assert!(
+        html.contains("What Is Presemble"),
+        "body heading in output: {html}"
+    );
 }
 
 #[test]
@@ -77,15 +98,20 @@ fn render_template_missing_slot_produces_empty_not_error() {
     // A slot that's absent should produce empty output, not a RenderError
     let template_src = r#"<div><presemble:insert data="(ref input.missing)" /></div>"#;
     let graph = template::DataGraph::new(); // empty graph
-    let html = template::render_template(template_src, &graph, template::OutputMode::Editorial).expect("should not error");
-    assert!(html.contains("<div>") && !html.contains("presemble"), "{html}");
+    let html = template::render_template(template_src, &graph, template::OutputMode::Editorial)
+        .expect("should not error");
+    assert!(
+        html.contains("<div>") && !html.contains("presemble"),
+        "{html}"
+    );
 }
 
 #[test]
 fn render_template_data_slot_absent_removes_block() {
     let template_src = r#"<template data-slot="(ref input.cover)"><img src="x" /></template>"#;
     let graph = template::DataGraph::new();
-    let html = template::render_template(template_src, &graph, template::OutputMode::Editorial).expect("should not error");
+    let html = template::render_template(template_src, &graph, template::OutputMode::Editorial)
+        .expect("should not error");
     assert!(html.is_empty() || !html.contains("img"), "{html}");
 }
 
@@ -104,11 +130,8 @@ fn attach_schema_instance_attrs_emits_count_and_sample_url() {
     let transformed = template::transform(nodes, &graph, &ctx).expect("transform");
 
     // Attach badge data: 3 documents, first is /article/hello-world
-    let with_badge = template::attach_schema_instance_attrs(
-        transformed,
-        3,
-        Some("/article/hello-world"),
-    );
+    let with_badge =
+        template::attach_schema_instance_attrs(transformed, 3, Some("/article/hello-world"));
 
     let html = template::serialize_nodes(&with_badge);
 
@@ -163,9 +186,7 @@ fn attach_schema_instance_attrs_targets_root_element_only() {
     let html = template::serialize_nodes(&with_badge);
 
     // The count attr should appear exactly once (on the root <html> element).
-    let count_occurrences = html
-        .matches("data-presemble-schema-instance-count")
-        .count();
+    let count_occurrences = html.matches("data-presemble-schema-instance-count").count();
     assert_eq!(
         count_occurrences, 1,
         "count attr should appear exactly once; got: {html}"
@@ -213,11 +234,13 @@ fn attach_schema_included_by_attr_emits_json_on_root_element() {
         "expected data-presemble-schema-included-by attribute; got: {html}"
     );
     assert!(
-        html.contains(r#""schema":"post""#) || html.contains(r#"&quot;schema&quot;:&quot;post&quot;"#),
+        html.contains(r#""schema":"post""#)
+            || html.contains(r#"&quot;schema&quot;:&quot;post&quot;"#),
         "expected post entry in included-by JSON; got: {html}"
     );
     assert!(
-        html.contains(r#""schema":"event""#) || html.contains(r#"&quot;schema&quot;:&quot;event&quot;"#),
+        html.contains(r#""schema":"event""#)
+            || html.contains(r#"&quot;schema&quot;:&quot;event&quot;"#),
         "expected event entry in included-by JSON; got: {html}"
     );
 }
@@ -285,14 +308,16 @@ fn attach_schema_included_by_attr_targets_root_element_only() {
 /// URL for that linked schema type — rather than the placeholder `href="#"`.
 #[test]
 fn render_typelink_slot_produces_schema_href() {
-    use schema::{Constraint, Element, Grammar, Slot, SlotName, Span};
     use content::parse_and_assign;
+    use schema::{Constraint, Element, Grammar, Slot, SlotName, Span};
 
     // Grammar: one link slot named "author" with TypeLink("author") constraint.
     let grammar = Grammar {
         preamble: vec![Slot {
             name: SlotName::new("author"),
-            element: Element::Link { pattern: String::new() },
+            element: Element::Link {
+                pattern: String::new(),
+            },
             constraints: vec![Constraint::TypeLink("author".to_string())],
             hint_text: Some("Link to the author".to_string()),
             span: Span { start: 0, end: 0 },
@@ -336,12 +361,19 @@ fn schema_mode_post_processors_emit_both_attrs_in_sequence() {
     // structure; the exact field values don't matter for this test.
     let content_src = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
     let doc = content::parse_and_assign(content_src, &grammar).expect("content parses");
-    let article_graph = template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial);
+    let article_graph =
+        template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial);
 
     let mut context = template::DataGraph::new();
-    context.insert("_presemble_stem", template::Value::Text("article".to_string()));
+    context.insert(
+        "_presemble_stem",
+        template::Value::Text("article".to_string()),
+    );
     context.insert("_presemble_file", template::Value::Text(String::new()));
-    context.insert("url", template::Value::Text("/article/hello-world".to_string()));
+    context.insert(
+        "url",
+        template::Value::Text("/article/hello-world".to_string()),
+    );
     context.insert("input", template::Value::Record(article_graph));
 
     let nodes = template::parse_template_xml(template_src).expect("template parse");
@@ -351,17 +383,12 @@ fn schema_mode_post_processors_emit_both_attrs_in_sequence() {
     let transformed = template::transform(nodes, &context, &ctx).expect("transform");
 
     // T6: attach instance-count and sample URL
-    let transformed = template::attach_schema_instance_attrs(
-        transformed,
-        2,
-        Some("/article/hello-world"),
-    );
+    let transformed =
+        template::attach_schema_instance_attrs(transformed, 2, Some("/article/hello-world"));
 
     // T7: attach included-by back-references
-    let transformed = template::attach_schema_included_by_attr(
-        transformed,
-        &[("post", "/post/#_schema")],
-    );
+    let transformed =
+        template::attach_schema_included_by_attr(transformed, &[("post", "/post/#_schema")]);
 
     let html = template::serialize_nodes(&transformed);
 

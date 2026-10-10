@@ -16,12 +16,18 @@ pub struct SiteTemplate {
 impl SiteTemplate {
     /// Write this template's files to a site directory.
     /// `format` is "hiccup" or "html" — determines which template variant to use.
-    pub fn scaffold(&self, site_dir: &std::path::Path, format: &str, style: &StyleConfig) -> Result<(), String> {
+    pub fn scaffold(
+        &self,
+        site_dir: &std::path::Path,
+        format: &str,
+        style: &StyleConfig,
+    ) -> Result<(), String> {
         self.write_dir(self.dir, site_dir, format)?;
         let css = generate_css(style);
         let css_dir = site_dir.join("assets");
         std::fs::create_dir_all(&css_dir).map_err(|e| format!("mkdir: {e}"))?;
-        std::fs::write(css_dir.join("style.css"), css).map_err(|e| format!("write style.css: {e}"))?;
+        std::fs::write(css_dir.join("style.css"), css)
+            .map_err(|e| format!("write style.css: {e}"))?;
         Ok(())
     }
 
@@ -129,11 +135,7 @@ impl FontMood {
     /// Returns `(heading_font, body_font, google_fonts_query)`.
     pub fn fonts(self) -> (&'static str, &'static str, &'static str) {
         match self {
-            FontMood::Clean => (
-                "Inter",
-                "Inter",
-                "Inter:wght@400;600;700",
-            ),
+            FontMood::Clean => ("Inter", "Inter", "Inter:wght@400;600;700"),
             FontMood::Techy => (
                 "JetBrains Mono",
                 "Source Sans 3",
@@ -402,8 +404,8 @@ fn rotate_hue(h: f64, offset: i32) -> f64 {
 pub fn generate_css(config: &StyleConfig) -> String {
     let (h_font, b_font, gf_query) = config.font_mood.fonts();
 
-    let (h, s, l) = hex_to_hsl(&config.seed_color)
-        .unwrap_or_else(|_| hex_to_hsl("#2563eb").unwrap());
+    let (h, s, l) =
+        hex_to_hsl(&config.seed_color).unwrap_or_else(|_| hex_to_hsl("#2563eb").unwrap());
 
     let offsets = config.palette_type.hue_offsets();
     let primary_h = rotate_hue(h, offsets[0]);
@@ -595,7 +597,10 @@ mod tests {
     fn hex_to_hsl_pure_red() {
         let (h, s, l) = hex_to_hsl("ff0000").unwrap();
         assert!((h - 0.0).abs() < 1.0, "hue should be ~0, got {h}");
-        assert!((s - 100.0).abs() < 1.0, "saturation should be ~100, got {s}");
+        assert!(
+            (s - 100.0).abs() < 1.0,
+            "saturation should be ~100, got {s}"
+        );
         assert!((l - 50.0).abs() < 1.0, "lightness should be ~50, got {l}");
     }
 
@@ -603,7 +608,10 @@ mod tests {
     fn hex_to_hsl_pure_green() {
         let (h, s, l) = hex_to_hsl("00ff00").unwrap();
         assert!((h - 120.0).abs() < 1.0, "hue should be ~120, got {h}");
-        assert!((s - 100.0).abs() < 1.0, "saturation should be ~100, got {s}");
+        assert!(
+            (s - 100.0).abs() < 1.0,
+            "saturation should be ~100, got {s}"
+        );
         assert!((l - 50.0).abs() < 1.0, "lightness should be ~50, got {l}");
     }
 
@@ -661,7 +669,10 @@ mod tests {
         let config = StyleConfig::default();
         let css = generate_css(&config);
         assert!(css.contains("@import"), "missing @import");
-        assert!(css.contains("fonts.googleapis.com"), "missing google fonts url");
+        assert!(
+            css.contains("fonts.googleapis.com"),
+            "missing google fonts url"
+        );
     }
 
     #[test]
@@ -675,38 +686,65 @@ mod tests {
     fn generate_css_simple_does_not_contain_extra_vars() {
         let config = StyleConfig::default(); // Simple complexity
         let css = generate_css(&config);
-        assert!(!css.contains("--color-primary-light:"), "should not have -light in Simple mode");
-        assert!(!css.contains("--color-surface:"), "should not have --color-surface in Simple mode");
+        assert!(
+            !css.contains("--color-primary-light:"),
+            "should not have -light in Simple mode"
+        );
+        assert!(
+            !css.contains("--color-surface:"),
+            "should not have --color-surface in Simple mode"
+        );
     }
 
     // ── generate_css: each font mood ─────────────────────────────────────────
 
     #[test]
     fn generate_css_clean_uses_inter() {
-        let config = StyleConfig { font_mood: FontMood::Clean, ..Default::default() };
+        let config = StyleConfig {
+            font_mood: FontMood::Clean,
+            ..Default::default()
+        };
         let css = generate_css(&config);
         assert!(css.contains("Inter"), "expected Inter font");
     }
 
     #[test]
     fn generate_css_techy_uses_jetbrains_mono() {
-        let config = StyleConfig { font_mood: FontMood::Techy, ..Default::default() };
+        let config = StyleConfig {
+            font_mood: FontMood::Techy,
+            ..Default::default()
+        };
         let css = generate_css(&config);
-        assert!(css.contains("JetBrains Mono"), "expected JetBrains Mono heading font");
-        assert!(css.contains("Source Sans 3"), "expected Source Sans 3 body font");
+        assert!(
+            css.contains("JetBrains Mono"),
+            "expected JetBrains Mono heading font"
+        );
+        assert!(
+            css.contains("Source Sans 3"),
+            "expected Source Sans 3 body font"
+        );
     }
 
     #[test]
     fn generate_css_literary_uses_playfair() {
-        let config = StyleConfig { font_mood: FontMood::Literary, ..Default::default() };
+        let config = StyleConfig {
+            font_mood: FontMood::Literary,
+            ..Default::default()
+        };
         let css = generate_css(&config);
-        assert!(css.contains("Playfair Display"), "expected Playfair Display");
+        assert!(
+            css.contains("Playfair Display"),
+            "expected Playfair Display"
+        );
         assert!(css.contains("Source Serif 4"), "expected Source Serif 4");
     }
 
     #[test]
     fn generate_css_friendly_uses_nunito() {
-        let config = StyleConfig { font_mood: FontMood::Friendly, ..Default::default() };
+        let config = StyleConfig {
+            font_mood: FontMood::Friendly,
+            ..Default::default()
+        };
         let css = generate_css(&config);
         assert!(css.contains("Nunito"), "expected Nunito");
         assert!(css.contains("Open Sans"), "expected Open Sans");
@@ -714,7 +752,10 @@ mod tests {
 
     #[test]
     fn generate_css_bold_uses_oswald() {
-        let config = StyleConfig { font_mood: FontMood::Bold, ..Default::default() };
+        let config = StyleConfig {
+            font_mood: FontMood::Bold,
+            ..Default::default()
+        };
         let css = generate_css(&config);
         assert!(css.contains("Oswald"), "expected Oswald");
         assert!(css.contains("Lato"), "expected Lato");
@@ -722,15 +763,24 @@ mod tests {
 
     #[test]
     fn generate_css_fancy_uses_cormorant() {
-        let config = StyleConfig { font_mood: FontMood::Fancy, ..Default::default() };
+        let config = StyleConfig {
+            font_mood: FontMood::Fancy,
+            ..Default::default()
+        };
         let css = generate_css(&config);
-        assert!(css.contains("Cormorant Garamond"), "expected Cormorant Garamond");
+        assert!(
+            css.contains("Cormorant Garamond"),
+            "expected Cormorant Garamond"
+        );
         assert!(css.contains("EB Garamond"), "expected EB Garamond");
     }
 
     #[test]
     fn generate_css_rugged_uses_bitter() {
-        let config = StyleConfig { font_mood: FontMood::Rugged, ..Default::default() };
+        let config = StyleConfig {
+            font_mood: FontMood::Rugged,
+            ..Default::default()
+        };
         let css = generate_css(&config);
         assert!(css.contains("Bitter"), "expected Bitter");
         assert!(css.contains("Merriweather"), "expected Merriweather");
@@ -745,12 +795,27 @@ mod tests {
             ..Default::default()
         };
         let css = generate_css(&config);
-        assert!(css.contains("--color-primary-light:"), "missing --color-primary-light");
-        assert!(css.contains("--color-primary-dark:"), "missing --color-primary-dark");
-        assert!(css.contains("--color-accent-light:"), "missing --color-accent-light");
-        assert!(css.contains("--color-accent-dark:"), "missing --color-accent-dark");
+        assert!(
+            css.contains("--color-primary-light:"),
+            "missing --color-primary-light"
+        );
+        assert!(
+            css.contains("--color-primary-dark:"),
+            "missing --color-primary-dark"
+        );
+        assert!(
+            css.contains("--color-accent-light:"),
+            "missing --color-accent-light"
+        );
+        assert!(
+            css.contains("--color-accent-dark:"),
+            "missing --color-accent-dark"
+        );
         assert!(css.contains("--color-surface:"), "missing --color-surface");
-        assert!(css.contains("--color-text-muted:"), "missing --color-text-muted");
+        assert!(
+            css.contains("--color-text-muted:"),
+            "missing --color-text-muted"
+        );
         assert!(css.contains("--color-border:"), "missing --color-border");
         assert!(css.contains("--spacing-sm:"), "missing --spacing-sm");
         assert!(css.contains("--spacing-md:"), "missing --spacing-md");
@@ -808,7 +873,10 @@ mod tests {
     #[test]
     fn complexity_from_str_case_insensitive() {
         assert_eq!("SIMPLE".parse::<Complexity>().unwrap(), Complexity::Simple);
-        assert_eq!("involved".parse::<Complexity>().unwrap(), Complexity::Involved);
+        assert_eq!(
+            "involved".parse::<Complexity>().unwrap(),
+            Complexity::Involved
+        );
     }
 
     #[test]
@@ -833,7 +901,8 @@ mod tests {
     fn scaffold_blog_hiccup_writes_files() {
         let dir = tempfile::tempdir().unwrap();
         let t = template_by_name("blog").unwrap();
-        t.scaffold(dir.path(), "hiccup", &StyleConfig::default()).unwrap();
+        t.scaffold(dir.path(), "hiccup", &StyleConfig::default())
+            .unwrap();
 
         assert!(dir.path().join("schemas/post/item.md").exists());
         assert!(dir.path().join("schemas/author/item.md").exists());
@@ -847,7 +916,8 @@ mod tests {
     fn scaffold_blog_html_writes_html_templates() {
         let dir = tempfile::tempdir().unwrap();
         let t = template_by_name("blog").unwrap();
-        t.scaffold(dir.path(), "html", &StyleConfig::default()).unwrap();
+        t.scaffold(dir.path(), "html", &StyleConfig::default())
+            .unwrap();
 
         assert!(dir.path().join("templates/post/item.html").exists());
         assert!(dir.path().join("templates/author/item.html").exists());
@@ -860,19 +930,25 @@ mod tests {
     fn scaffold_blog_html_content_contains_nav_element() {
         let dir = tempfile::tempdir().unwrap();
         let t = template_by_name("blog").unwrap();
-        t.scaffold(dir.path(), "html", &StyleConfig::default()).unwrap();
+        t.scaffold(dir.path(), "html", &StyleConfig::default())
+            .unwrap();
 
         let nav_html = std::fs::read_to_string(dir.path().join("templates/nav.html")).unwrap();
-        assert!(nav_html.contains("<nav"), "converted nav.html should contain <nav element");
+        assert!(
+            nav_html.contains("<nav"),
+            "converted nav.html should contain <nav element"
+        );
     }
 
     #[test]
     fn scaffold_blog_html_content_contains_the_nav_call() {
         let dir = tempfile::tempdir().unwrap();
         let t = template_by_name("blog").unwrap();
-        t.scaffold(dir.path(), "html", &StyleConfig::default()).unwrap();
+        t.scaffold(dir.path(), "html", &StyleConfig::default())
+            .unwrap();
 
-        let post_html = std::fs::read_to_string(dir.path().join("templates/post/item.html")).unwrap();
+        let post_html =
+            std::fs::read_to_string(dir.path().join("templates/post/item.html")).unwrap();
         assert!(
             post_html.contains(r#"data="(nav input)""#),
             "converted post template should call nav: {post_html}"
@@ -891,8 +967,10 @@ mod tests {
             let hiccup_dir = tempfile::tempdir().unwrap();
             let html_dir = tempfile::tempdir().unwrap();
             let t = template_by_name(name).unwrap();
-            t.scaffold(hiccup_dir.path(), "hiccup", &StyleConfig::default()).unwrap();
-            t.scaffold(html_dir.path(), "html", &StyleConfig::default()).unwrap();
+            t.scaffold(hiccup_dir.path(), "hiccup", &StyleConfig::default())
+                .unwrap();
+            t.scaffold(html_dir.path(), "html", &StyleConfig::default())
+                .unwrap();
             for entry in ["index", "post/item", "page/item", "project/item"] {
                 let hiccup = hiccup_dir.path().join(format!("templates/{entry}.hiccup"));
                 let html = html_dir.path().join(format!("templates/{entry}.html"));
@@ -900,12 +978,12 @@ mod tests {
                     continue;
                 }
                 let from_hiccup =
-                    template::parse_template_hiccup(&std::fs::read_to_string(&hiccup).unwrap()).unwrap();
+                    template::parse_template_hiccup(&std::fs::read_to_string(&hiccup).unwrap())
+                        .unwrap();
                 let from_html =
                     template::parse_template_xml(&std::fs::read_to_string(&html).unwrap()).unwrap();
-                let render = |nodes: Vec<template::dom::Node>| {
-                    template::serialize_template_to_html(&nodes)
-                };
+                let render =
+                    |nodes: Vec<template::dom::Node>| template::serialize_template_to_html(&nodes);
                 assert_eq!(render(from_hiccup), render(from_html), "{name}/{entry}");
             }
         }
@@ -915,7 +993,8 @@ mod tests {
     fn scaffold_personal_creates_page_schema() {
         let dir = tempfile::tempdir().unwrap();
         let t = template_by_name("personal").unwrap();
-        t.scaffold(dir.path(), "hiccup", &StyleConfig::default()).unwrap();
+        t.scaffold(dir.path(), "hiccup", &StyleConfig::default())
+            .unwrap();
         assert!(dir.path().join("schemas/page/item.md").exists());
     }
 
@@ -923,7 +1002,8 @@ mod tests {
     fn scaffold_portfolio_creates_project_schema() {
         let dir = tempfile::tempdir().unwrap();
         let t = template_by_name("portfolio").unwrap();
-        t.scaffold(dir.path(), "hiccup", &StyleConfig::default()).unwrap();
+        t.scaffold(dir.path(), "hiccup", &StyleConfig::default())
+            .unwrap();
         assert!(dir.path().join("schemas/project/item.md").exists());
     }
 
@@ -937,7 +1017,10 @@ mod tests {
         };
         t.scaffold(dir.path(), "hiccup", &style).unwrap();
         let css = std::fs::read_to_string(dir.path().join("assets/style.css")).unwrap();
-        assert!(css.contains("JetBrains Mono"), "expected techy heading font");
+        assert!(
+            css.contains("JetBrains Mono"),
+            "expected techy heading font"
+        );
         assert!(css.contains("--color-primary:"), "expected color vars");
     }
 
@@ -964,7 +1047,10 @@ mod tests {
             .lines()
             .find(|l| l.contains("--color-accent:"))
             .expect("cool should have --color-accent");
-        assert_ne!(warm_accent, cool_accent, "Warm and Cool should produce different accent colors");
+        assert_ne!(
+            warm_accent, cool_accent,
+            "Warm and Cool should produce different accent colors"
+        );
     }
 
     #[test]
@@ -974,7 +1060,10 @@ mod tests {
             ..Default::default()
         };
         let css = generate_css(&config);
-        assert!(css.contains("--color-secondary:"), "Bold palette should emit --color-secondary");
+        assert!(
+            css.contains("--color-secondary:"),
+            "Bold palette should emit --color-secondary"
+        );
     }
 
     #[test]
@@ -984,7 +1073,10 @@ mod tests {
             ..Default::default()
         };
         let css = generate_css(&config);
-        assert!(!css.contains("--color-secondary:"), "Cool palette should not emit --color-secondary");
+        assert!(
+            !css.contains("--color-secondary:"),
+            "Cool palette should not emit --color-secondary"
+        );
     }
 
     #[test]
@@ -994,7 +1086,10 @@ mod tests {
             ..Default::default()
         };
         let css = generate_css(&config);
-        assert!(css.contains("--color-secondary:"), "Warm palette should emit --color-secondary");
+        assert!(
+            css.contains("--color-secondary:"),
+            "Warm palette should emit --color-secondary"
+        );
     }
 
     // ── Theme ───────────────────────────────────────────────────────────────
@@ -1011,7 +1106,10 @@ mod tests {
             .lines()
             .find(|l| l.contains("--color-bg:"))
             .expect("should have --color-bg");
-        assert!(bg_line.contains("10.0%"), "Dark theme --color-bg should have lightness 10.0%, got: {bg_line}");
+        assert!(
+            bg_line.contains("10.0%"),
+            "Dark theme --color-bg should have lightness 10.0%, got: {bg_line}"
+        );
     }
 
     #[test]
@@ -1025,7 +1123,10 @@ mod tests {
             .lines()
             .find(|l| l.contains("--color-bg:"))
             .expect("should have --color-bg");
-        assert!(bg_line.contains("98.0%"), "Light theme --color-bg should have lightness 98.0%, got: {bg_line}");
+        assert!(
+            bg_line.contains("98.0%"),
+            "Light theme --color-bg should have lightness 98.0%, got: {bg_line}"
+        );
     }
 
     #[test]
@@ -1040,7 +1141,10 @@ mod tests {
             .lines()
             .find(|l| l.contains("--color-surface:"))
             .expect("should have --color-surface");
-        assert!(surface_line.contains("14.0%"), "Dark Involved --color-surface should have lightness 14.0%, got: {surface_line}");
+        assert!(
+            surface_line.contains("14.0%"),
+            "Dark Involved --color-surface should have lightness 14.0%, got: {surface_line}"
+        );
     }
 
     // ── Involved structural CSS ──────────────────────────────────────────────
@@ -1052,8 +1156,14 @@ mod tests {
             ..Default::default()
         };
         let css = generate_css(&config);
-        assert!(css.contains("blockquote"), "Involved CSS should contain blockquote rule");
-        assert!(css.contains("var(--color-accent-light)"), "blockquote should reference --color-accent-light");
+        assert!(
+            css.contains("blockquote"),
+            "Involved CSS should contain blockquote rule"
+        );
+        assert!(
+            css.contains("var(--color-accent-light)"),
+            "blockquote should reference --color-accent-light"
+        );
         assert!(
             css.contains("blockquote > :last-child {\nmargin-bottom: 0;\n}"),
             "blockquote should drop the bottom margin of its last block"
@@ -1067,14 +1177,20 @@ mod tests {
             ..Default::default()
         };
         let css = generate_css(&config);
-        assert!(css.contains("article"), "Involved CSS should contain article rule");
+        assert!(
+            css.contains("article"),
+            "Involved CSS should contain article rule"
+        );
     }
 
     #[test]
     fn simple_css_does_not_contain_blockquote_rule() {
         let config = StyleConfig::default(); // Simple
         let css = generate_css(&config);
-        assert!(!css.contains("blockquote"), "Simple CSS should not contain blockquote rule");
+        assert!(
+            !css.contains("blockquote"),
+            "Simple CSS should not contain blockquote rule"
+        );
     }
 
     // ── Theme FromStr round-trip ──────────────────────────────────────────────

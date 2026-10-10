@@ -11,7 +11,10 @@ pub enum CliError {
     SessionKey(accounts::SessionKeyError),
     /// The publish gate (ADR-061): the site has validation errors, so nothing
     /// was written.
-    Unpublishable { errors: usize, files: usize },
+    Unpublishable {
+        errors: usize,
+        files: usize,
+    },
     /// Pages that failed to render during a publish build.
     PagesFailed(usize),
 }

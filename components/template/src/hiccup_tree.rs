@@ -17,14 +17,20 @@ use crate::hiccup_serializer::serialize_to_hiccup;
 /// `NodeTree::Existing` names a node of one particular store, which EDN cannot
 /// carry; a tree holding one is refused.
 pub fn tree_to_hiccup(trees: &[NodeTree]) -> Result<String, TemplateError> {
-    let nodes = trees.iter().map(tree_to_node).collect::<Result<Vec<_>, _>>()?;
+    let nodes = trees
+        .iter()
+        .map(tree_to_node)
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(serialize_to_hiccup(&nodes))
 }
 
 /// Read hiccup as trees. Attribute values must be strings, and `nil` is
 /// refused (a template would skip it; content must not drop input silently).
 pub fn hiccup_to_trees(src: &str) -> Result<Vec<NodeTree>, TemplateError> {
-    parse_hiccup_with(src, NilChildren::Refuse)?.into_iter().map(node_to_tree).collect()
+    parse_hiccup_with(src, NilChildren::Refuse)?
+        .into_iter()
+        .map(node_to_tree)
+        .collect()
 }
 
 fn tree_to_node(tree: &NodeTree) -> Result<Node, TemplateError> {
@@ -33,10 +39,20 @@ fn tree_to_node(tree: &NodeTree) -> Result<Node, TemplateError> {
         NodeTree::Existing(_) => Err(TemplateError::ParseError(
             "a store-local node reference (NodeTree::Existing) has no EDN form".to_string(),
         )),
-        NodeTree::Element { name, attrs, children } => Ok(Node::Element(Element {
+        NodeTree::Element {
+            name,
+            attrs,
+            children,
+        } => Ok(Node::Element(Element {
             name: name.clone(),
-            attrs: attrs.iter().map(|(k, v)| (k.clone(), Form::Str(v.clone()))).collect(),
-            children: children.iter().map(tree_to_node).collect::<Result<Vec<_>, _>>()?,
+            attrs: attrs
+                .iter()
+                .map(|(k, v)| (k.clone(), Form::Str(v.clone())))
+                .collect(),
+            children: children
+                .iter()
+                .map(tree_to_node)
+                .collect::<Result<Vec<_>, _>>()?,
         })),
     }
 }
@@ -57,9 +73,16 @@ fn node_to_tree(node: Node) -> Result<NodeTree, TemplateError> {
                     ))),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let children =
-                el.children.into_iter().map(node_to_tree).collect::<Result<Vec<_>, _>>()?;
-            Ok(NodeTree::Element { name: el.name, attrs, children })
+            let children = el
+                .children
+                .into_iter()
+                .map(node_to_tree)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(NodeTree::Element {
+                name: el.name,
+                attrs,
+                children,
+            })
         }
     }
 }
@@ -84,7 +107,9 @@ mod tests {
         let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
         let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
         md.extend(rows.iter().map(|r| line(r)));
-        content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone()
+        content::parse_document(&md.join("\n")).unwrap().elements[0]
+            .node
+            .clone()
     }
 
     #[test]
@@ -93,14 +118,25 @@ mod tests {
             ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "A *title*"),
             paragraph("Some **text** with \"quotes\", a \\ backslash,\nand a newline."),
             ContentElement::lone_link("t", "/x"),
-            content::parse_document("> q\n").unwrap().elements[0].node.clone(),
-            content::parse_document("- a\n- b").unwrap().elements[0].node.clone(),
-            content::parse_document("3. a\n\n   b\n4. c\n   - d").unwrap().elements[0].node.clone(),
+            content::parse_document("> q\n").unwrap().elements[0]
+                .node
+                .clone(),
+            content::parse_document("- a\n- b").unwrap().elements[0]
+                .node
+                .clone(),
+            content::parse_document("3. a\n\n   b\n4. c\n   - d")
+                .unwrap()
+                .elements[0]
+                .node
+                .clone(),
             ContentElement::CodeBlock {
                 language: Some("rust".to_string()),
                 code: "fn main() {\n    println!(\"hi\");\n}".to_string(),
             },
-            ContentElement::CodeBlock { language: None, code: "x".to_string() },
+            ContentElement::CodeBlock {
+                language: None,
+                code: "x".to_string(),
+            },
             ContentElement::lone_image("a", "p.jpg"),
             ContentElement::lone_image("", "p.jpg"),
             table_of(&["h1", "h2"], &[&["a", "b"], &["c", "d"]]),
@@ -127,7 +163,10 @@ mod tests {
             block_to_tree(&paragraph("one")).unwrap(),
             block_to_tree(&paragraph("two")).unwrap(),
         ];
-        assert_eq!(hiccup_to_trees(&tree_to_hiccup(&trees).unwrap()).unwrap(), trees);
+        assert_eq!(
+            hiccup_to_trees(&tree_to_hiccup(&trees).unwrap()).unwrap(),
+            trees
+        );
     }
 
     #[test]
@@ -169,8 +208,14 @@ mod tests {
         for group in ["corpus", "nested_emphasis"] {
             for source in all[group].as_array().expect("a group") {
                 let source = source.as_str().expect("a string");
-                for ctx in [InlineContext::Paragraph, InlineContext::Heading, InlineContext::Cell] {
-                    let Ok(inlines) = parse_inlines(source, ctx) else { continue };
+                for ctx in [
+                    InlineContext::Paragraph,
+                    InlineContext::Heading,
+                    InlineContext::Cell,
+                ] {
+                    let Ok(inlines) = parse_inlines(source, ctx) else {
+                        continue;
+                    };
                     let edn = tree_to_hiccup(&inlines_to_tree(&inlines)).unwrap();
                     let trees = hiccup_to_trees(&edn)
                         .unwrap_or_else(|e| panic!("{source:?} in {ctx:?}: {edn}: {e}"));

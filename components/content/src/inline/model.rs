@@ -3,7 +3,7 @@
 use super::normal;
 use super::search_replace::{self, SearchReplaceError};
 use super::serialize::{self, NotWritable};
-use super::text::{edit_text, EditText};
+use super::text::{EditText, edit_text};
 use crate::Comment;
 
 /// Where a run of inlines sits (ADR-059 §3). The context decides what may
@@ -40,8 +40,16 @@ pub enum Inline {
     Code(String),
     /// A hard break.
     LineBreak,
-    Link { destination: LinkDestination, title: Option<String>, text: Inlines },
-    Image { source: AssetRef, title: Option<String>, alt: Inlines },
+    Link {
+        destination: LinkDestination,
+        title: Option<String>,
+        text: Inlines,
+    },
+    Image {
+        source: AssetRef,
+        title: Option<String>,
+        alt: Inlines,
+    },
     /// Verbatim HTML that is not comment-only.
     Html(InlineHtml),
     /// Trivia: one comment's source.
@@ -88,7 +96,9 @@ impl Inlines {
         fn collect<'a>(items: &'a [Inline], out: &mut Vec<&'a str>) {
             for item in items {
                 match item {
-                    Inline::Link { destination, text, .. } => {
+                    Inline::Link {
+                        destination, text, ..
+                    } => {
                         out.push(destination.as_str());
                         collect(text.as_slice(), out);
                     }
@@ -126,7 +136,12 @@ impl Inlines {
 
     /// A copy with the `Text` node at `path` set to `value` (literal text),
     /// normalised for `ctx`. `None` when `path` is not a `Text` node.
-    pub fn with_text_at(&self, path: &super::InlinePath, value: &str, ctx: InlineContext) -> Option<Inlines> {
+    pub fn with_text_at(
+        &self,
+        path: &super::InlinePath,
+        value: &str,
+        ctx: InlineContext,
+    ) -> Option<Inlines> {
         super::text::with_text_at(self, path, value, ctx)
     }
 

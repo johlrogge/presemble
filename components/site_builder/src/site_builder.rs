@@ -2,8 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use site_index::{
-    NodeRole, PageData, PageKind, SchemaStem, SiteGraph, SiteNode, UrlPath,
-    DIR_TEMPLATES,
+    DIR_TEMPLATES, NodeRole, PageData, PageKind, SchemaStem, SiteGraph, SiteNode, UrlPath,
 };
 use template::constants::KEY_PRESEMBLE_FILE;
 
@@ -41,7 +40,10 @@ pub struct GraphBuildResult {
 /// Tries the directory-based convention first (`templates/{stem}/item.hiccup|html`),
 /// then falls back to the flat convention (`templates/{stem}.hiccup|html`).
 /// Returns `None` if no template exists.
-fn item_template_path(repo: &site_repository::SiteRepository, stem: &SchemaStem) -> Option<PathBuf> {
+fn item_template_path(
+    repo: &site_repository::SiteRepository,
+    stem: &SchemaStem,
+) -> Option<PathBuf> {
     let (_, is_hiccup) = repo.item_template_source(stem)?;
     let templates_dir = repo.site_dir().join(DIR_TEMPLATES);
     let stem_str = stem.as_str();
@@ -72,7 +74,10 @@ fn item_template_path(repo: &site_repository::SiteRepository, stem: &SchemaStem)
 ///
 /// Tries `templates/{stem}/index.hiccup|html`, then falls back to `templates/index.hiccup|html`
 /// for the root collection.
-fn collection_template_path(repo: &site_repository::SiteRepository, stem: &SchemaStem) -> Option<PathBuf> {
+fn collection_template_path(
+    repo: &site_repository::SiteRepository,
+    stem: &SchemaStem,
+) -> Option<PathBuf> {
     let (_, is_hiccup) = repo.collection_template_source(stem)?;
     let templates_dir = repo.site_dir().join(DIR_TEMPLATES);
     let stem_str = stem.as_str();
@@ -81,7 +86,12 @@ fn collection_template_path(repo: &site_repository::SiteRepository, stem: &Schem
     if stem_str.is_empty() {
         Some(templates_dir.join("index").with_extension(ext))
     } else {
-        Some(templates_dir.join(stem_str).join("index").with_extension(ext))
+        Some(
+            templates_dir
+                .join(stem_str)
+                .join("index")
+                .with_extension(ext),
+        )
     }
 }
 
@@ -278,7 +288,10 @@ pub fn build_graph(
         } else {
             format!("content/{schema_stem_str}/index.md")
         };
-        data.insert(KEY_PRESEMBLE_FILE, template::Value::Text(coll_presemble_file));
+        data.insert(
+            KEY_PRESEMBLE_FILE,
+            template::Value::Text(coll_presemble_file),
+        );
         data.insert(
             "_presemble_stem",
             template::Value::Text(schema_stem_str.to_string()),
@@ -344,19 +357,13 @@ pub fn build_graph(
                 && let Some(content_src) = repo.collection_content_source(&root_stem)
                 && let Ok(doc) = content::parse_and_assign(&content_src, &grammar)
             {
-                root_graph = template::build_article_graph(
-                    &doc,
-                    &grammar,
-                    source_attachment.output_mode(),
-                );
+                root_graph =
+                    template::build_article_graph(&doc, &grammar, source_attachment.output_mode());
                 root_graph.insert(
                     KEY_PRESEMBLE_FILE,
                     template::Value::Text("content/index.md".to_string()),
                 );
-                root_graph.insert(
-                    "_presemble_stem",
-                    template::Value::Text(String::new()),
-                );
+                root_graph.insert("_presemble_stem", template::Value::Text(String::new()));
             }
 
             let root_output_path = output_dir.join("index.html");
@@ -396,7 +403,11 @@ pub fn build_graph(
         }
     }
 
-    GraphBuildResult { graph, diagnostics, parse_errors }
+    GraphBuildResult {
+        graph,
+        diagnostics,
+        parse_errors,
+    }
 }
 
 #[cfg(test)]
@@ -419,7 +430,10 @@ mod tests {
 
         assert!(result.parse_errors.is_empty(), "no parse errors expected");
         let url = UrlPath::new("/post/hello");
-        let node = result.graph.get(&url).expect("item page should be in graph");
+        let node = result
+            .graph
+            .get(&url)
+            .expect("item page should be in graph");
         let pd = node.page_data().expect("should be a page node");
         assert_eq!(pd.page_kind, PageKind::Item);
         assert_eq!(pd.schema_stem.as_str(), "post");
@@ -432,7 +446,10 @@ mod tests {
         let result = build_graph(&repo, &output, SourceAttachment::Omit);
 
         let url = UrlPath::new("/post/hello");
-        let node = result.graph.get(&url).expect("item page should be in graph");
+        let node = result
+            .graph
+            .get(&url)
+            .expect("item page should be in graph");
         let pd = node.page_data().unwrap();
         assert!(
             matches!(pd.data.resolve(&["url"]), Some(template::Value::Text(s)) if s == "/post/hello"),
@@ -453,7 +470,10 @@ mod tests {
         let result = build_graph(&repo, &output, SourceAttachment::Omit);
 
         let url = UrlPath::new("/post/");
-        let node = result.graph.get(&url).expect("collection page should be in graph");
+        let node = result
+            .graph
+            .get(&url)
+            .expect("collection page should be in graph");
         let pd = node.page_data().expect("should be a page node");
         assert_eq!(pd.page_kind, PageKind::Collection);
     }
@@ -468,7 +488,10 @@ mod tests {
         let result = build_graph(&repo, &output, SourceAttachment::Omit);
 
         let url = UrlPath::new("/");
-        let node = result.graph.get(&url).expect("root page should be in graph via fallback");
+        let node = result
+            .graph
+            .get(&url)
+            .expect("root page should be in graph via fallback");
         let pd = node.page_data().expect("should be a page node");
         assert_eq!(pd.page_kind, PageKind::Collection);
     }
@@ -479,7 +502,10 @@ mod tests {
         let repo = make_repo();
         let output = std::path::PathBuf::from("/output");
         let result = build_graph(&repo, &output, attachment);
-        let node = result.graph.get(&UrlPath::new("/post/hello")).expect("item page");
+        let node = result
+            .graph
+            .get(&UrlPath::new("/post/hello"))
+            .expect("item page");
         let pd = node.page_data().expect("page node");
         template::render_template(TITLE_AND_LINK_TEMPLATE, &pd.data, attachment.output_mode())
             .expect("renders")
@@ -500,12 +526,17 @@ mod tests {
     fn editorial_build_carries_canonical_md_and_published_does_not() {
         let editorial = render_item(SourceAttachment::Attach);
         assert_eq!(
-            editorial.matches(r#"data-presemble-md="Hello World""#).count(),
+            editorial
+                .matches(r#"data-presemble-md="Hello World""#)
+                .count(),
             2,
             "the title slot and the synthesized title link carry md: {editorial}"
         );
         let published = render_item(SourceAttachment::Omit);
-        assert!(!published.contains(template::constants::ATTR_MD), "{published}");
+        assert!(
+            !published.contains(template::constants::ATTR_MD),
+            "{published}"
+        );
     }
 
     #[test]
@@ -529,14 +560,23 @@ mod tests {
             .content("post", "hello", "# *Hello* \\<World>\n")
             .item_template("post", "<html><body></body></html>", false)
             .build();
-        let result = build_graph(&repo, std::path::Path::new("/output"), SourceAttachment::Attach);
-        let node = result.graph.get(&UrlPath::new("/post/hello")).expect("item page");
+        let result = build_graph(
+            &repo,
+            std::path::Path::new("/output"),
+            SourceAttachment::Attach,
+        );
+        let node = result
+            .graph
+            .get(&UrlPath::new("/post/hello"))
+            .expect("item page");
         let pd = node.page_data().expect("page node");
         let link = match pd.data.resolve(&["link"]) {
             Some(template::Value::Record(link)) => link.clone(),
             other => panic!("link record expected, got {other:?}"),
         };
-        assert!(matches!(link.resolve(&["text"]), Some(template::Value::Text(t)) if t == "Hello <World>"));
+        assert!(
+            matches!(link.resolve(&["text"]), Some(template::Value::Text(t)) if t == "Hello <World>")
+        );
         assert!(matches!(
             link.resolve(&[template::constants::KEY_EDITOR_MD]),
             Some(template::Value::Text(t)) if t == "*Hello* \\<World>"

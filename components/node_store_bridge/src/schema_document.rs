@@ -19,11 +19,7 @@ use schema::{Constraint, Grammar, SchemaKind, SlotName};
 /// synthesized (`Item` vs `Index`) but does not change the synthesis logic, since
 /// each kind is already described by its own distinct grammar.
 pub fn synthesize_schema_document(grammar: &Grammar, _kind: SchemaKind) -> Document {
-    let preamble = grammar
-        .preamble
-        .iter()
-        .map(synthesize_slot)
-        .collect();
+    let preamble = grammar.preamble.iter().map(synthesize_slot).collect();
 
     Document {
         preamble,
@@ -180,7 +176,9 @@ mod tests {
                 paragraph_slot("title"),
                 Slot {
                     name: SlotName::new("author"),
-                    element: Element::Link { pattern: ".*".to_string() },
+                    element: Element::Link {
+                        pattern: ".*".to_string(),
+                    },
                     constraints: vec![
                         Constraint::TypeLink("author".to_string()),
                         Constraint::Occurs(CountRange::Exactly(1)),
@@ -303,7 +301,10 @@ mod tests {
         let doc = synthesize_schema_document(&grammar, SchemaKind::Item);
 
         assert!(doc.preamble.is_empty());
-        assert!(doc.has_separator, "grammar with body rules should set has_separator");
+        assert!(
+            doc.has_separator,
+            "grammar with body rules should set has_separator"
+        );
         assert!(doc.body.is_empty(), "synthesized body is always empty");
     }
 
@@ -316,7 +317,9 @@ mod tests {
         let grammar = Grammar {
             preamble: vec![Slot {
                 name: SlotName::new("hero_image"),
-                element: Element::Image { pattern: ".*".to_string() },
+                element: Element::Image {
+                    pattern: ".*".to_string(),
+                },
                 constraints: vec![
                     Constraint::Alt(AltRequirement::Required),
                     Constraint::Occurs(CountRange::Exactly(1)),

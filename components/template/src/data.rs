@@ -99,18 +99,19 @@ impl Value {
             Value::Text(s) => Some(s.clone()),
             Value::Record(graph) => {
                 // For records, Display is the "text" field if present
-                graph.resolve(&["text"])
-                    .and_then(|v| v.display_text())
+                graph.resolve(&["text"]).and_then(|v| v.display_text())
             }
-            Value::Nodes(nodes) | Value::Inlines(nodes) => Some(content::inline::normalize_plain_text(
-                &crate::markdown_nodes::text_content(nodes),
-            )),
+            Value::Nodes(nodes) | Value::Inlines(nodes) => Some(
+                content::inline::normalize_plain_text(&crate::markdown_nodes::text_content(nodes)),
+            ),
             Value::List(items) => {
                 // Join Display of each item with space
-                let texts: Vec<String> = items.iter()
-                    .filter_map(|v| v.display_text())
-                    .collect();
-                if texts.is_empty() { None } else { Some(texts.join(" ")) }
+                let texts: Vec<String> = items.iter().filter_map(|v| v.display_text()).collect();
+                if texts.is_empty() {
+                    None
+                } else {
+                    Some(texts.join(" "))
+                }
             }
             Value::Absent => None,
             Value::Suggestion { .. } => None,
@@ -227,7 +228,10 @@ pub fn list_item_values(list: &content::List) -> Vec<Value> {
 pub fn link_record(href: &str, text: &content::inline::Inlines) -> DataGraph {
     let mut record = DataGraph::new();
     record.insert("href", Value::Text(href.to_string()));
-    record.insert("text", Value::Inlines(crate::inline_nodes::inline_nodes(text).into()));
+    record.insert(
+        "text",
+        Value::Inlines(crate::inline_nodes::inline_nodes(text).into()),
+    );
     record
 }
 
@@ -238,7 +242,14 @@ pub fn image_record(src: &str, alt: &content::inline::Inlines) -> DataGraph {
     let mut record = DataGraph::new();
     record.insert("src", Value::Text(src.to_string()));
     let alt = alt.plain_text();
-    record.insert("alt", if alt.is_empty() { Value::Absent } else { Value::Text(alt) });
+    record.insert(
+        "alt",
+        if alt.is_empty() {
+            Value::Absent
+        } else {
+            Value::Text(alt)
+        },
+    );
     record
 }
 
@@ -252,9 +263,15 @@ pub fn synthesize_link(title: &str, url_path: &str, title_editor: Option<&DataGr
     let mut link = DataGraph::new();
     link.insert("href", Value::Text(url_path.to_string()));
     link.insert("text", Value::Text(title.to_string()));
-    link.insert(crate::constants::KEY_SOURCE_SLOT, Value::Text("title".to_string()));
+    link.insert(
+        crate::constants::KEY_SOURCE_SLOT,
+        Value::Text("title".to_string()),
+    );
     if let Some(editor) = title_editor {
-        for key in [crate::constants::KEY_EDITOR_ADDRESS, crate::constants::KEY_EDITOR_MD] {
+        for key in [
+            crate::constants::KEY_EDITOR_ADDRESS,
+            crate::constants::KEY_EDITOR_MD,
+        ] {
             if let Some(value @ Value::Text(_)) = editor.resolve(&[key]) {
                 link.insert(key, value.clone());
             }
@@ -293,7 +310,10 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
     let editor_record = |all: &[ContentElement], addresses: &[Option<String>], index: usize| {
         let mut record = DataGraph::new();
         if let Some(Some(address)) = addresses.get(index) {
-            record.insert(crate::constants::KEY_EDITOR_ADDRESS, Value::Text(address.clone()));
+            record.insert(
+                crate::constants::KEY_EDITOR_ADDRESS,
+                Value::Text(address.clone()),
+            );
         }
         if let Some(md) = content::project_markdown(&all[index], content::Projection::Content) {
             record.insert(crate::constants::KEY_EDITOR_MD, Value::Text(md));
@@ -313,8 +333,10 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
         let all: Vec<ContentElement> = elements.iter().map(|s| s.node.clone()).collect();
         let addresses =
             content::block_addresses("", content::AddressContainer::Slot(slot_key), &all);
-        let mut records: Vec<Value> =
-            indices.into_iter().map(|i| editor_record(&all, &addresses, i)).collect();
+        let mut records: Vec<Value> = indices
+            .into_iter()
+            .map(|i| editor_record(&all, &addresses, i))
+            .collect();
         let value = if single {
             match records.drain(..).next() {
                 Some(record) => record,
@@ -323,7 +345,10 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
         } else {
             Value::List(records)
         };
-        graph.insert(format!("{}{slot_key}", crate::constants::KEY_EDITOR_PREFIX), value);
+        graph.insert(
+            format!("{}{slot_key}", crate::constants::KEY_EDITOR_PREFIX),
+            value,
+        );
     };
     let positions = |elements: &im::Vector<Spanned<ContentElement>>,
                      wanted: &dyn Fn(&ContentElement) -> bool,
@@ -371,7 +396,9 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
                         if let ContentElement::Paragraph { content, .. } = &s.node {
                             // A paragraph slot is its inline nodes; in a string
                             // context they read as their plain text.
-                            Some(Value::Inlines(crate::inline_nodes::inline_nodes(content).into()))
+                            Some(Value::Inlines(
+                                crate::inline_nodes::inline_nodes(content).into(),
+                            ))
                         } else {
                             None
                         }
@@ -479,13 +506,18 @@ pub fn build_article_graph(doc: &Document, grammar: &Grammar, output: OutputMode
             continue;
         }
         let element_kind = match &slot.element {
-            Element::Heading { level } => SuggestionKind::Heading { level: level.min.value() },
+            Element::Heading { level } => SuggestionKind::Heading {
+                level: level.min.value(),
+            },
             Element::Paragraph => SuggestionKind::Paragraph,
             Element::Link { .. } => SuggestionKind::Link,
             Element::Image { .. } => SuggestionKind::Image,
             Element::List => SuggestionKind::List,
         };
-        let hint = slot.hint_text.clone().unwrap_or_else(|| slot.name.to_string());
+        let hint = slot
+            .hint_text
+            .clone()
+            .unwrap_or_else(|| slot.name.to_string());
         graph.insert(
             slot_key,
             Value::Suggestion {
@@ -592,7 +624,7 @@ pub fn inject_schema_included_by(graph: &mut DataGraph, included: &[(&str, &str)
 mod tests {
     use super::*;
     use content::parse_and_assign;
-    use schema::{parse_schema, Span as SchemaSpan, Spanned};
+    use schema::{Span as SchemaSpan, Spanned, parse_schema};
 
     #[test]
     fn published_graph_has_no_editor_record() {
@@ -604,7 +636,10 @@ mod tests {
         let doc = parse_and_assign("# Title\n\nA summary.\n", &grammar).expect("content parses");
 
         let published = build_article_graph(&doc, &grammar, OutputMode::Published);
-        assert!(title_editor(&published).is_none(), "published graph carries no editor record");
+        assert!(
+            title_editor(&published).is_none(),
+            "published graph carries no editor record"
+        );
 
         // The editorial graph's title editor record holds the heading's
         // `Content` projection; a title link made from it carries both keys.
@@ -615,21 +650,24 @@ mod tests {
             Some(Value::Text(t)) => assert_eq!(t, "Title"),
             other => panic!("the title link should carry the heading's md, got {other:?}"),
         }
-        assert!(link.resolve(&[crate::constants::KEY_EDITOR_ADDRESS]).is_some());
+        assert!(
+            link.resolve(&[crate::constants::KEY_EDITOR_ADDRESS])
+                .is_some()
+        );
     }
 
     #[test]
     fn synthesize_link_without_a_title_editor_has_no_editor_keys() {
         let link = synthesize_link("T", "/x", None);
         assert!(link.resolve(&[crate::constants::KEY_EDITOR_MD]).is_none());
-        assert!(link.resolve(&[crate::constants::KEY_EDITOR_ADDRESS]).is_none());
+        assert!(
+            link.resolve(&[crate::constants::KEY_EDITOR_ADDRESS])
+                .is_none()
+        );
     }
 
     /// The body as serialized HTML, for asserting on rendered output.
-    fn body_html(
-        elements: &im::Vector<Spanned<ContentElement>>,
-        editorial: bool,
-    ) -> String {
+    fn body_html(elements: &im::Vector<Spanned<ContentElement>>, editorial: bool) -> String {
         crate::dom::serialize_nodes(&crate::body_nodes::render_body_nodes(elements, editorial))
     }
 
@@ -643,7 +681,10 @@ mod tests {
 
     /// Wrap a plain `ContentElement` in a dummy `Spanned` for use in tests.
     fn spanned(node: ContentElement) -> Spanned<ContentElement> {
-        Spanned { node, span: SchemaSpan { start: 0, end: 0 } }
+        Spanned {
+            node,
+            span: SchemaSpan { start: 0, end: 0 },
+        }
     }
 
     fn article_grammar() -> Grammar {
@@ -652,8 +693,7 @@ mod tests {
     }
 
     fn hello_world_doc() -> Document {
-        let doc_input =
-            include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+        let doc_input = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
         let grammar = article_grammar();
         parse_and_assign(doc_input, &grammar).expect("hello-world.md should parse")
     }
@@ -664,8 +704,8 @@ mod tests {
 
     #[test]
     fn body_under_a_preamble_only_schema_is_omitted_from_the_data_graph() {
-        let grammar = parse_schema("# Title {#title}\noccurs\n: exactly once\n")
-            .expect("schema parses");
+        let grammar =
+            parse_schema("# Title {#title}\noccurs\n: exactly once\n").expect("schema parses");
         let doc = parse_and_assign("# Title\n\n----\n\nBody text.\n", &grammar).expect("parses");
         assert_eq!(doc.body.len(), 1, "the content stays in the body");
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
@@ -724,7 +764,10 @@ mod tests {
     #[test]
     fn nodes_debug_prints_the_node_count() {
         let nodes = crate::dom::parse_template_xml("<p>a</p><p>b</p>").unwrap();
-        assert_eq!(format!("{:?}", Value::Nodes(nodes.into())), "Nodes(2 nodes)");
+        assert_eq!(
+            format!("{:?}", Value::Nodes(nodes.into())),
+            "Nodes(2 nodes)"
+        );
     }
 
     fn graph_for_body(body_md: &str) -> DataGraph {
@@ -774,11 +817,18 @@ mod tests {
             comments: Default::default(),
         };
         let grammar = parse_schema("# Title {#title}\n\n----\n\nBody.\n").expect("schema");
-        graph.merge_from(&build_article_graph(&doc, &grammar, OutputMode::Published), &[]);
-        let nodes = crate::dom::parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
+        graph.merge_from(
+            &build_article_graph(&doc, &grammar, OutputMode::Published),
+            &[],
+        );
+        let nodes =
+            crate::dom::parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let html = crate::render_from_nodes(nodes, &graph, OutputMode::Published).unwrap();
         assert!(html.contains("before"), "{html}");
-        assert!(!html.contains("<a"), "a body link expression must not render: {html}");
+        assert!(
+            !html.contains("<a"),
+            "a body link expression must not render: {html}"
+        );
         assert!(!html.contains("label"), "{html}");
     }
 
@@ -891,7 +941,9 @@ mod tests {
         let grammar = article_grammar();
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
         match graph.resolve(&["body"]) {
-            Some(Value::Nodes(nodes)) => assert!(!nodes.is_empty(), "body nodes should not be empty"),
+            Some(Value::Nodes(nodes)) => {
+                assert!(!nodes.is_empty(), "body nodes should not be empty")
+            }
             other => panic!("expected Some(Nodes) for body, got {other:?}"),
         }
     }
@@ -940,7 +992,10 @@ mod tests {
             let elements: im::Vector<_> = doc.elements.iter().cloned().collect();
             body_html(&elements, false)
         };
-        assert_eq!(body("[a](/x)\n"), r#"<a data-presemble-slot="body" href="/x">a</a>"#);
+        assert_eq!(
+            body("[a](/x)\n"),
+            r#"<a data-presemble-slot="body" href="/x">a</a>"#
+        );
         assert_eq!(
             body("![c](c.png)\n"),
             r#"<img data-presemble-slot="body" src="c.png" alt="c" />"#
@@ -970,20 +1025,29 @@ mod tests {
     /// normal form (ADR-059 N9): `_a_*b*` is one `<em>`.
     #[test]
     fn body_paragraph_renders_its_inline_nodes_in_normal_form() {
-        let elements: im::Vector<_> =
-            vec![spanned(ContentElement::paragraph_from_markdown("_a_*b* and **c**"))]
-                .into_iter()
-                .collect();
+        let elements: im::Vector<_> = vec![spanned(ContentElement::paragraph_from_markdown(
+            "_a_*b* and **c**",
+        ))]
+        .into_iter()
+        .collect();
         let html = body_html(&elements, false);
-        assert!(html.contains("<em>ab</em> and <strong>c</strong></p>"), "{html}");
+        assert!(
+            html.contains("<em>ab</em> and <strong>c</strong></p>"),
+            "{html}"
+        );
     }
 
     #[test]
     fn body_nodes_elements_have_data_presemble_slot_body() {
         let elements: im::Vector<_> = vec![
             spanned(ContentElement::paragraph_from_markdown("para")),
-            spanned(ContentElement::heading_from_markdown(schema::HeadingLevel::new(3).unwrap(), "head")),
-        ].into_iter().collect();
+            spanned(ContentElement::heading_from_markdown(
+                schema::HeadingLevel::new(3).unwrap(),
+                "head",
+            )),
+        ]
+        .into_iter()
+        .collect();
         let html = body_html(&elements, false);
         assert!(
             html.contains("data-presemble-slot=\"body\""),
@@ -991,7 +1055,10 @@ mod tests {
         );
         // Both elements should have the attribute
         let count = html.matches("data-presemble-slot=\"body\"").count();
-        assert_eq!(count, 2, "expected 2 elements with data-presemble-slot=\"body\"; got {count} in: {html}");
+        assert_eq!(
+            count, 2,
+            "expected 2 elements with data-presemble-slot=\"body\"; got {count} in: {html}"
+        );
     }
 
     #[test]
@@ -1000,23 +1067,39 @@ mod tests {
             spanned(ContentElement::paragraph_from_markdown("first")),
             spanned(ContentElement::Separator),
             spanned(ContentElement::paragraph_from_markdown("second")),
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         let html = body_html(&elements, false);
-        assert!(!html.contains("presemble-body-"),
-            "body nodes must not emit legacy presemble-body-N ids; got: {html}");
+        assert!(
+            !html.contains("presemble-body-"),
+            "body nodes must not emit legacy presemble-body-N ids; got: {html}"
+        );
         let count = html.matches("data-presemble-slot=\"body\"").count();
-        assert_eq!(count, 3, "expected 3 body-slot markers (P, Sep-marker, P); got {count} in: {html}");
-        assert!(html.contains("hidden=\"\"></span>"), "separator should emit hidden marker; got: {html}");
+        assert_eq!(
+            count, 3,
+            "expected 3 body-slot markers (P, Sep-marker, P); got {count} in: {html}"
+        );
+        assert!(
+            html.contains("hidden=\"\"></span>"),
+            "separator should emit hidden marker; got: {html}"
+        );
     }
 
     #[test]
     fn escape_html_replaces_special_characters() {
-        assert_eq!(crate::dom::html_escape_text("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+        assert_eq!(
+            crate::dom::html_escape_text("a < b & c > d"),
+            "a &lt; b &amp; c &gt; d"
+        );
         assert_eq!(
             crate::dom::html_escape_text("<presemble:insert>"),
             "&lt;presemble:insert&gt;"
         );
-        assert_eq!(crate::dom::html_escape_text("say \"hi\""), "say &quot;hi&quot;");
+        assert_eq!(
+            crate::dom::html_escape_text("say \"hi\""),
+            "say &quot;hi&quot;"
+        );
         // & must be replaced first to avoid double-escaping
         assert_eq!(crate::dom::html_escape_text("a & b"), "a &amp; b");
     }
@@ -1024,7 +1107,9 @@ mod tests {
     #[test]
     fn body_html_is_parseable_xml_when_content_has_angle_brackets() {
         use crate::dom::parse_template_xml;
-        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+        use schema::{
+            BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span,
+        };
 
         // Build a minimal document whose body paragraph contains angle brackets.
         // The separator (---) separates preamble from body.
@@ -1131,7 +1216,9 @@ mod tests {
         // tagline should be exactly one inline value (a paragraph is its
         // inline nodes; in a string context, its plain text)
         match graph.resolve(&["tagline"]) {
-            Some(v @ Value::Inlines(_)) => assert_eq!(v.display_text().as_deref(), Some("My tagline.")),
+            Some(v @ Value::Inlines(_)) => {
+                assert_eq!(v.display_text().as_deref(), Some("My tagline."))
+            }
             other => panic!("expected tagline as Inlines, got: {other:?}"),
         }
 
@@ -1139,10 +1226,8 @@ mod tests {
         match graph.resolve(&["description"]) {
             Some(Value::List(items)) => {
                 assert_eq!(items.len(), 1);
-                assert!(
-                    matches!(&items[0], v @ Value::Inlines(_)
-                        if v.display_text().is_some_and(|t| t.contains("description")))
-                );
+                assert!(matches!(&items[0], v @ Value::Inlines(_)
+                        if v.display_text().is_some_and(|t| t.contains("description"))));
             }
             other => panic!("expected description as List, got: {other:?}"),
         }
@@ -1155,7 +1240,9 @@ mod tests {
     #[test]
     fn build_article_graph_stores_link_expression_in_preamble_slot() {
         use content::{LinkTarget, LinkText};
-        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+        use schema::{
+            BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span,
+        };
 
         // Schema: one heading slot (title) and one link slot (related).
         let grammar = Grammar {
@@ -1174,13 +1261,17 @@ mod tests {
                 },
                 Slot {
                     name: SlotName::new("related"),
-                    element: Element::Link { pattern: String::new() },
+                    element: Element::Link {
+                        pattern: String::new(),
+                    },
                     constraints: vec![],
                     hint_text: None,
                     span: Span { start: 0, end: 0 },
                 },
             ],
-            body: Some(BodyRules { heading_range: None }),
+            body: Some(BodyRules {
+                heading_range: None,
+            }),
         };
 
         // Manually build a document with a LinkExpression in the "related" slot.
@@ -1282,7 +1373,11 @@ mod tests {
 
         // title — Heading suggestion
         match graph.resolve(&["title"]) {
-            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Heading { .. }, .. }) => {
+            Some(Value::Suggestion {
+                slot_name,
+                element_kind: SuggestionKind::Heading { .. },
+                ..
+            }) => {
                 assert_eq!(slot_name, "title");
             }
             other => panic!("expected Suggestion for title, got {other:?}"),
@@ -1290,7 +1385,11 @@ mod tests {
 
         // summary — Paragraph suggestion; hint comes from schema hint_text
         match graph.resolve(&["summary"]) {
-            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Paragraph, hint }) => {
+            Some(Value::Suggestion {
+                slot_name,
+                element_kind: SuggestionKind::Paragraph,
+                hint,
+            }) => {
                 assert_eq!(slot_name, "summary");
                 // hint should come from schema hint_text ("Your article summary. Tell the reader what they will learn.")
                 assert!(!hint.is_empty(), "hint should not be empty");
@@ -1300,7 +1399,11 @@ mod tests {
 
         // author — Link suggestion
         match graph.resolve(&["author"]) {
-            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Link, .. }) => {
+            Some(Value::Suggestion {
+                slot_name,
+                element_kind: SuggestionKind::Link,
+                ..
+            }) => {
                 assert_eq!(slot_name, "author");
             }
             other => panic!("expected Suggestion for author, got {other:?}"),
@@ -1308,7 +1411,11 @@ mod tests {
 
         // cover — Image suggestion
         match graph.resolve(&["cover"]) {
-            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Image, .. }) => {
+            Some(Value::Suggestion {
+                slot_name,
+                element_kind: SuggestionKind::Image,
+                ..
+            }) => {
                 assert_eq!(slot_name, "cover");
             }
             other => panic!("expected Suggestion for cover, got {other:?}"),
@@ -1341,7 +1448,8 @@ mod tests {
     #[test]
     fn doc_missing_only_cover_gets_only_cover_suggestion() {
         // Document has title, summary, author, but no cover.
-        let doc_input = "# My Title\n\nMy summary.\n\n[Jo Hlrogge](/author/jo)\n\n----\n\n### Body\n";
+        let doc_input =
+            "# My Title\n\nMy summary.\n\n[Jo Hlrogge](/author/jo)\n\n----\n\n### Body\n";
         let grammar = article_grammar();
         let doc = parse_and_assign(doc_input, &grammar).expect("partial doc should parse");
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
@@ -1366,7 +1474,11 @@ mod tests {
 
         // cover should be a suggestion
         match graph.resolve(&["cover"]) {
-            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Image, .. }) => {
+            Some(Value::Suggestion {
+                slot_name,
+                element_kind: SuggestionKind::Image,
+                ..
+            }) => {
                 assert_eq!(slot_name, "cover");
             }
             other => panic!("expected Suggestion for cover, got {other:?}"),
@@ -1384,7 +1496,11 @@ mod tests {
 
         // Missing tagline now becomes a Suggestion placeholder rather than Absent.
         match graph.resolve(&["tagline"]) {
-            Some(Value::Suggestion { slot_name, element_kind: SuggestionKind::Paragraph, .. }) => {
+            Some(Value::Suggestion {
+                slot_name,
+                element_kind: SuggestionKind::Paragraph,
+                ..
+            }) => {
                 assert_eq!(slot_name, "tagline");
             }
             other => panic!("expected Suggestion for missing tagline, got {other:?}"),
@@ -1398,7 +1514,9 @@ mod tests {
     #[test]
     fn body_paragraph_with_bold_renders_as_strong() {
         // **bold** in a paragraph stored with markdown syntax should render as <strong>
-        let para = spanned(ContentElement::paragraph_from_markdown("This has **bold** text."));
+        let para = spanned(ContentElement::paragraph_from_markdown(
+            "This has **bold** text.",
+        ));
         let html = body_html(&im::vector![para], false);
         assert!(
             html.contains("<strong>bold</strong>"),
@@ -1413,7 +1531,9 @@ mod tests {
 
     #[test]
     fn body_paragraph_with_italic_renders_as_em() {
-        let para = spanned(ContentElement::paragraph_from_markdown("This has _italic_ text."));
+        let para = spanned(ContentElement::paragraph_from_markdown(
+            "This has _italic_ text.",
+        ));
         let html = body_html(&im::vector![para], false);
         assert!(
             html.contains("<em>italic</em>"),
@@ -1423,7 +1543,13 @@ mod tests {
 
     #[test]
     fn body_blockquote_renders_as_blockquote_tag() {
-        let bq = spanned(content::parse_document("> A wise quote.\n").unwrap().elements[0].node.clone());
+        let bq = spanned(
+            content::parse_document("> A wise quote.\n")
+                .unwrap()
+                .elements[0]
+                .node
+                .clone(),
+        );
         let html = body_html(&im::vector![bq], false);
         assert!(
             html.contains("<blockquote"),
@@ -1446,10 +1572,7 @@ mod tests {
             "Section with *emphasis*",
         ));
         let html = body_html(&im::vector![heading], false);
-        assert!(
-            html.contains("<h3"),
-            "expected h3 tag; got: {html}"
-        );
+        assert!(html.contains("<h3"), "expected h3 tag; got: {html}");
         assert!(
             html.contains("<em>emphasis</em>"),
             "expected <em>emphasis</em> in heading; got: {html}"
@@ -1462,10 +1585,18 @@ mod tests {
 
     #[test]
     fn body_paragraph_inline_html_renders_escaped() {
-        let para = spanned(ContentElement::paragraph_from_markdown("a <script>x</script> b"));
+        let para = spanned(ContentElement::paragraph_from_markdown(
+            "a <script>x</script> b",
+        ));
         let html = body_html(&im::vector![para], false);
-        assert!(!html.contains("<script"), "inline HTML must not be rendered; got: {html}");
-        assert!(html.contains("&lt;script&gt;"), "inline HTML must render escaped; got: {html}");
+        assert!(
+            !html.contains("<script"),
+            "inline HTML must not be rendered; got: {html}"
+        );
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "inline HTML must render escaped; got: {html}"
+        );
     }
 
     #[test]
@@ -1475,45 +1606,81 @@ mod tests {
             "<script>x</script>",
         ));
         let html = body_html(&im::vector![heading], false);
-        assert!(!html.contains("<script"), "heading HTML must not be rendered; got: {html}");
-        assert!(html.contains("&lt;script&gt;"), "heading HTML must render escaped; got: {html}");
+        assert!(
+            !html.contains("<script"),
+            "heading HTML must not be rendered; got: {html}"
+        );
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "heading HTML must render escaped; got: {html}"
+        );
     }
 
     #[test]
     fn body_list_with_nested_html_block_renders_the_placeholder() {
         let list = spanned(
-            content::parse_document("- item\n\n  <div>inner</div>\n").unwrap().elements[0].node.clone(),
+            content::parse_document("- item\n\n  <div>inner</div>\n")
+                .unwrap()
+                .elements[0]
+                .node
+                .clone(),
         );
         let html = body_html(&im::vector![list], false);
-        assert!(!html.contains("inner"), "nested HTML block must not be rendered; got: {html}");
-        assert!(html.contains("presemble-html-removed"), "expected the placeholder; got: {html}");
+        assert!(
+            !html.contains("inner"),
+            "nested HTML block must not be rendered; got: {html}"
+        );
+        assert!(
+            html.contains("presemble-html-removed"),
+            "expected the placeholder; got: {html}"
+        );
     }
 
     #[test]
     fn body_paragraph_inline_comment_is_stripped() {
-        let para = spanned(ContentElement::paragraph_from_markdown("a <!-- secret --> b"));
+        let para = spanned(ContentElement::paragraph_from_markdown(
+            "a <!-- secret --> b",
+        ));
         let html = body_html(&im::vector![para], false);
-        assert!(!html.contains("secret"), "inline comment must be stripped; got: {html}");
+        assert!(
+            !html.contains("secret"),
+            "inline comment must be stripped; got: {html}"
+        );
     }
 
     #[test]
     fn body_html_block_renders_only_the_placeholder() {
-        let block = spanned(ContentElement::HtmlBlock { source: "<div>secret</div>".to_string() });
+        let block = spanned(ContentElement::HtmlBlock {
+            source: "<div>secret</div>".to_string(),
+        });
         let html = body_html(&im::vector![block], false);
-        assert!(!html.contains("secret"), "HTML block source must not be rendered; got: {html}");
-        assert!(html.contains("presemble-html-removed"), "expected the placeholder class; got: {html}");
+        assert!(
+            !html.contains("secret"),
+            "HTML block source must not be rendered; got: {html}"
+        );
+        assert!(
+            html.contains("presemble-html-removed"),
+            "expected the placeholder class; got: {html}"
+        );
         assert!(
             html.contains("Raw HTML is not published. Remove it to publish this page."),
             "expected the placeholder message; got: {html}"
         );
-        assert!(!html.contains("data-presemble-slot"), "placeholder must not be a slot; got: {html}");
+        assert!(
+            !html.contains("data-presemble-slot"),
+            "placeholder must not be a slot; got: {html}"
+        );
     }
 
     fn render_table(headers: &[&str], rows: &[&[&str]]) -> String {
         let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
         let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
         md.extend(rows.iter().map(|r| line(r)));
-        let table = spanned(content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone());
+        let table = spanned(
+            content::parse_document(&md.join("\n")).unwrap().elements[0]
+                .node
+                .clone(),
+        );
         body_html(&im::vector![table], false)
     }
 
@@ -1525,8 +1692,14 @@ mod tests {
             assert!(!html.contains(tag), "unexpected {tag}; got: {html}");
         }
         for expected in ["-", "+", "#", "1.", "&gt; q", "***"] {
-            assert!(html.contains(&format!("<th>{expected}</th>")), "th {expected}; got: {html}");
-            assert!(html.contains(&format!("<td>{expected}</td>")), "td {expected}; got: {html}");
+            assert!(
+                html.contains(&format!("<th>{expected}</th>")),
+                "th {expected}; got: {html}"
+            );
+            assert!(
+                html.contains(&format!("<td>{expected}</td>")),
+                "td {expected}; got: {html}"
+            );
         }
     }
 
@@ -1536,8 +1709,14 @@ mod tests {
         assert!(html.contains("<th><code>a|b</code></th>"), "got: {html}");
         assert!(html.contains("<th><strong>b</strong></th>"), "got: {html}");
         assert!(html.contains("<td>&lt;script&gt;</td>"), "got: {html}");
-        assert!(html.contains("<td>&lt;b&gt;x&lt;/b&gt;</td>"), "got: {html}");
-        assert!(!html.contains("<script") && !html.contains("<b>"), "got: {html}");
+        assert!(
+            html.contains("<td>&lt;b&gt;x&lt;/b&gt;</td>"),
+            "got: {html}"
+        );
+        assert!(
+            !html.contains("<script") && !html.contains("<b>"),
+            "got: {html}"
+        );
     }
 
     /// A pipe in a cell's text is text: the cell is nodes, not a source to
@@ -1547,7 +1726,10 @@ mod tests {
         use content::inline::{Inline, InlineContext, Inlines};
         let cell = Inlines::new(vec![Inline::Text("a | b".into())], InlineContext::Cell);
         let table = spanned(ContentElement::Table {
-            columns: vec![content::Column { header: cell.clone(), align: content::Align::Default }],
+            columns: vec![content::Column {
+                header: cell.clone(),
+                align: content::Align::Default,
+            }],
             rows: vec![vec![cell]],
         });
         let html = body_html(&im::vector![table], false);
@@ -1566,7 +1748,10 @@ mod tests {
             let elements = content::parse_document(md).expect("parses").elements;
             let html = body_html(&elements, false);
             assert!(html.contains(escaped), "{md:?}: {html}");
-            assert!(!html.contains("<div") && !html.contains("<b>"), "{md:?}: {html}");
+            assert!(
+                !html.contains("<div") && !html.contains("<b>"),
+                "{md:?}: {html}"
+            );
         }
     }
 
@@ -1579,15 +1764,26 @@ mod tests {
         assert_eq!(doc.comments.len(), 2);
         let html = body_html(&doc.body, true);
         assert!(html.contains("Visible."), "got: {html}");
-        assert!(!html.contains("secret") && !html.contains("<!--"), "got: {html}");
+        assert!(
+            !html.contains("secret") && !html.contains("<!--"),
+            "got: {html}"
+        );
     }
 
     #[test]
     fn body_paragraph_code_and_link_still_render() {
-        let para = spanned(ContentElement::paragraph_from_markdown("Use `x<y` and [here](/a)"));
+        let para = spanned(ContentElement::paragraph_from_markdown(
+            "Use `x<y` and [here](/a)",
+        ));
         let html = body_html(&im::vector![para], false);
-        assert!(html.contains("<code>x&lt;y</code>"), "expected code span; got: {html}");
-        assert!(html.contains(r#"<a href="/a">here</a>"#), "expected link; got: {html}");
+        assert!(
+            html.contains("<code>x&lt;y</code>"),
+            "expected code span; got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/a">here</a>"#),
+            "expected link; got: {html}"
+        );
     }
 
     #[test]
@@ -1623,7 +1819,9 @@ mod tests {
     #[test]
     fn editorial_graph_attaches_md_attr_without_source() {
         use content::parse_and_assign;
-        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+        use schema::{
+            BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span,
+        };
 
         let source = "# My Title\n\n---\n\nA body paragraph.\n";
         let grammar = Grammar {
@@ -1639,7 +1837,9 @@ mod tests {
                 hint_text: None,
                 span: Span { start: 0, end: 0 },
             }],
-            body: Some(BodyRules { heading_range: None }),
+            body: Some(BodyRules {
+                heading_range: None,
+            }),
         };
 
         let doc = parse_and_assign(source, &grammar).expect("document should parse");
@@ -1657,7 +1857,9 @@ mod tests {
             "editorial graph carries the title slot's editor record"
         );
         assert!(
-            graph.resolve(&["_presemble_editor_title", "address"]).is_some(),
+            graph
+                .resolve(&["_presemble_editor_title", "address"])
+                .is_some(),
             "and its address"
         );
         let published = build_article_graph(&doc, &grammar, OutputMode::Published);
@@ -1672,7 +1874,10 @@ mod tests {
 
     #[test]
     fn build_article_graph_stores_constraint_record_for_slot_with_occurs() {
-        use schema::{Constraint, CountRange, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+        use schema::{
+            Constraint, CountRange, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot,
+            SlotName, Span,
+        };
 
         let grammar = Grammar {
             preamble: vec![Slot {
@@ -1694,21 +1899,25 @@ mod tests {
         let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
-        let constraint_key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, "title");
+        let constraint_key = format!(
+            "{}{}",
+            crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX,
+            "title"
+        );
         match graph.resolve(&[constraint_key.as_str()]) {
-            Some(Value::Record(record)) => {
-                match record.resolve(&["occurs"]) {
-                    Some(Value::Text(v)) => assert_eq!(v, "exactly-once"),
-                    other => panic!("expected occurs=exactly-once in constraint record, got {other:?}"),
-                }
-            }
+            Some(Value::Record(record)) => match record.resolve(&["occurs"]) {
+                Some(Value::Text(v)) => assert_eq!(v, "exactly-once"),
+                other => panic!("expected occurs=exactly-once in constraint record, got {other:?}"),
+            },
             other => panic!("expected constraint Record for title, got {other:?}"),
         }
     }
 
     #[test]
     fn build_article_graph_does_not_store_constraint_record_for_unconstrained_slot() {
-        use schema::{BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span};
+        use schema::{
+            BodyRules, Element, Grammar, HeadingLevel, HeadingLevelRange, Slot, SlotName, Span,
+        };
 
         let grammar = Grammar {
             preamble: vec![Slot {
@@ -1723,14 +1932,20 @@ mod tests {
                 hint_text: None,
                 span: Span { start: 0, end: 0 },
             }],
-            body: Some(BodyRules { heading_range: None }),
+            body: Some(BodyRules {
+                heading_range: None,
+            }),
         };
 
         let doc_input = "# My Title\n";
         let doc = parse_and_assign(doc_input, &grammar).expect("should parse");
         let graph = build_article_graph(&doc, &grammar, OutputMode::Published);
 
-        let constraint_key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, "title");
+        let constraint_key = format!(
+            "{}{}",
+            crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX,
+            "title"
+        );
         // No constraints → no entry in graph.
         assert!(
             graph.resolve(&[constraint_key.as_str()]).is_none(),

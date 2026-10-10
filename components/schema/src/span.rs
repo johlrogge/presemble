@@ -11,7 +11,10 @@ pub struct Span {
 
 impl From<Range<usize>> for Span {
     fn from(range: Range<usize>) -> Self {
-        Span { start: range.start, end: range.end }
+        Span {
+            start: range.start,
+            end: range.end,
+        }
     }
 }
 

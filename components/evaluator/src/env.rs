@@ -1,6 +1,6 @@
+use crate::doc_registry::{DocEntry, DocRegistry};
 use std::sync::{Arc, RwLock};
 use template::Value;
-use crate::doc_registry::{DocEntry, DocRegistry};
 
 /// Lexical environment — immutable scope with parent chain.
 /// Each `let` / `fn` body creates a new child scope via `with_parent`.

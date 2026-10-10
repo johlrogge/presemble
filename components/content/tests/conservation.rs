@@ -60,8 +60,8 @@
 //! in them is dropped.
 
 use content::{
-    assign_slots, parse_document, serialize_document, CommentAnchor, Container, ContentElement,
-    Document,
+    CommentAnchor, Container, ContentElement, Document, assign_slots, parse_document,
+    serialize_document,
 };
 use schema::Grammar;
 
@@ -112,8 +112,14 @@ const BODY_SCHEMA: &str = "\n----\n\nBody.\nheadings\n: h3..h6\n";
 fn grammars() -> Vec<(&'static str, Grammar)> {
     let with_body = format!("{PREAMBLE_SCHEMA}{BODY_SCHEMA}");
     vec![
-        ("preamble only", schema::parse_schema(PREAMBLE_SCHEMA).expect("schema parses")),
-        ("with body", schema::parse_schema(&with_body).expect("schema parses")),
+        (
+            "preamble only",
+            schema::parse_schema(PREAMBLE_SCHEMA).expect("schema parses"),
+        ),
+        (
+            "with body",
+            schema::parse_schema(&with_body).expect("schema parses"),
+        ),
     ]
 }
 
@@ -135,7 +141,10 @@ fn corpus_section(name: &str) -> Vec<&'static str> {
             lines.push(line);
         }
     }
-    assert!(!lines.is_empty(), "no section `{name}` in paragraph-corpus.txt");
+    assert!(
+        !lines.is_empty(),
+        "no section `{name}` in paragraph-corpus.txt"
+    );
     lines
 }
 
@@ -161,8 +170,11 @@ const MARKED_FOR_LINK_SLOT: &[&str] = &[
     "[x](:fragments/a) {#latest}",
 ];
 const MARKED_FOR_NO_SLOT: &[&str] = &["[N](->> :post) {#newz}", "[x](:p) {#nope}"];
-const MARKED_FOR_NON_LINK_SLOT: &[&str] =
-    &["[T](->> :post) {#title}", "[S](->> :post) {#summary}", "[C](:p) {#cover}"];
+const MARKED_FOR_NON_LINK_SLOT: &[&str] = &[
+    "[T](->> :post) {#title}",
+    "[S](->> :post) {#summary}",
+    "[C](:p) {#cover}",
+];
 const MARKER_MISUSE: &[&str] = &[
     "{#x}",
     "{#title}",
@@ -251,7 +263,11 @@ fn gen_list(rng: &mut Rng) -> String {
     // Often a second list of the same kind, with a comment between them: the
     // separator `<!-- -->` (half the time) or any comment.
     if rng.chance(40) {
-        let between = if rng.chance(50) { "<!-- -->" } else { rng.pick(COMMENTS) };
+        let between = if rng.chance(50) {
+            "<!-- -->"
+        } else {
+            rng.pick(COMMENTS)
+        };
         let second = gen_list_of_kind(rng, ordered, 0);
         return format!("{first}\n\n{between}\n\n{second}");
     }
@@ -345,7 +361,13 @@ fn gen_item_blocks(rng: &mut Rng, loose: bool, depth: usize, may_be_empty: bool)
 fn quote_lines(block: &str) -> String {
     block
         .split('\n')
-        .map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") })
+        .map(|l| {
+            if l.is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {l}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -359,9 +381,21 @@ fn gen_quote_child(rng: &mut Rng, depth: usize) -> String {
         0..=2 => rng.pick(&PARAGRAPHS).to_string(),
         3 => rng.pick(&INLINE_PARAGRAPHS).to_string(),
         4 => rng.pick(BODY_HEADINGS).to_string(),
-        5 => rng.pick(&["```\nlet x = 1;\n\nlet y = 2;\n```", "````\n```\ninner\n```\n````", "~~~rust\nfn f() {}\n~~~"]).to_string(),
+        5 => rng
+            .pick(&[
+                "```\nlet x = 1;\n\nlet y = 2;\n```",
+                "````\n```\ninner\n```\n````",
+                "~~~rust\nfn f() {}\n~~~",
+            ])
+            .to_string(),
         6 => gen_list(rng),
-        7 => rng.pick(&["| a | b |\n|:--|--:|\n| 1 | **2** |", "| `x\\|y` |\n|---|\n| [l](/l) |", "| a | b |\n|---|---|\n| 1 | 2 | 3 |"]).to_string(),
+        7 => rng
+            .pick(&[
+                "| a | b |\n|:--|--:|\n| 1 | **2** |",
+                "| `x\\|y` |\n|---|\n| [l](/l) |",
+                "| a | b |\n|---|---|\n| 1 | 2 | 3 |",
+            ])
+            .to_string(),
         8 => rng.pick(HTML_BLOCKS).to_string(),
         9 => "----".to_string(),
         10 => rng.pick(UNMARKED_EXPRESSIONS).to_string(),
@@ -390,7 +424,13 @@ fn gen_blockquote(rng: &mut Rng, depth: usize) -> String {
     }
     let mut quoted = quote_lines(&parts.join("\n\n"));
     // A lazy continuation: the last line of a plain paragraph child, unmarked.
-    if rng.chance(10) && parts.len() == 1 && !parts[0].contains('\n') && parts[0].chars().all(|c| c.is_ascii_alphabetic() || c == ' ') {
+    if rng.chance(10)
+        && parts.len() == 1
+        && !parts[0].contains('\n')
+        && parts[0]
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == ' ')
+    {
         quoted.push_str("\nlazy continuation");
     }
     quoted
@@ -540,7 +580,9 @@ fn check_all(property: &str, check: impl Fn(&str, &Grammar) -> Result<(), String
             let src = gen_source(seed);
             runs += 1;
             if let Err(e) = check(&src, &grammar) {
-                failures.push(format!("[{name}] seed {seed}\n--- source ---\n{src}\n--- {e}"));
+                failures.push(format!(
+                    "[{name}] seed {seed}\n--- source ---\n{src}\n--- {e}"
+                ));
             }
         }
     }
@@ -562,18 +604,28 @@ fn conservation() {
         let doc = assign(src, grammar);
         let assigned = nodes(&doc.flat_elements());
         if !same_multiset(&parsed, &assigned) {
-            return Err(format!("parsed:\n{parsed:#?}\n--- assigned:\n{assigned:#?}"));
+            return Err(format!(
+                "parsed:\n{parsed:#?}\n--- assigned:\n{assigned:#?}"
+            ));
         }
-        let mut parsed_comments: Vec<String> =
-            flat.comments.iter().map(|(_, c)| c.node.as_str().to_string()).collect();
-        let mut assigned_comments: Vec<String> =
-            doc.comments.iter().map(|c| c.comment.node.as_str().to_string()).collect();
+        let mut parsed_comments: Vec<String> = flat
+            .comments
+            .iter()
+            .map(|(_, c)| c.node.as_str().to_string())
+            .collect();
+        let mut assigned_comments: Vec<String> = doc
+            .comments
+            .iter()
+            .map(|c| c.comment.node.as_str().to_string())
+            .collect();
         parsed_comments.sort();
         assigned_comments.sort();
         if parsed_comments == assigned_comments {
             Ok(())
         } else {
-            Err(format!("comments parsed:\n{parsed_comments:#?}\n--- assigned:\n{assigned_comments:#?}"))
+            Err(format!(
+                "comments parsed:\n{parsed_comments:#?}\n--- assigned:\n{assigned_comments:#?}"
+            ))
         }
     });
 }
@@ -620,7 +672,10 @@ fn byte_coverage() {
             .filter(|&i| {
                 let line_start = src[..i].rfind('\n').map_or(0, |n| n + 1);
                 let line_end = src[i..].find('\n').map_or(src.len(), |n| i + n);
-                src[line_start..line_end].trim_start_matches(['>', ' ']).trim_end() != "<!-- -->"
+                src[line_start..line_end]
+                    .trim_start_matches(['>', ' '])
+                    .trim_end()
+                    != "<!-- -->"
             })
             .collect();
         if uncovered.is_empty() {
@@ -675,7 +730,9 @@ fn seed_pairs(property: &str, check: impl Fn(&str, &str, &Grammar) -> Result<(),
             let (a, b) = (gen_source(seed), gen_source(seed + 1));
             runs += 1;
             if let Err(e) = check(&a, &b, &grammar) {
-                failures.push(format!("[{name}] seed {seed}\n--- a ---\n{a}\n--- b ---\n{b}\n--- {e}"));
+                failures.push(format!(
+                    "[{name}] seed {seed}\n--- a ---\n{a}\n--- b ---\n{b}\n--- {e}"
+                ));
             }
         }
     }
@@ -694,7 +751,8 @@ fn sync_regions_applied_to_the_base_give_the_new_parts() {
     use content::sync::{apply_regions, container_parts, document_containers, regions};
     seed_pairs("regions applied", |a, b, grammar| {
         let (base, new) = (assign(a, grammar), assign(b, grammar));
-        let (base_containers, new_containers) = (document_containers(&base), document_containers(&new));
+        let (base_containers, new_containers) =
+            (document_containers(&base), document_containers(&new));
         for (container, new_blocks) in &new_containers {
             let empty = content::Blocks::default();
             let base_blocks = base_containers
@@ -705,7 +763,9 @@ fn sync_regions_applied_to_the_base_give_the_new_parts() {
             let got = apply_regions(&bp, &np, &regions(&bp, &np));
             let want: Vec<_> = np.iter().map(|p| p.node.clone()).collect();
             if got != want {
-                return Err(format!("{container:?}: regions applied give\n{got:#?}\nnot\n{want:#?}"));
+                return Err(format!(
+                    "{container:?}: regions applied give\n{got:#?}\nnot\n{want:#?}"
+                ));
             }
             if !regions(&np, &np).is_empty() {
                 return Err(format!("{container:?}: a container differs from itself"));
@@ -748,7 +808,9 @@ fn sync_changed_block_edits_make_the_buffer_read_as_the_model() {
         // Both are read flat, as the function reads them.
         let parts = |text: &str| container_parts(&parse_document(text).expect("parses"));
         if !regions(&parts(&got), &parts(&model)).is_empty() {
-            return Err(format!("edits give\n{got}\n--- which does not read as\n{model}"));
+            return Err(format!(
+                "edits give\n{got}\n--- which does not read as\n{model}"
+            ));
         }
         if !changed_block_edits(&model, &model).is_empty() {
             return Err("a text differs from itself".to_string());
@@ -799,8 +861,16 @@ fn sync_changed_block_edits_keep_list_separators() {
             }
         }
     }
-    assert!(failures.is_empty(), "{} of {runs} failed; first:\n{}", failures.len(), failures[0]);
-    assert!(exercised > 500, "too few seeds with a separator in the model: {exercised} of {runs}");
+    assert!(
+        failures.is_empty(),
+        "{} of {runs} failed; first:\n{}",
+        failures.len(),
+        failures[0]
+    );
+    assert!(
+        exercised > 500,
+        "too few seeds with a separator in the model: {exercised} of {runs}"
+    );
 }
 
 /// Guard against a generator change silently shrinking the domain.
@@ -825,7 +895,8 @@ fn generator_exercises_unassigned_bound_and_body() {
     let (mut multi_block_quotes, mut quoted_non_paragraphs, mut nested_quotes) = (0, 0, 0);
     let mut list_stats = ListStats::default();
     let (mut star_bullets, mut plus_bullets, mut paren_numbers) = (0, 0, 0);
-    let is_html =|e: &schema::Spanned<ContentElement>| matches!(e.node, ContentElement::HtmlBlock { .. });
+    let is_html =
+        |e: &schema::Spanned<ContentElement>| matches!(e.node, ContentElement::HtmlBlock { .. });
     for seed in SEEDS {
         let src = gen_source(seed);
         let doc = assign(&src, &grammar);
@@ -835,12 +906,16 @@ fn generator_exercises_unassigned_bound_and_body() {
             .iter()
             .filter(|c| c.anchor == CommentAnchor::End(Container::Unassigned))
             .count();
-        end_body +=
-            doc.comments.iter().filter(|c| c.anchor == CommentAnchor::End(Container::Body)).count();
+        end_body += doc
+            .comments
+            .iter()
+            .filter(|c| c.anchor == CommentAnchor::End(Container::Body))
+            .count();
         // Two same-kind lists with only comments between them.
-        for (container, elements) in
-            [(Container::Unassigned, &doc.unassigned), (Container::Body, &doc.body)]
-        {
+        for (container, elements) in [
+            (Container::Unassigned, &doc.unassigned),
+            (Container::Body, &doc.body),
+        ] {
             let is_ordered = |e: &schema::Spanned<ContentElement>| match &e.node {
                 ContentElement::List { list } => {
                     Some(matches!(list.kind, content::ListKind::Ordered { .. }))
@@ -897,14 +972,19 @@ fn generator_exercises_unassigned_bound_and_body() {
                             content::ListKind::Ordered { start } if start != 1
                         ));
                         for item in &list.items {
-                            out.empty_items += usize::from(item.elements.is_empty() && item.comments.is_empty());
+                            out.empty_items +=
+                                usize::from(item.elements.is_empty() && item.comments.is_empty());
                             out.multi_block_items += usize::from(item.elements.len() > 1);
                             out.item_comments += item.comments.len();
                             out.items_with_non_paragraphs += item
                                 .elements
                                 .iter()
                                 .filter(|b| {
-                                    !matches!(b.node, ContentElement::Paragraph { .. } | ContentElement::List { .. })
+                                    !matches!(
+                                        b.node,
+                                        ContentElement::Paragraph { .. }
+                                            | ContentElement::List { .. }
+                                    )
                                 })
                                 .count();
                             lists(item.elements.iter(), in_quote, true, out);
@@ -915,7 +995,11 @@ fn generator_exercises_unassigned_bound_and_body() {
             }
         }
         lists(
-            doc.preamble.iter().flat_map(|s| s.elements.iter()).chain(doc.unassigned.iter()).chain(doc.body.iter()),
+            doc.preamble
+                .iter()
+                .flat_map(|s| s.elements.iter())
+                .chain(doc.unassigned.iter())
+                .chain(doc.body.iter()),
             false,
             false,
             &mut list_stats,
@@ -925,12 +1009,16 @@ fn generator_exercises_unassigned_bound_and_body() {
             star_bullets += usize::from(t.starts_with("* "));
             plus_bullets += usize::from(t.starts_with("+ "));
             paren_numbers += usize::from(
-                t.trim_start_matches(|c: char| c.is_ascii_digit()).starts_with(") ")
+                t.trim_start_matches(|c: char| c.is_ascii_digit())
+                    .starts_with(") ")
                     && t.starts_with(|c: char| c.is_ascii_digit()),
             );
         }
         let mut all_quotes: Vec<&content::Blocks> = Vec::new();
-        quotes(doc.unassigned.iter().chain(doc.body.iter()), &mut all_quotes);
+        quotes(
+            doc.unassigned.iter().chain(doc.body.iter()),
+            &mut all_quotes,
+        );
         for q in &all_quotes {
             quote_count += 1;
             empty_quotes += usize::from(q.elements.is_empty() && q.comments.is_empty());
@@ -939,7 +1027,12 @@ fn generator_exercises_unassigned_bound_and_body() {
             quoted_non_paragraphs += q
                 .elements
                 .iter()
-                .filter(|e| !matches!(e.node, ContentElement::Paragraph { .. } | ContentElement::Blockquote { .. }))
+                .filter(|e| {
+                    !matches!(
+                        e.node,
+                        ContentElement::Paragraph { .. } | ContentElement::Blockquote { .. }
+                    )
+                })
                 .count();
             nested_quotes += q
                 .elements
@@ -973,7 +1066,13 @@ fn generator_exercises_unassigned_bound_and_body() {
                 .count();
         }
         let is_marker = |e: &ContentElement| {
-            matches!(e, ContentElement::Paragraph { marker: Some(_), .. })
+            matches!(
+                e,
+                ContentElement::Paragraph {
+                    marker: Some(_),
+                    ..
+                }
+            )
         };
         marker_paragraphs += doc.unassigned.iter().filter(|e| is_marker(&e.node)).count();
         body_marker_paragraphs += doc.body.iter().filter(|e| is_marker(&e.node)).count();
@@ -990,23 +1089,41 @@ fn generator_exercises_unassigned_bound_and_body() {
             .filter(|e| is_escaped(e))
             .count();
     }
-    assert!(unassigned > 500, "too few unassigned elements: {unassigned}");
+    assert!(
+        unassigned > 500,
+        "too few unassigned elements: {unassigned}"
+    );
     assert!(bound > 100, "too few bound expressions: {bound}");
-    assert!(marker_paragraphs > 100, "too few marker paragraphs: {marker_paragraphs}");
-    assert!(body_marker_paragraphs > 50, "too few body marker paragraphs: {body_marker_paragraphs}");
+    assert!(
+        marker_paragraphs > 100,
+        "too few marker paragraphs: {marker_paragraphs}"
+    );
+    assert!(
+        body_marker_paragraphs > 50,
+        "too few body marker paragraphs: {body_marker_paragraphs}"
+    );
     assert!(
         escaped_marker_paragraphs > 20,
         "too few slotted or body paragraphs with a literal `\\{{#`: {escaped_marker_paragraphs}"
     );
-    assert!(no_separator_unassigned > 50, "too few separator-less documents: {no_separator_unassigned}");
+    assert!(
+        no_separator_unassigned > 50,
+        "too few separator-less documents: {no_separator_unassigned}"
+    );
     assert!(
         unassigned_other_blocks > 100,
         "too few unassigned code blocks, tables and blockquotes: {unassigned_other_blocks}"
     );
-    assert!(unassigned_html > 100, "too few unassigned HTML blocks: {unassigned_html}");
+    assert!(
+        unassigned_html > 100,
+        "too few unassigned HTML blocks: {unassigned_html}"
+    );
     assert!(body_html > 50, "too few body HTML blocks: {body_html}");
     assert!(comments > 200, "too few comments: {comments}");
-    assert!(end_unassigned > 20, "too few End(Unassigned) comments: {end_unassigned}");
+    assert!(
+        end_unassigned > 20,
+        "too few End(Unassigned) comments: {end_unassigned}"
+    );
     assert!(end_body > 20, "too few End(Body) comments: {end_body}");
     assert!(
         commented_adjacent_lists > 2,
@@ -1019,9 +1136,18 @@ fn generator_exercises_unassigned_bound_and_body() {
     // The quote domain (ADR-059 stage 8).
     assert!(quote_count > 300, "too few quotes: {quote_count}");
     assert!(empty_quotes > 10, "too few empty quotes: {empty_quotes}");
-    assert!(quote_comments > 20, "too few comments inside quotes: {quote_comments}");
-    assert!(multi_block_quotes > 100, "too few quotes of several blocks: {multi_block_quotes}");
-    assert!(quoted_non_paragraphs > 200, "too few non-paragraph blocks in quotes: {quoted_non_paragraphs}");
+    assert!(
+        quote_comments > 20,
+        "too few comments inside quotes: {quote_comments}"
+    );
+    assert!(
+        multi_block_quotes > 100,
+        "too few quotes of several blocks: {multi_block_quotes}"
+    );
+    assert!(
+        quoted_non_paragraphs > 200,
+        "too few non-paragraph blocks in quotes: {quoted_non_paragraphs}"
+    );
     assert!(nested_quotes > 30, "too few nested quotes: {nested_quotes}");
     // The list domain (ADR-059 stage 9).
     let s = &list_stats;
@@ -1029,13 +1155,25 @@ fn generator_exercises_unassigned_bound_and_body() {
     assert!(s.nested > 100, "too few lists inside items: {s:?}");
     assert!(s.in_quotes > 50, "too few lists inside quotes: {s:?}");
     assert!(s.loose > 200, "too few loose lists: {s:?}");
-    assert!(s.starts_other_than_1 > 100, "too few ordered lists that do not start at 1: {s:?}");
-    assert!(s.multi_block_items > 100, "too few items of several blocks: {s:?}");
-    assert!(s.items_with_non_paragraphs > 100, "too few items holding a quote, code, heading...: {s:?}");
+    assert!(
+        s.starts_other_than_1 > 100,
+        "too few ordered lists that do not start at 1: {s:?}"
+    );
+    assert!(
+        s.multi_block_items > 100,
+        "too few items of several blocks: {s:?}"
+    );
+    assert!(
+        s.items_with_non_paragraphs > 100,
+        "too few items holding a quote, code, heading...: {s:?}"
+    );
     assert!(s.quotes_in_items > 20, "too few quotes inside items: {s:?}");
     assert!(s.item_comments > 20, "too few comments inside items: {s:?}");
     assert!(s.empty_items > 10, "too few empty items: {s:?}");
-    assert!(star_bullets > 100 && plus_bullets > 100, "too few `*` and `+` bullets: {star_bullets} {plus_bullets}");
+    assert!(
+        star_bullets > 100 && plus_bullets > 100,
+        "too few `*` and `+` bullets: {star_bullets} {plus_bullets}"
+    );
     assert!(paren_numbers > 50, "too few `1)` numbers: {paren_numbers}");
 }
 
@@ -1072,7 +1210,10 @@ fn literal_markers_are_never_misuse() {
         ] {
             let doc = assign(&src, &grammar);
             if where_ == "preamble" && !doc.unassigned.is_empty() {
-                failures.push(format!("{where_} {p:?}: unassigned {:#?}", nodes(&doc.unassigned)));
+                failures.push(format!(
+                    "{where_} {p:?}: unassigned {:#?}",
+                    nodes(&doc.unassigned)
+                ));
             }
             let marker: Vec<String> = content::validate(&doc, &grammar)
                 .diagnostics
@@ -1098,7 +1239,10 @@ fn text_before_a_marker_is_marker_misuse() {
     let check = |doc: &Document, label: &str| {
         assert_eq!(nodes(&doc.unassigned), expected, "{label}: {doc:#?}");
         let summary = doc.preamble.iter().find(|s| s.name.as_str() == "summary");
-        assert!(summary.is_none_or(|s| s.elements.is_empty()), "{label}: {doc:#?}");
+        assert!(
+            summary.is_none_or(|s| s.elements.is_empty()),
+            "{label}: {doc:#?}"
+        );
     };
     let d1 = assign(src, &grammar);
     check(&d1, "before save");

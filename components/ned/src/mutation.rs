@@ -6,12 +6,16 @@
 
 use node_store::NodeStore;
 
-use crate::tree::NodeTree;
 use crate::Selection;
+use crate::tree::NodeTree;
 
 /// Insert a materialized subtree before each selected node.
 /// Returns a Selection of the newly inserted root nodes.
-pub(crate) fn insert_before_tree(store: &mut NodeStore, sel: &Selection, tree: NodeTree) -> Selection {
+pub(crate) fn insert_before_tree(
+    store: &mut NodeStore,
+    sel: &Selection,
+    tree: NodeTree,
+) -> Selection {
     // Collect (selected_id, parent) pairs. Position is re-computed at insertion
     // time so that earlier insertions shifting the child list do not misplace
     // later ones when two selected siblings share a parent.
@@ -23,7 +27,11 @@ pub(crate) fn insert_before_tree(store: &mut NodeStore, sel: &Selection, tree: N
     }
     let mut created = Vec::new();
     for (selected_id, parent) in work {
-        let Some(current_pos) = store.children(parent).iter().position(|&c| c == selected_id) else {
+        let Some(current_pos) = store
+            .children(parent)
+            .iter()
+            .position(|&c| c == selected_id)
+        else {
             continue;
         };
         let root = tree.clone().materialize(store);

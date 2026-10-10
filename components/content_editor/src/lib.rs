@@ -27,11 +27,15 @@ fn collect_link_options_inner(
     // Try directory convention first (schemas/{stem}/item.md), then flat (schemas/{stem}.md)
     let dir_path = site_dir.join("schemas").join(schema_stem).join("item.md");
     let flat_path = site_dir.join("schemas").join(format!("{schema_stem}.md"));
-    let schema_path = if dir_path.exists() { dir_path } else { flat_path };
+    let schema_path = if dir_path.exists() {
+        dir_path
+    } else {
+        flat_path
+    };
     let schema_src = std::fs::read_to_string(&schema_path)
         .map_err(|e| format!("failed to read schema {}: {e}", schema_path.display()))?;
-    let grammar = schema::parse_schema(&schema_src)
-        .map_err(|e| format!("failed to parse schema: {e:?}"))?;
+    let grammar =
+        schema::parse_schema(&schema_src).map_err(|e| format!("failed to parse schema: {e:?}"))?;
 
     let slot = grammar
         .preamble
@@ -108,9 +112,7 @@ pub fn create_content(
     // Check file doesn't exist
     let file_path = content_dir.join(format!("{slug}.md"));
     if file_path.exists() {
-        return Err(format!(
-            "content already exists: content/{stem}/{slug}.md"
-        ));
+        return Err(format!("content already exists: content/{stem}/{slug}.md"));
     }
 
     // Write empty file — suggestion placeholders will fill in all slots
@@ -277,5 +279,4 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("content already exists"));
     }
-
 }

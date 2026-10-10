@@ -1,3 +1,8 @@
+use crossterm::{
+    event::{self, Event, KeyCode, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -5,11 +10,6 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
-};
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use std::io;
 
@@ -285,9 +285,8 @@ fn draw_ui(f: &mut ratatui::Frame, state: &ReplState) {
     f.render_widget(input_widget, input_area);
 
     // Cursor position inside input box
-    let cursor_x = (state.cursor_pos as u16).min(input_area.width.saturating_sub(2))
-        + input_area.x
-        + 1;
+    let cursor_x =
+        (state.cursor_pos as u16).min(input_area.width.saturating_sub(2)) + input_area.x + 1;
     let cursor_y = input_area.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
 
@@ -321,8 +320,11 @@ fn draw_ui(f: &mut ratatui::Frame, state: &ReplState) {
             height: popup_height,
         };
 
-        let popup_widget = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Completions "));
+        let popup_widget = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Completions "),
+        );
         f.render_widget(Clear, popup_area);
         f.render_widget(popup_widget, popup_area);
     }
@@ -344,9 +346,7 @@ fn highlight_edn(input: &str) -> Vec<Line<'_>> {
                 let start = i;
                 chars.next();
                 while let Some(&(_, nc)) = chars.peek() {
-                    if nc.is_alphanumeric()
-                        || matches!(nc, '-' | '_' | '?' | '!' | '/')
-                    {
+                    if nc.is_alphanumeric() || matches!(nc, '-' | '_' | '?' | '!' | '/') {
                         chars.next();
                     } else {
                         break;
@@ -482,7 +482,9 @@ fn current_word(input: &str, cursor: usize) -> String {
 fn accept_completion(state: &mut ReplState, candidate: &str) {
     let word = current_word(&state.input, state.cursor_pos);
     let word_start = state.cursor_pos - word.len();
-    state.input.replace_range(word_start..state.cursor_pos, candidate);
+    state
+        .input
+        .replace_range(word_start..state.cursor_pos, candidate);
     state.cursor_pos = word_start + candidate.len();
 }
 
@@ -495,14 +497,21 @@ fn first_line(s: &str) -> &str {
 fn eval_input(state: &mut ReplState, backend: &mut Box<dyn ReplBackend>) {
     let code = state.input.trim().to_string();
     if !code.is_empty() {
-        state.output_lines.push(OutputLine::Input(format!("> {code}")));
+        state
+            .output_lines
+            .push(OutputLine::Input(format!("> {code}")));
         let result = backend.eval(&code);
         if result.is_error {
             state.output_lines.push(OutputLine::Error(result.value));
         } else {
             state.output_lines.push(OutputLine::Result(result.value));
         }
-        if !state.history.last().map(|l: &String| l == &code).unwrap_or(false) {
+        if !state
+            .history
+            .last()
+            .map(|l: &String| l == &code)
+            .unwrap_or(false)
+        {
             state.history.push(code);
         }
         state.history_idx = None;
@@ -541,9 +550,27 @@ fn delimiters_balanced(input: &str) -> bool {
             ';' => in_comment = true,
             '"' => in_string = true,
             '(' | '[' | '{' => stack.push(c),
-            ')' => { if stack.last() == Some(&'(') { stack.pop(); } else { return false; } }
-            ']' => { if stack.last() == Some(&'[') { stack.pop(); } else { return false; } }
-            '}' => { if stack.last() == Some(&'{') { stack.pop(); } else { return false; } }
+            ')' => {
+                if stack.last() == Some(&'(') {
+                    stack.pop();
+                } else {
+                    return false;
+                }
+            }
+            ']' => {
+                if stack.last() == Some(&'[') {
+                    stack.pop();
+                } else {
+                    return false;
+                }
+            }
+            '}' => {
+                if stack.last() == Some(&'{') {
+                    stack.pop();
+                } else {
+                    return false;
+                }
+            }
             _ => {}
         }
     }

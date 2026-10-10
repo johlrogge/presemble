@@ -4,20 +4,37 @@ pub const ELEM_DEFINE: &str = "presemble:define";
 
 /// Elements ADR-067 removed, with what to write instead.
 pub const REMOVED_ELEMENTS: &[(&str, &str)] = &[
-    ("presemble:include", "insert a call of the template: (name input)"),
-    ("presemble:apply", "insert a call of the template: (name input)"),
+    (
+        "presemble:include",
+        "insert a call of the template: (name input)",
+    ),
+    (
+        "presemble:apply",
+        "insert a call of the template: (name input)",
+    ),
     ("presemble:juxt", "write a call: ((juxt a b) input)"),
 ];
 
 /// Attributes ADR-067 removed, as (element name or `*`, attribute, advice).
 pub const REMOVED_ATTRIBUTES: &[(&str, &str, &str)] = &[
-    ("*", "presemble:class", "write the class as an attribute expression, e.g. {:class (ref item.kind)}"),
-    ("presemble:insert", "apply", "call a function in the expression: {:data (text input.title)}"),
+    (
+        "*",
+        "presemble:class",
+        "write the class as an attribute expression, e.g. {:class (ref item.kind)}",
+    ),
+    (
+        "presemble:insert",
+        "apply",
+        "call a function in the expression: {:data (text input.title)}",
+    ),
 ];
 
 /// The advice for a removed element, if `name` is one.
 pub fn removed_element(name: &str) -> Option<&'static str> {
-    REMOVED_ELEMENTS.iter().find(|(n, _)| *n == name).map(|(_, advice)| *advice)
+    REMOVED_ELEMENTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, advice)| *advice)
 }
 
 /// The advice for a removed attribute `attr` on the element `element`.

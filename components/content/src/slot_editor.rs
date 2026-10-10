@@ -27,10 +27,17 @@ pub(crate) fn modify_slot(
 
     // Build the replacement element.
     let new_element = build_element(&grammar.preamble[target_grammar_idx].element, new_value)?;
-    let new_spanned = Spanned { node: new_element, span: NO_SPAN };
+    let new_spanned = Spanned {
+        node: new_element,
+        span: NO_SPAN,
+    };
 
     // Find the slot in the document preamble.
-    if let Some(doc_slot) = doc.preamble.iter_mut().find(|s| s.name.as_str() == slot_name) {
+    if let Some(doc_slot) = doc
+        .preamble
+        .iter_mut()
+        .find(|s| s.name.as_str() == slot_name)
+    {
         // Slot exists — replace all its elements with the single new element.
         doc_slot.elements = im::vector![new_spanned];
     } else {
@@ -91,7 +98,11 @@ pub(crate) fn capitalize_slot(
         .ok_or_else(|| format!("slot '{slot_name}' not found in grammar"))?;
 
     // Find the slot in the document preamble.
-    let doc_slot = match doc.preamble.iter_mut().find(|s| s.name.as_str() == slot_name) {
+    let doc_slot = match doc
+        .preamble
+        .iter_mut()
+        .find(|s| s.name.as_str() == slot_name)
+    {
         Some(s) => s,
         None => return Ok(false),
     };
@@ -99,32 +110,43 @@ pub(crate) fn capitalize_slot(
     // A heading: a SetText on its first Text node (ADR-059 §8), or nothing
     // when that cannot be done.
     if let Some(first) = doc_slot.elements.front_mut()
-        && let ContentElement::Heading { level, content, marker } = &first.node
+        && let ContentElement::Heading {
+            level,
+            content,
+            marker,
+        } = &first.node
     {
-        return Ok(match capitalize_first_text(content, InlineContext::Heading) {
-            Some(capitalized) => {
-                first.node = ContentElement::Heading {
-                    level: *level,
-                    content: capitalized,
-                    marker: marker.clone(),
-                };
-                true
-            }
-            None => false,
-        });
+        return Ok(
+            match capitalize_first_text(content, InlineContext::Heading) {
+                Some(capitalized) => {
+                    first.node = ContentElement::Heading {
+                        level: *level,
+                        content: capitalized,
+                        marker: marker.clone(),
+                    };
+                    true
+                }
+                None => false,
+            },
+        );
     }
 
     // A paragraph: the same, on its first Text node.
     if let Some(first) = doc_slot.elements.front_mut()
         && let ContentElement::Paragraph { content, marker } = &first.node
     {
-        return Ok(match capitalize_first_text(content, InlineContext::Paragraph) {
-            Some(capitalized) => {
-                first.node = ContentElement::Paragraph { content: capitalized, marker: marker.clone() };
-                true
-            }
-            None => false,
-        });
+        return Ok(
+            match capitalize_first_text(content, InlineContext::Paragraph) {
+                Some(capitalized) => {
+                    first.node = ContentElement::Paragraph {
+                        content: capitalized,
+                        marker: marker.clone(),
+                    };
+                    true
+                }
+                None => false,
+            },
+        );
     }
 
     Ok(false)
@@ -205,7 +227,10 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
         Element::Heading { level } => {
             let heading_level = HeadingLevel::new(level.min.value())
                 .ok_or_else(|| format!("invalid heading level: {}", level.min.value()))?;
-            Ok(ContentElement::heading_from_markdown(heading_level, new_value))
+            Ok(ContentElement::heading_from_markdown(
+                heading_level,
+                new_value,
+            ))
         }
         Element::Paragraph => Ok(ContentElement::paragraph_from_markdown(new_value)),
         Element::Link { .. } => {
@@ -237,7 +262,9 @@ pub fn build_element(slot_element: &Element, new_value: &str) -> Result<ContentE
                 Some(first) if matches!(first.node, ContentElement::List { .. }) => {
                     Ok(first.node.clone())
                 }
-                _ => Err(format!("list slot value must be a markdown list, got: {new_value:?}")),
+                _ => Err(format!(
+                    "list slot value must be a markdown list, got: {new_value:?}"
+                )),
             }
         }
     }
@@ -294,12 +321,16 @@ headings
             result.starts_with("# New Title\n"),
             "expected result to start with '# New Title\\n', got: {result:?}"
         );
-        assert!(result.contains("Summary."), "expected 'Summary.' in: {result:?}");
+        assert!(
+            result.contains("Summary."),
+            "expected 'Summary.' in: {result:?}"
+        );
     }
 
     #[test]
     fn modify_summary_replaces_all_paragraphs() {
-        let src = "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\n[Author](/author/jo)\n\n----\n";
+        let src =
+            "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\n[Author](/author/jo)\n\n----\n";
         let grammar = post_grammar();
         let mut doc = parse_and_assign(src, &grammar).unwrap();
         modify_slot(&mut doc, "summary", &grammar, "Single new summary.").unwrap();
@@ -316,7 +347,10 @@ headings
             !result.contains("Second paragraph."),
             "expected 'Second paragraph.' to be gone in: {result:?}"
         );
-        assert!(result.contains("[Author]"), "expected '[Author]' in: {result:?}");
+        assert!(
+            result.contains("[Author]"),
+            "expected '[Author]' in: {result:?}"
+        );
     }
 
     #[test]
@@ -330,8 +364,14 @@ headings
             result.contains("[New Author](/author/new)"),
             "expected '[New Author](/author/new)' in: {result:?}"
         );
-        assert!(result.contains("# Title"), "expected '# Title' in: {result:?}");
-        assert!(result.contains("Summary."), "expected 'Summary.' in: {result:?}");
+        assert!(
+            result.contains("# Title"),
+            "expected '# Title' in: {result:?}"
+        );
+        assert!(
+            result.contains("Summary."),
+            "expected 'Summary.' in: {result:?}"
+        );
     }
 
     #[test]
@@ -345,7 +385,10 @@ headings
             result.starts_with("# Brand New Title\n"),
             "expected result to start with '# Brand New Title\\n', got: {result:?}"
         );
-        assert!(result.contains("Summary text."), "expected 'Summary text.' in: {result:?}");
+        assert!(
+            result.contains("Summary text."),
+            "expected 'Summary text.' in: {result:?}"
+        );
     }
 
     #[test]
@@ -355,7 +398,10 @@ headings
         let mut doc = parse_and_assign(src, &grammar).unwrap();
         modify_slot(&mut doc, "summary", &grammar, "New summary.").unwrap();
         let result = serialize_document(&doc);
-        assert!(result.contains("New summary."), "expected 'New summary.' in: {result:?}");
+        assert!(
+            result.contains("New summary."),
+            "expected 'New summary.' in: {result:?}"
+        );
         assert!(result.contains("----"), "expected '----' in: {result:?}");
     }
 
@@ -366,9 +412,18 @@ headings
         let mut doc = parse_and_assign(src, &grammar).unwrap();
         modify_slot(&mut doc, "title", &grammar, "Changed Title").unwrap();
         let result = serialize_document(&doc);
-        assert!(result.contains("# Changed Title"), "expected '# Changed Title' in: {result:?}");
-        assert!(result.contains("### Body heading"), "expected '### Body heading' in: {result:?}");
-        assert!(result.contains("Body paragraph."), "expected 'Body paragraph.' in: {result:?}");
+        assert!(
+            result.contains("# Changed Title"),
+            "expected '# Changed Title' in: {result:?}"
+        );
+        assert!(
+            result.contains("### Body heading"),
+            "expected '### Body heading' in: {result:?}"
+        );
+        assert!(
+            result.contains("Body paragraph."),
+            "expected 'Body paragraph.' in: {result:?}"
+        );
     }
 
     #[test]
@@ -378,7 +433,10 @@ headings
         let mut doc = parse_and_assign(src, &grammar).unwrap();
         modify_slot(&mut doc, "title", &grammar, "First Title").unwrap();
         let result = serialize_document(&doc);
-        assert!(result.contains("# First Title"), "expected '# First Title' in: {result:?}");
+        assert!(
+            result.contains("# First Title"),
+            "expected '# First Title' in: {result:?}"
+        );
         assert!(result.contains("----"), "expected '----' in: {result:?}");
     }
 
@@ -459,10 +517,12 @@ headings
     fn capitalize_has_no_fix_when_code_comes_first() {
         let grammar = post_grammar();
         for source in ["# `x` y", "# <b>x</b> y"] {
-            let mut doc =
-                parse_and_assign(&format!("{source}\n\n----\n"), &grammar).unwrap();
+            let mut doc = parse_and_assign(&format!("{source}\n\n----\n"), &grammar).unwrap();
             let before = serialize_document(&doc);
-            assert!(!capitalize_slot(&mut doc, "title", &grammar).unwrap(), "{source}");
+            assert!(
+                !capitalize_slot(&mut doc, "title", &grammar).unwrap(),
+                "{source}"
+            );
             assert_eq!(serialize_document(&doc), before, "{source}");
         }
     }
@@ -473,7 +533,10 @@ headings
         let grammar = post_grammar();
         let mut doc = parse_and_assign(src, &grammar).unwrap();
         let changed = capitalize_slot(&mut doc, "title", &grammar).unwrap();
-        assert!(!changed, "expected capitalize to return false when already capitalized");
+        assert!(
+            !changed,
+            "expected capitalize to return false when already capitalized"
+        );
     }
 
     #[test]

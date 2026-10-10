@@ -4,7 +4,7 @@ mod ned_program;
 mod paths;
 pub use ned_program::clj_str_literal;
 pub use paths::{
-    canonical_deepest, ensure_within, plain_url_segments, ContentPath, PathError, SitePath,
+    ContentPath, PathError, SitePath, canonical_deepest, ensure_within, plain_url_segments,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -69,7 +69,6 @@ impl fmt::Display for Author {
     }
 }
 
-
 // ── NED-based suggestion types (Phase C) ─────────────────────────────────────
 
 /// Structured mutation for a NED suggestion (ADR-056: exact addressing).
@@ -117,7 +116,10 @@ pub enum NedMutation {
     /// Replace the comments at `place` of the single addressed node with
     /// these. Each string is one HTML comment (`<!-- … -->`, or several in a
     /// row): anything else is refused.
-    SetComments { place: CommentPlace, comments: Vec<String> },
+    SetComments {
+        place: CommentPlace,
+        comments: Vec<String>,
+    },
 }
 
 /// Where the comments of a [`NedMutation::SetComments`] sit.
@@ -168,8 +170,14 @@ impl NedMutation {
             | NedMutation::InsertBefore(_)
             | NedMutation::InsertAfter(_) => TargetKind::Block,
             NedMutation::InsertChild(_) => TargetKind::Container,
-            NedMutation::SetComments { place: CommentPlace::Before, .. } => TargetKind::Block,
-            NedMutation::SetComments { place: CommentPlace::End, .. } => TargetKind::Container,
+            NedMutation::SetComments {
+                place: CommentPlace::Before,
+                ..
+            } => TargetKind::Block,
+            NedMutation::SetComments {
+                place: CommentPlace::End,
+                ..
+            } => TargetKind::Container,
         }
     }
 }
@@ -248,9 +256,7 @@ impl fmt::Display for StaleCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StaleCause::Unspecified => f.write_str("the suggestion can no longer be applied"),
-            StaleCause::Unresolved => {
-                f.write_str("the address matches no node in a live document")
-            }
+            StaleCause::Unresolved => f.write_str("the address matches no node in a live document"),
             StaleCause::Ambiguous { matches } => write!(
                 f,
                 "the address matches {matches} nodes; it must match exactly one"
@@ -279,9 +285,9 @@ impl fmt::Display for StaleCause {
             StaleCause::Overlap { with_step } => {
                 write!(f, "it changes what step {with_step} changes")
             }
-            StaleCause::SpansAtom => f.write_str(
-                "the search text matches across an image, raw HTML or a hard break",
-            ),
+            StaleCause::SpansAtom => {
+                f.write_str("the search text matches across an image, raw HTML or a hard break")
+            }
         }
     }
 }
@@ -355,7 +361,9 @@ pub struct PreviewText {
 
 impl PreviewText {
     pub fn new(markdown: impl Into<String>) -> Self {
-        PreviewText { markdown: markdown.into() }
+        PreviewText {
+            markdown: markdown.into(),
+        }
     }
 }
 
@@ -497,7 +505,6 @@ pub struct StructuralAnchor {
     pub offset: usize,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,7 +547,10 @@ mod tests {
 
     #[test]
     fn author_display_tool() {
-        assert_eq!(Author::Tool("spellchecker".into()).to_string(), "spellchecker");
+        assert_eq!(
+            Author::Tool("spellchecker".into()).to_string(),
+            "spellchecker"
+        );
     }
 
     #[test]
@@ -621,15 +631,24 @@ mod tests {
     #[test]
     fn validate_no_existing_accepts_set_text_searchreplace_delete() {
         let set_text = NedMutation::SetText("hi".to_string());
-        assert!(validate_no_existing(&set_text).is_ok(), "SetText should be Ok");
+        assert!(
+            validate_no_existing(&set_text).is_ok(),
+            "SetText should be Ok"
+        );
 
         let sr = NedMutation::SearchReplace {
             search: "a".to_string(),
             replace: "b".to_string(),
         };
-        assert!(validate_no_existing(&sr).is_ok(), "SearchReplace should be Ok");
+        assert!(
+            validate_no_existing(&sr).is_ok(),
+            "SearchReplace should be Ok"
+        );
 
-        assert!(validate_no_existing(&NedMutation::Delete).is_ok(), "Delete should be Ok");
+        assert!(
+            validate_no_existing(&NedMutation::Delete).is_ok(),
+            "Delete should be Ok"
+        );
     }
 
     // ── NED suggestion tests ──────────────────────────────────────────────────
@@ -795,7 +814,11 @@ mod tests {
     #[test]
     fn wrong_kind_names_the_kind_with_the_right_article() {
         let message = |found: &str, expected| {
-            StaleCause::WrongKind { expected, found: found.to_string() }.to_string()
+            StaleCause::WrongKind {
+                expected,
+                found: found.to_string(),
+            }
+            .to_string()
         };
         assert_eq!(
             message("item", TargetKind::Text),
@@ -814,7 +837,10 @@ mod tests {
     #[test]
     fn target_kind_for_each_mutation() {
         let tree = || vec![NodeTree::element("paragraph").with_child(NodeTree::text("x"))];
-        assert_eq!(NedMutation::SetText("x".into()).target_kind(), TargetKind::Text);
+        assert_eq!(
+            NedMutation::SetText("x".into()).target_kind(),
+            TargetKind::Text
+        );
         assert_eq!(
             NedMutation::SearchReplace {
                 search: "a".into(),
@@ -823,12 +849,27 @@ mod tests {
             .target_kind(),
             TargetKind::TextScope
         );
-        assert_eq!(NedMutation::SetInlines(tree()).target_kind(), TargetKind::TextScope);
-        assert_eq!(NedMutation::Replace(tree()).target_kind(), TargetKind::Block);
+        assert_eq!(
+            NedMutation::SetInlines(tree()).target_kind(),
+            TargetKind::TextScope
+        );
+        assert_eq!(
+            NedMutation::Replace(tree()).target_kind(),
+            TargetKind::Block
+        );
         assert_eq!(NedMutation::Delete.target_kind(), TargetKind::Block);
-        assert_eq!(NedMutation::InsertBefore(tree()).target_kind(), TargetKind::Block);
-        assert_eq!(NedMutation::InsertAfter(tree()).target_kind(), TargetKind::Block);
-        assert_eq!(NedMutation::InsertChild(tree()).target_kind(), TargetKind::Container);
+        assert_eq!(
+            NedMutation::InsertBefore(tree()).target_kind(),
+            TargetKind::Block
+        );
+        assert_eq!(
+            NedMutation::InsertAfter(tree()).target_kind(),
+            TargetKind::Block
+        );
+        assert_eq!(
+            NedMutation::InsertChild(tree()).target_kind(),
+            TargetKind::Container
+        );
     }
 
     // ── block-edit protocol (ADR-059 §10) ─────────────────────────────────────
@@ -842,7 +883,11 @@ mod tests {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         browser: Option<bool>,
         /// The link picker option the request was built from, when it was.
-        #[serde(default, rename = "linkPicker", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "linkPicker",
+            skip_serializing_if = "Option::is_none"
+        )]
         link_picker: Option<LinkPickerChoice>,
     }
 
@@ -854,8 +899,8 @@ mod tests {
 
     #[test]
     fn protocol_fixtures_round_trip() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/serve/protocol");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/serve/protocol");
         let mut names = Vec::new();
         for entry in std::fs::read_dir(&dir).expect("fixture dir exists") {
             let path = entry.expect("dir entry").path();
@@ -893,8 +938,8 @@ mod tests {
 
     #[test]
     fn edn_fixtures_round_trip() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/serve/protocol");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/serve/protocol");
         let mut seen = 0;
         for entry in std::fs::read_dir(&dir).expect("fixture dir exists") {
             let path = entry.expect("dir entry").path();
@@ -909,10 +954,17 @@ mod tests {
             assert!(original["request"]["proposed"]["edn"].is_string(), "{name}");
             let typed: Fixture = serde_json::from_value(original.clone()).expect("typed");
             assert!(matches!(typed.request.base, BlockText::Edn(_)), "{name}");
-            assert!(matches!(typed.request.proposed, BlockText::Edn(_)), "{name}");
+            assert!(
+                matches!(typed.request.proposed, BlockText::Edn(_)),
+                "{name}"
+            );
             // The browser speaks markdown only: its runner must skip these.
             assert_eq!(typed.browser, Some(false), "{name}");
-            assert_eq!(serde_json::to_value(&typed).expect("serialize"), original, "{name}");
+            assert_eq!(
+                serde_json::to_value(&typed).expect("serialize"),
+                original,
+                "{name}"
+            );
             seen += 1;
         }
         assert_eq!(seen, 2, "expected the two EDN fixtures");

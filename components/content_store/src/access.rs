@@ -35,7 +35,11 @@ pub fn find_attr_bool(store: &NodeStore, node: NodeId, attr_name: &str) -> Optio
     None
 }
 
-pub(crate) fn find_attr_node<'a>(store: &'a NodeStore, node: NodeId, attr_name: &str) -> Option<&'a Node> {
+pub(crate) fn find_attr_node<'a>(
+    store: &'a NodeStore,
+    node: NodeId,
+    attr_name: &str,
+) -> Option<&'a Node> {
     store
         .attributes(node)
         .into_iter()
@@ -43,11 +47,7 @@ pub(crate) fn find_attr_node<'a>(store: &'a NodeStore, node: NodeId, attr_name: 
         .and_then(|(_, value_id)| store.get(value_id))
 }
 
-pub fn find_child_by_name(
-    store: &NodeStore,
-    parent: NodeId,
-    element_name: &str,
-) -> Option<NodeId> {
+pub fn find_child_by_name(store: &NodeStore, parent: NodeId, element_name: &str) -> Option<NodeId> {
     for child_id in store.children(parent) {
         if let Some(Node::Element(name)) = store.get(child_id)
             && store.resolve_name(*name) == element_name
@@ -58,11 +58,7 @@ pub fn find_child_by_name(
     None
 }
 
-pub fn children_by_name(
-    store: &NodeStore,
-    parent: NodeId,
-    element_name: &str,
-) -> Vec<NodeId> {
+pub fn children_by_name(store: &NodeStore, parent: NodeId, element_name: &str) -> Vec<NodeId> {
     store
         .children(parent)
         .into_iter()
@@ -79,19 +75,37 @@ pub fn children_by_name(
 pub fn add_text_attr(store: &mut NodeStore, node: NodeId, attr_name: &str, value: &str) {
     let name = store.intern(attr_name);
     let value_node = store.add_node(Node::Text(value.to_string()));
-    store.add_edge(node, Edge::Attribute { name, value: value_node });
+    store.add_edge(
+        node,
+        Edge::Attribute {
+            name,
+            value: value_node,
+        },
+    );
 }
 
 pub fn add_bool_attr(store: &mut NodeStore, node: NodeId, attr_name: &str, value: bool) {
     let name = store.intern(attr_name);
     let value_node = store.add_node(Node::Boolean(value));
-    store.add_edge(node, Edge::Attribute { name, value: value_node });
+    store.add_edge(
+        node,
+        Edge::Attribute {
+            name,
+            value: value_node,
+        },
+    );
 }
 
 pub(crate) fn add_int_attr(store: &mut NodeStore, node: NodeId, attr_name: &str, value: i64) {
     let name = store.intern(attr_name);
     let value_node = store.add_node(Node::Integer(value));
-    store.add_edge(node, Edge::Attribute { name, value: value_node });
+    store.add_edge(
+        node,
+        Edge::Attribute {
+            name,
+            value: value_node,
+        },
+    );
 }
 
 /// Get the text content from the first child Text node.

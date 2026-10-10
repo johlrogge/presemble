@@ -50,8 +50,11 @@ fn loss_a_used_reference_definition_keeps_its_link() {
 fn loss_inline_html_in_an_image_bearing_paragraph_is_diagnosed() {
     let g = grammar();
     let doc = parse_and_assign("# T\n\n----\n\nt <b>x</b> ![i](i.png)\n", &g).expect("parses");
-    let messages: Vec<String> =
-        validate(&doc, &g).diagnostics.into_iter().map(|d| d.message).collect();
+    let messages: Vec<String> = validate(&doc, &g)
+        .diagnostics
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
     assert!(
         messages.iter().any(|m| m.contains("inline HTML")),
         "no inline-HTML diagnostic: {messages:?}"
@@ -76,11 +79,17 @@ fn own_line_marker_misuse_stays_misuse_after_a_save() {
     let again = parse_and_assign(&first, &g).expect("parses");
     assert_eq!(again.unassigned.len(), 1, "still unassigned: {again:#?}");
     let latest = again.preamble.iter().find(|s| s.name.as_str() == "latest");
-    assert!(latest.is_none_or(|s| s.elements.is_empty()), "the slot was bound: {again:#?}");
+    assert!(
+        latest.is_none_or(|s| s.elements.is_empty()),
+        "the slot was bound: {again:#?}"
+    );
     let report = validate(&again, &g);
     assert!(!report.is_valid(), "the misuse Error is gone: {report:#?}");
     assert!(
-        report.diagnostics.iter().any(|d| d.message.contains("{#n}")),
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("{#n}")),
         "no diagnostic names the marker: {report:#?}"
     );
     // Stable from the first save on.

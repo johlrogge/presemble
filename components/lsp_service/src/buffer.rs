@@ -66,39 +66,54 @@ pub struct Sender {
 impl Sender {
     /// Start the worker thread on `link`.
     pub fn start(mut link: impl Link) -> Sender {
-        let shared = std::sync::Arc::new(Shared { state: Default::default(), wake: Default::default() });
+        let shared = std::sync::Arc::new(Shared {
+            state: Default::default(),
+            wake: Default::default(),
+        });
         let worker = shared.clone();
-        std::thread::spawn(move || loop {
-            let job = {
-                let mut state = worker.lock();
-                loop {
-                    if let Some(job) = state.jobs.pop_front() {
-                        state.busy = true;
-                        break job;
+        std::thread::spawn(move || {
+            loop {
+                let job = {
+                    let mut state = worker.lock();
+                    loop {
+                        if let Some(job) = state.jobs.pop_front() {
+                            state.busy = true;
+                            break job;
+                        }
+                        if state.stopped {
+                            return;
+                        }
+                        state = worker.wake.wait(state).unwrap_or_else(|e| e.into_inner());
                     }
-                    if state.stopped {
-                        return;
-                    }
-                    state = worker.wake.wait(state).unwrap_or_else(|e| e.into_inner());
-                }
-            };
-            let reply = link.send(&job.cmd);
-            (job.done)(reply);
-            worker.lock().busy = false;
-            worker.wake.notify_all();
+                };
+                let reply = link.send(&job.cmd);
+                (job.done)(reply);
+                worker.lock().busy = false;
+                worker.wake.notify_all();
+            }
         });
         Sender { shared }
     }
 
     /// Queue a job behind everything queued so far.
     pub fn push(&self, key: &str, cmd: conductor::Command, done: Done) {
-        self.queue(Job { key: key.to_string(), latest_wins: false, cmd, done });
+        self.queue(Job {
+            key: key.to_string(),
+            latest_wins: false,
+            cmd,
+            done,
+        });
     }
 
     /// Queue a text of a file: it replaces the newest job of that file if that
     /// is a text that still waits.
     pub fn push_latest(&self, key: &str, cmd: conductor::Command, done: Done) {
-        self.queue(Job { key: key.to_string(), latest_wins: true, cmd, done });
+        self.queue(Job {
+            key: key.to_string(),
+            latest_wins: true,
+            cmd,
+            done,
+        });
     }
 
     fn queue(&self, job: Job) {
@@ -117,7 +132,11 @@ impl Sender {
     pub fn wait_idle(&self) {
         let mut state = self.shared.lock();
         while !state.jobs.is_empty() || state.busy {
-            state = self.shared.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+            state = self
+                .shared
+                .wake
+                .wait(state)
+                .unwrap_or_else(|e| e.into_inner());
         }
     }
 }
@@ -176,8 +195,14 @@ pub fn lsp_range(text: &str, range: &std::ops::Range<usize>) -> Range {
     let (start_line, start_character) = content::byte_to_position(text, range.start);
     let (end_line, end_character) = content::byte_to_position(text, range.end);
     Range {
-        start: Position { line: start_line, character: start_character },
-        end: Position { line: end_line, character: end_character },
+        start: Position {
+            line: start_line,
+            character: start_character,
+        },
+        end: Position {
+            line: end_line,
+            character: end_character,
+        },
     }
 }
 
@@ -211,7 +236,11 @@ pub fn sync_diagnostics(synced: &Synced) -> Vec<Diagnostic> {
 
 /// What a held region says to the author.
 pub fn held_message(reason: &str) -> String {
-    let what = if reason.contains("fence") { "code fence" } else { "HTML block" };
+    let what = if reason.contains("fence") {
+        "code fence"
+    } else {
+        "HTML block"
+    };
     format!("This {what} isn't closed yet; the blocks after it are unchanged until you close it.")
 }
 
@@ -227,7 +256,10 @@ fn overlaps(a: &Range, b: &Range) -> bool {
 pub fn versioned_edit(uri: &Url, version: i32, edits: Vec<TextEdit>) -> WorkspaceEdit {
     WorkspaceEdit {
         document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
-            text_document: OptionalVersionedTextDocumentIdentifier { uri: uri.clone(), version: Some(version) },
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: Some(version),
+            },
             edits: edits.into_iter().map(OneOf::Left).collect(),
         }])),
         ..Default::default()
@@ -235,7 +267,11 @@ pub fn versioned_edit(uri: &Url, version: i32, edits: Vec<TextEdit>) -> Workspac
 }
 
 fn command(title: &str, command: &str, arguments: Vec<serde_json::Value>) -> Command {
-    Command { title: title.to_string(), command: command.to_string(), arguments: Some(arguments) }
+    Command {
+        title: title.to_string(),
+        command: command.to_string(),
+        arguments: Some(arguments),
+    }
 }
 
 /// The code actions for the drifts that overlap `request`: take the current
@@ -254,7 +290,10 @@ pub fn sync_actions(uri: &Url, synced: &Synced, request: &Range) -> Vec<CodeActi
             edit: Some(versioned_edit(
                 uri,
                 synced.version,
-                vec![TextEdit { range, new_text: drift.current.clone() }],
+                vec![TextEdit {
+                    range,
+                    new_text: drift.current.clone(),
+                }],
             )),
             ..Default::default()
         }));
@@ -327,7 +366,10 @@ pub fn conflict_actions(
 pub fn text_edits(text: &str, edits: &[BufferEdit]) -> Vec<TextEdit> {
     edits
         .iter()
-        .map(|e| TextEdit { range: lsp_range(text, &e.range), new_text: e.text.clone() })
+        .map(|e| TextEdit {
+            range: lsp_range(text, &e.range),
+            new_text: e.text.clone(),
+        })
         .collect()
 }
 
@@ -335,16 +377,22 @@ pub fn text_edits(text: &str, edits: &[BufferEdit]) -> Vec<TextEdit> {
 /// same content but are spelled differently (`* a` and `- a`). `None` when the
 /// texts are the same, or when the content differs: then it is not a matter of
 /// spelling and there is nothing to match.
-pub fn match_file_edits(buffer: &str, file: &str) -> Option<Vec<TextEdit>> {    if buffer == file || !content::sync::changed_block_edits(buffer, file).is_empty() {
+pub fn match_file_edits(buffer: &str, file: &str) -> Option<Vec<TextEdit>> {
+    if buffer == file || !content::sync::changed_block_edits(buffer, file).is_empty() {
         return None;
     }
-    Some(text_edits(buffer, &content::sync::format_edits(buffer, file)))
+    Some(text_edits(
+        buffer,
+        &content::sync::format_edits(buffer, file),
+    ))
 }
 
 /// The edits that make `src` canonical: the text N would write for it. Empty
 /// when it is canonical already, or cannot be read.
 pub fn formatting_edits(src: &str, grammar: &schema::Grammar) -> Vec<TextEdit> {
-    let Ok(doc) = content::parse_and_assign(src, grammar) else { return Vec::new() };
+    let Ok(doc) = content::parse_and_assign(src, grammar) else {
+        return Vec::new();
+    };
     let canonical = content::serialize_document(&doc);
     text_edits(src, &content::sync::format_edits(src, &canonical))
 }
@@ -362,7 +410,9 @@ mod tests {
         let offset = |p: Position| -> usize {
             let mut line_start = 0;
             for _ in 0..p.line {
-                line_start += text[line_start..].find('\n').map_or(text.len() - line_start, |i| i + 1);
+                line_start += text[line_start..]
+                    .find('\n')
+                    .map_or(text.len() - line_start, |i| i + 1);
             }
             let mut units = 0;
             for (i, c) in text[line_start..].char_indices() {
@@ -388,7 +438,9 @@ mod tests {
 
     /// The edits of a code action's workspace edit, with the version they are for.
     fn edits_of(action: &CodeActionOrCommand) -> (Option<i32>, Vec<TextEdit>) {
-        let CodeActionOrCommand::CodeAction(action) = action else { panic!("a code action") };
+        let CodeActionOrCommand::CodeAction(action) = action else {
+            panic!("a code action")
+        };
         let edit = action.edit.as_ref().expect("an edit");
         match edit.document_changes.as_ref().expect("document changes") {
             DocumentChanges::Edits(changes) => {
@@ -429,20 +481,23 @@ mod tests {
 
     fn changed(text: &str) -> conductor::Command {
         conductor::Command::EditorChanged {
-            path: conductor::editorial_types::ContentPath::parse("content/post/a.md").expect("a content path"),
+            path: conductor::editorial_types::ContentPath::parse("content/post/a.md")
+                .expect("a content path"),
             text: text.to_string(),
         }
     }
 
     fn closed() -> conductor::Command {
         conductor::Command::EditorClosed {
-            path: conductor::editorial_types::ContentPath::parse("content/post/a.md").expect("a content path"),
+            path: conductor::editorial_types::ContentPath::parse("content/post/a.md")
+                .expect("a content path"),
         }
     }
 
     fn saved() -> conductor::Command {
         conductor::Command::DocumentSaved {
-            path: conductor::editorial_types::SitePath::parse("content/post/a.md").expect("a site path"),
+            path: conductor::editorial_types::SitePath::parse("content/post/a.md")
+                .expect("a site path"),
         }
     }
 
@@ -485,8 +540,19 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let (started_tx, started) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
-        let sender = Sender::start(Slow { log: log.clone(), started: started_tx, release: release_rx, first: true });
-        Rig { sender, log, replies: Arc::new(Mutex::new(Vec::new())), started, release }
+        let sender = Sender::start(Slow {
+            log: log.clone(),
+            started: started_tx,
+            release: release_rx,
+            first: true,
+        });
+        Rig {
+            sender,
+            log,
+            replies: Arc::new(Mutex::new(Vec::new())),
+            started,
+            release,
+        }
     }
 
     impl Rig {
@@ -498,7 +564,9 @@ mod tests {
 
         /// Wait until the first send is in flight.
         fn first_send_in_flight(&self) {
-            self.started.recv_timeout(Duration::from_secs(2)).expect("the first send began");
+            self.started
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the first send began");
         }
 
         fn finish(&self) -> Vec<String> {
@@ -514,10 +582,19 @@ mod tests {
         rig.sender.push_latest("a", changed("1"), rig.done("1"));
         rig.first_send_in_flight();
         for n in 2..=5 {
-            rig.sender.push_latest("a", changed(&n.to_string()), rig.done(&n.to_string()));
+            rig.sender
+                .push_latest("a", changed(&n.to_string()), rig.done(&n.to_string()));
         }
-        assert_eq!(rig.finish(), ["changed 1", "changed 5"], "exactly two sends, the second with the fifth text");
-        assert_eq!(*rig.replies.lock().unwrap(), ["1", "5"], "the texts that were replaced are never answered");
+        assert_eq!(
+            rig.finish(),
+            ["changed 1", "changed 5"],
+            "exactly two sends, the second with the fifth text"
+        );
+        assert_eq!(
+            *rig.replies.lock().unwrap(),
+            ["1", "5"],
+            "the texts that were replaced are never answered"
+        );
     }
 
     #[test]
@@ -529,7 +606,10 @@ mod tests {
         rig.sender.push("a", saved(), rig.done("saved"));
         // A text after the save is not folded into the one before it.
         rig.sender.push_latest("a", changed("3"), rig.done("3"));
-        assert_eq!(rig.finish(), ["changed 1", "changed 2", "saved", "changed 3"]);
+        assert_eq!(
+            rig.finish(),
+            ["changed 1", "changed 2", "saved", "changed 3"]
+        );
     }
 
     #[test]
@@ -548,7 +628,8 @@ mod tests {
         let rig = rig();
         rig.sender.push_latest("a", changed("1"), rig.done("a1"));
         rig.first_send_in_flight();
-        rig.sender.push_latest("b", changed("b-text"), rig.done("b"));
+        rig.sender
+            .push_latest("b", changed("b-text"), rig.done("b"));
         rig.sender.push_latest("a", changed("2"), rig.done("a2"));
         rig.sender.push_latest("a", changed("3"), rig.done("a3"));
         assert_eq!(rig.finish(), ["changed 1", "changed b-text", "changed 3"]);
@@ -563,7 +644,15 @@ mod tests {
             end: Position { line, character: 0 },
         };
         for line in [0, 1, 7, 400] {
-            let actions = conflict_offer(&at(line), true, &uri(), "content/post/a.md", 3, "mine\n", "disk\n");
+            let actions = conflict_offer(
+                &at(line),
+                true,
+                &uri(),
+                "content/post/a.md",
+                3,
+                "mine\n",
+                "disk\n",
+            );
             assert_eq!(
                 actions.iter().map(title).collect::<Vec<_>>(),
                 [TAKE_FILE, KEEP_EDITS],
@@ -571,7 +660,18 @@ mod tests {
             );
         }
         // Not conflicted: nothing, wherever the cursor is.
-        assert!(conflict_offer(&at(0), false, &uri(), "content/post/a.md", 3, "mine\n", "disk\n").is_empty());
+        assert!(
+            conflict_offer(
+                &at(0),
+                false,
+                &uri(),
+                "content/post/a.md",
+                3,
+                "mine\n",
+                "disk\n"
+            )
+            .is_empty()
+        );
     }
 
     // ── drift and held regions ──────────────────────────────────────────────
@@ -600,13 +700,22 @@ mod tests {
         assert_eq!(
             diagnostics[0].range,
             Range {
-                start: Position { line: 2, character: 0 },
-                end: Position { line: 2, character: 9 }
+                start: Position {
+                    line: 2,
+                    character: 0
+                },
+                end: Position {
+                    line: 2,
+                    character: 9
+                }
             }
         );
 
         let actions = sync_actions(&uri(), &synced, &diagnostics[0].range);
-        assert_eq!(actions.iter().map(title).collect::<Vec<_>>(), [TAKE_CURRENT, KEEP_MINE_TITLE]);
+        assert_eq!(
+            actions.iter().map(title).collect::<Vec<_>>(),
+            [TAKE_CURRENT, KEEP_MINE_TITLE]
+        );
         let keep = command_of(&actions[1]);
         assert_eq!(keep.command, KEEP_MINE);
         assert_eq!(
@@ -616,7 +725,16 @@ mod tests {
         assert_eq!(parse_drift_id("00000000000000ab"), Some(DriftId(0xab)));
 
         // Away from the drift there is nothing to resolve.
-        let elsewhere = Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 3 } };
+        let elsewhere = Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 3,
+            },
+        };
         assert!(sync_actions(&uri(), &synced, &elsewhere).is_empty());
     }
 
@@ -631,7 +749,10 @@ mod tests {
         );
         // The same two ways out.
         let actions = sync_actions(&uri(), &synced, &diagnostics[0].range);
-        assert_eq!(actions.iter().map(title).collect::<Vec<_>>(), [TAKE_CURRENT, KEEP_MINE_TITLE]);
+        assert_eq!(
+            actions.iter().map(title).collect::<Vec<_>>(),
+            [TAKE_CURRENT, KEEP_MINE_TITLE]
+        );
     }
 
     #[test]
@@ -648,13 +769,25 @@ mod tests {
         };
         let diagnostics = sync_diagnostics(&synced);
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, Some(DiagnosticSeverity::INFORMATION));
+        assert_eq!(
+            diagnostics[0].severity,
+            Some(DiagnosticSeverity::INFORMATION)
+        );
         assert_eq!(
             diagnostics[0].message,
             "This code fence isn't closed yet; the blocks after it are unchanged until you close it."
         );
-        assert_eq!(diagnostics[0].range.start, Position { line: 2, character: 0 });
-        assert!(sync_actions(&uri(), &synced, &diagnostics[0].range).is_empty(), "nothing to resolve");
+        assert_eq!(
+            diagnostics[0].range.start,
+            Position {
+                line: 2,
+                character: 0
+            }
+        );
+        assert!(
+            sync_actions(&uri(), &synced, &diagnostics[0].range).is_empty(),
+            "nothing to resolve"
+        );
 
         // An HTML block says so.
         assert_eq!(
@@ -679,18 +812,34 @@ mod tests {
             held: vec![],
         };
         let request = Range {
-            start: Position { line: 0, character: 4 },
-            end: Position { line: 0, character: 4 },
+            start: Position {
+                line: 0,
+                character: 4,
+            },
+            end: Position {
+                line: 0,
+                character: 4,
+            },
         };
         let actions = sync_actions(&uri(), &synced, &request);
         let (version, edits) = edits_of(&actions[0]);
-        assert_eq!(version, Some(7), "a versioned edit: refused if the buffer moved on");
+        assert_eq!(
+            version,
+            Some(7),
+            "a versioned edit: refused if the buffer moved on"
+        );
         assert_eq!(
             edits,
             vec![TextEdit {
                 range: Range {
-                    start: Position { line: 0, character: 3 },
-                    end: Position { line: 0, character: 7 }
+                    start: Position {
+                        line: 0,
+                        character: 3
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 7
+                    }
                 },
                 new_text: "theirs".to_string(),
             }]
@@ -709,11 +858,17 @@ mod tests {
         let actions = conflict_actions(&uri(), "content/post/a.md", 3, "mine\n", "disk\n");
         assert_eq!(
             actions.iter().map(title).collect::<Vec<_>>(),
-            ["Take the file on disk (discard unsaved edits)", "Keep the unsaved edits (overwrite the file)"]
+            [
+                "Take the file on disk (discard unsaved edits)",
+                "Keep the unsaved edits (overwrite the file)"
+            ]
         );
         assert_eq!(command_of(&actions[0]).command, RELOAD_DOCUMENT);
         assert_eq!(command_of(&actions[1]).command, OVERWRITE_FILE);
-        assert_eq!(command_of(&actions[1]).arguments.as_deref(), Some(&[json!("content/post/a.md")][..]));
+        assert_eq!(
+            command_of(&actions[1]).arguments.as_deref(),
+            Some(&[json!("content/post/a.md")][..])
+        );
     }
 
     #[test]
@@ -748,7 +903,8 @@ mod tests {
     }
 
     fn grammar() -> schema::Grammar {
-        schema::parse_schema("# Post title {#title}\noccurs\n: exactly once\n\n----\nBody.\n").expect("a schema")
+        schema::parse_schema("# Post title {#title}\noccurs\n: exactly once\n\n----\nBody.\n")
+            .expect("a schema")
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::data::{DataGraph, OutputMode, Value};
 use crate::dom::{Element, Form, Node};
-use crate::expression::{attribute_text, evaluate, Evaluated, Expression};
+use crate::expression::{Evaluated, Expression, attribute_text, evaluate};
 use crate::graph_view::{GraphView, ResolvedNode};
 use crate::registry::RenderContext;
 
@@ -33,7 +33,11 @@ impl std::error::Error for RenderError {}
 
 /// Transform a list of template nodes using the data graph.
 /// Replaces presemble annotation nodes with generated content.
-pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -> Result<Vec<Node>, RenderError> {
+pub fn transform(
+    nodes: Vec<Node>,
+    graph: &dyn GraphView,
+    ctx: &RenderContext,
+) -> Result<Vec<Node>, RenderError> {
     let mut output = Vec::new();
     for node in nodes {
         match node {
@@ -49,9 +53,11 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
                     )));
                 } else if el.name == "template" && el.attr_form("data-slot").is_some() {
                     // Conditional block: render children only if the slot is present.
-                    let present = match directive_source(&el, "data-slot")?.expect("checked above") {
+                    let present = match directive_source(&el, "data-slot")?.expect("checked above")
+                    {
                         Source::Path(segments) => {
-                            let path_segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+                            let path_segments: Vec<&str> =
+                                segments.iter().map(String::as_str).collect();
                             !matches!(
                                 graph.resolve(&path_segments).as_ref().map(|r| r.as_value()),
                                 None | Some(Value::Absent)
@@ -82,31 +88,47 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
                     let mut resolved_value: Option<Value> = None;
                     match &source {
                         Source::Path(segments) => {
-                            let path_segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+                            let path_segments: Vec<&str> =
+                                segments.iter().map(String::as_str).collect();
                             // Fast path: iterate a NodeStore Collection without materializing Values.
                             if let Some(resolved) = graph.resolve_node(&path_segments)
-                                && matches!(resolved.store.get(resolved.id), Some(node_store::Node::Collection))
+                                && matches!(
+                                    resolved.store.get(resolved.id),
+                                    Some(node_store::Node::Collection)
+                                )
                             {
                                 let children = resolved.store.children(resolved.id);
                                 // Probe to see if native binding is supported (avoids materializing).
                                 let supports_native = children.first().is_none_or(|&first_id| {
-                                    graph.with_node_binding(item_key.clone(), first_id, resolved.store).is_some()
+                                    graph
+                                        .with_node_binding(
+                                            item_key.clone(),
+                                            first_id,
+                                            resolved.store,
+                                        )
+                                        .is_some()
                                 });
                                 if supports_native {
                                     handled = true;
                                     for child_id in children {
                                         // unwrap: we probed successfully above
                                         let bound = graph
-                                            .with_node_binding(item_key.clone(), child_id, resolved.store)
+                                            .with_node_binding(
+                                                item_key.clone(),
+                                                child_id,
+                                                resolved.store,
+                                            )
                                             .unwrap();
-                                        let mut rendered = transform(el.children.clone(), &*bound, ctx)?;
+                                        let mut rendered =
+                                            transform(el.children.clone(), &*bound, ctx)?;
                                         output.append(&mut rendered);
                                     }
                                 }
                             }
                             if !handled {
                                 // Legacy Value path for DataGraph or non-Collection nodes.
-                                resolved_value = graph.resolve(&path_segments).map(|r| r.into_owned());
+                                resolved_value =
+                                    graph.resolve(&path_segments).map(|r| r.into_owned());
                             }
                         }
                         Source::Expr(expression) => {
@@ -117,7 +139,8 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
                     }
                     if let Some(Value::List(items)) = resolved_value {
                         for item_value in items {
-                            let child_view = graph.with_binding(item_key.clone(), item_value.clone());
+                            let child_view =
+                                graph.with_binding(item_key.clone(), item_value.clone());
                             let mut rendered = transform(el.children.clone(), &*child_view, ctx)?;
                             output.append(&mut rendered);
                         }
@@ -135,7 +158,11 @@ pub fn transform(nodes: Vec<Node>, graph: &dyn GraphView, ctx: &RenderContext) -
                     }
                     let transformed_children = transform(el.children, graph, ctx)?;
                     // Attribute values that are expressions read the input (ADR-067).
-                    let attrs = if presemble { el.attrs } else { evaluate_attributes(el.attrs, graph, ctx)? };
+                    let attrs = if presemble {
+                        el.attrs
+                    } else {
+                        evaluate_attributes(el.attrs, graph, ctx)?
+                    };
                     output.push(Node::Element(Element {
                         name: el.name,
                         attrs,
@@ -251,7 +278,11 @@ impl<'a> Placement<'a> {
         match self {
             Placement::AsIs => children,
             Placement::Element(tag) => {
-                vec![Node::Element(Element { name: tag.to_string(), attrs, children })]
+                vec![Node::Element(Element {
+                    name: tag.to_string(),
+                    attrs,
+                    children,
+                })]
             }
         }
     }
@@ -265,7 +296,9 @@ fn render_insert_node(
 ) -> Result<Vec<Node>, RenderError> {
     for (attr, _) in &el.attrs {
         if let Some(advice) = crate::constants::removed_attribute(&el.name, attr) {
-            return Err(RenderError::Render(format!("{attr} was removed (ADR-067): {advice}")));
+            return Err(RenderError::Render(format!(
+                "{attr} was removed (ADR-067): {advice}"
+            )));
         }
     }
     match el.attr_form("data") {
@@ -308,14 +341,24 @@ fn render_insert_expression(
         let data_path = subject.dotted();
         let file = resolve_presemble_file(&subject.segments(), graph);
         attrs.push(("class".to_string(), Form::Str(semantic_class(&data_path))));
-        attrs.push((crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(&data_path))));
-        attrs.push((crate::constants::ATTR_FILE.to_string(), Form::Str(file.clone())));
+        attrs.push((
+            crate::constants::ATTR_SLOT.to_string(),
+            Form::Str(slot_name_from_path(&data_path)),
+        ));
+        attrs.push((
+            crate::constants::ATTR_FILE.to_string(),
+            Form::Str(file.clone()),
+        ));
         // A synthesized link still says which slot it stands for, and in
         // editorial output carries the editor attributes of its title.
-        if let Some(Value::Record(record)) = graph.resolve(&subject.segments()).map(|r| r.into_owned())
+        if let Some(Value::Record(record)) =
+            graph.resolve(&subject.segments()).map(|r| r.into_owned())
             && let Some(Value::Text(source)) = record.resolve(&[crate::constants::KEY_SOURCE_SLOT])
         {
-            attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
+            attrs.push((
+                crate::constants::ATTR_SOURCE_SLOT.to_string(),
+                Form::Str(source.clone()),
+            ));
             if editorial {
                 attrs.extend(source_text_attrs(source, &record, &file));
             }
@@ -357,7 +400,11 @@ fn native_plain_text(path: &[&str], graph: &dyn GraphView) -> Option<String> {
 /// Extract the slot name from a data path — the last segment.
 /// e.g. "article.title" -> "title", "title" -> "title"
 fn slot_name_from_path(data_path: &str) -> String {
-    data_path.split('.').next_back().unwrap_or(data_path).to_string()
+    data_path
+        .split('.')
+        .next_back()
+        .unwrap_or(data_path)
+        .to_string()
 }
 
 /// Derive the semantic class from the `data` attribute path.
@@ -413,7 +460,15 @@ fn render_insert(
     // Try the fast NodeId path first (avoids Value materialization).
     // Falls back to the Value path for unhandled node types (e.g. body).
     if let Some(ref resolved) = graph.resolve_node(&path_segments)
-        && let Some(nodes) = render_insert_native(resolved, placement, &class, data_path, &presemble_file, &constraint_attrs, editor_mode)?
+        && let Some(nodes) = render_insert_native(
+            resolved,
+            placement,
+            &class,
+            data_path,
+            &presemble_file,
+            &constraint_attrs,
+            editor_mode,
+        )?
     {
         return Ok(nodes);
     }
@@ -428,8 +483,14 @@ fn render_insert(
         Some(Value::Text(text)) => {
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+                (
+                    crate::constants::ATTR_SLOT.to_string(),
+                    Form::Str(slot_name_from_path(data_path)),
+                ),
+                (
+                    crate::constants::ATTR_FILE.to_string(),
+                    Form::Str(presemble_file.clone()),
+                ),
             ];
             if editorial {
                 attrs.extend(resolve_editor_attrs(data_path, graph, &presemble_file));
@@ -443,8 +504,14 @@ fn render_insert(
         Some(Value::Inlines(nodes)) => {
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+                (
+                    crate::constants::ATTR_SLOT.to_string(),
+                    Form::Str(slot_name_from_path(data_path)),
+                ),
+                (
+                    crate::constants::ATTR_FILE.to_string(),
+                    Form::Str(presemble_file.clone()),
+                ),
             ];
             if editorial {
                 attrs.extend(resolve_editor_attrs(data_path, graph, &presemble_file));
@@ -467,7 +534,15 @@ fn render_insert(
             } else {
                 Vec::new()
             };
-            render_record(&sub_graph, as_tag, &class, &slot, &presemble_file, editorial, &editor)
+            render_record(
+                &sub_graph,
+                as_tag,
+                &class,
+                &slot,
+                &presemble_file,
+                editorial,
+                &editor,
+            )
         }
 
         Some(Value::List(items)) => {
@@ -480,13 +555,25 @@ fn render_insert(
             let mut result = Vec::new();
             for (i, item) in items.iter().enumerate() {
                 let editor = editors.get(i).map(Vec::as_slice).unwrap_or_default();
-                let mut rendered = render_list_item(item, placement, &class, &slot, &presemble_file, editorial, editor)?;
+                let mut rendered = render_list_item(
+                    item,
+                    placement,
+                    &class,
+                    &slot,
+                    &presemble_file,
+                    editorial,
+                    editor,
+                )?;
                 result.append(&mut rendered);
             }
             Ok(result)
         }
 
-        Some(Value::Suggestion { hint, slot_name, element_kind }) => {
+        Some(Value::Suggestion {
+            hint,
+            slot_name,
+            element_kind,
+        }) => {
             use crate::data::SuggestionKind;
             let sem_class = semantic_class(data_path);
             let body_class = if matches!(element_kind, SuggestionKind::Body) {
@@ -518,9 +605,18 @@ fn render_insert(
             // The element content is empty — the user starts with a clean slate.
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(combined_class)),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name.clone())),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
-                (crate::constants::ATTR_HINT.to_string(), Form::Str(hint.clone())),
+                (
+                    crate::constants::ATTR_SLOT.to_string(),
+                    Form::Str(slot_name.clone()),
+                ),
+                (
+                    crate::constants::ATTR_FILE.to_string(),
+                    Form::Str(presemble_file.clone()),
+                ),
+                (
+                    crate::constants::ATTR_HINT.to_string(),
+                    Form::Str(hint.clone()),
+                ),
             ];
             if effective_tag == "img" {
                 attrs.push(("alt".to_string(), Form::Str(String::new())));
@@ -529,8 +625,8 @@ fn render_insert(
                 // When a TypeLink constraint is present, point the href at the
                 // corresponding schema's index page (ADR-042 fragment mode).
                 // Otherwise fall back to the generic placeholder "#".
-                let href = typelink_schema_href(&constraint_attrs)
-                    .unwrap_or_else(|| "#".to_string());
+                let href =
+                    typelink_schema_href(&constraint_attrs).unwrap_or_else(|| "#".to_string());
                 attrs.push(("href".to_string(), Form::Str(href)));
             }
             if editorial {
@@ -551,8 +647,14 @@ fn render_insert(
         Some(Value::Integer(n)) => {
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+                (
+                    crate::constants::ATTR_SLOT.to_string(),
+                    Form::Str(slot_name_from_path(data_path)),
+                ),
+                (
+                    crate::constants::ATTR_FILE.to_string(),
+                    Form::Str(presemble_file.clone()),
+                ),
             ];
             attrs.extend(constraint_attrs.iter().cloned());
             Ok(placement.place(attrs, vec![Node::Text(n.to_string())]))
@@ -561,8 +663,14 @@ fn render_insert(
         Some(Value::Bool(b)) => {
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+                (
+                    crate::constants::ATTR_SLOT.to_string(),
+                    Form::Str(slot_name_from_path(data_path)),
+                ),
+                (
+                    crate::constants::ATTR_FILE.to_string(),
+                    Form::Str(presemble_file.clone()),
+                ),
             ];
             attrs.extend(constraint_attrs.iter().cloned());
             Ok(placement.place(attrs, vec![Node::Text(b.to_string())]))
@@ -575,8 +683,14 @@ fn render_insert(
             };
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+                (
+                    crate::constants::ATTR_SLOT.to_string(),
+                    Form::Str(slot_name_from_path(data_path)),
+                ),
+                (
+                    crate::constants::ATTR_FILE.to_string(),
+                    Form::Str(presemble_file.clone()),
+                ),
             ];
             attrs.extend(constraint_attrs.iter().cloned());
             Ok(placement.place(attrs, vec![Node::Text(text)]))
@@ -586,8 +700,14 @@ fn render_insert(
             let text = format!("#<fn {}>", c.name().unwrap_or("anonymous"));
             let mut attrs = vec![
                 ("class".to_string(), Form::Str(class)),
-                (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.clone())),
+                (
+                    crate::constants::ATTR_SLOT.to_string(),
+                    Form::Str(slot_name_from_path(data_path)),
+                ),
+                (
+                    crate::constants::ATTR_FILE.to_string(),
+                    Form::Str(presemble_file.clone()),
+                ),
             ];
             attrs.extend(constraint_attrs);
             Ok(placement.place(attrs, vec![Node::Text(text)]))
@@ -656,8 +776,14 @@ fn render_insert_native(
                 };
                 let mut attrs = vec![
                     ("class".to_string(), Form::Str(class.to_string())),
-                    (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                    (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                    (
+                        crate::constants::ATTR_SLOT.to_string(),
+                        Form::Str(slot_name_from_path(data_path)),
+                    ),
+                    (
+                        crate::constants::ATTR_FILE.to_string(),
+                        Form::Str(presemble_file.to_string()),
+                    ),
                 ];
                 attrs.extend(constraint_attrs.iter().cloned());
                 Ok(Some(placement.place(attrs, vec![Node::Text(text)])))
@@ -674,8 +800,19 @@ fn render_insert_native(
                     EditorAttrs::Published
                 };
                 for child_id in store.children(id) {
-                    let child_resolved = ResolvedNode { id: child_id, store };
-                    if let Some(mut rendered) = render_insert_native(&child_resolved, placement, class, data_path, presemble_file, &[], child_editor_mode)? {
+                    let child_resolved = ResolvedNode {
+                        id: child_id,
+                        store,
+                    };
+                    if let Some(mut rendered) = render_insert_native(
+                        &child_resolved,
+                        placement,
+                        class,
+                        data_path,
+                        presemble_file,
+                        &[],
+                        child_editor_mode,
+                    )? {
                         result.append(&mut rendered);
                     }
                 }
@@ -728,21 +865,35 @@ fn render_insert_native(
                     let combined_class = format!("{class} presemble-suggestion");
                     let mut attrs = vec![
                         ("class".to_string(), Form::Str(combined_class)),
-                        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_val.clone())),
-                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                        (
+                            crate::constants::ATTR_SLOT.to_string(),
+                            Form::Str(slot_name_val.clone()),
+                        ),
+                        (
+                            crate::constants::ATTR_FILE.to_string(),
+                            Form::Str(presemble_file.to_string()),
+                        ),
                         (crate::constants::ATTR_HINT.to_string(), Form::Str(hint)),
                     ];
                     if editorial {
                         attrs.extend(empty_slot_editor_attrs(presemble_file, &slot_name_val));
                     }
-                    let element = Element { name: tag, attrs, children: vec![] };
+                    let element = Element {
+                        name: tag,
+                        attrs,
+                        children: vec![],
+                    };
                     return Ok(Some(vec![Node::Element(element)]));
                 }
 
                 // A paragraph that holds one link or one image is that link or
                 // image (ADR-059 §12): it renders as the element a link or
                 // image slot always rendered.
-                let lone = if element_name == "paragraph" { lone_paragraph(store, id) } else { None };
+                let lone = if element_name == "paragraph" {
+                    lone_paragraph(store, id)
+                } else {
+                    None
+                };
 
                 // Heading or paragraph — extract first text child
                 if element_name == "heading" || (element_name == "paragraph" && lone.is_none()) {
@@ -758,8 +909,14 @@ fn render_insert_native(
                     if let Some(shown) = shown {
                         let mut elem_attrs = vec![
                             ("class".to_string(), Form::Str(class.to_string())),
-                            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot_name_from_path(data_path))),
-                            (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                            (
+                                crate::constants::ATTR_SLOT.to_string(),
+                                Form::Str(slot_name_from_path(data_path)),
+                            ),
+                            (
+                                crate::constants::ATTR_FILE.to_string(),
+                                Form::Str(presemble_file.to_string()),
+                            ),
                         ];
                         elem_attrs.extend(editor_here());
                         elem_attrs.extend(constraint_attrs.iter().cloned());
@@ -835,12 +992,16 @@ fn render_insert_native(
                         // A synthesized title link carries the title heading's
                         // editor record: its address and its markdown.
                         if editorial && source == "title" {
-                            let address = node_attr_str(store, id, crate::constants::KEY_EDITOR_ADDRESS)
-                                .and_then(|a| content::address::with_file(&a, presemble_file));
+                            let address =
+                                node_attr_str(store, id, crate::constants::KEY_EDITOR_ADDRESS)
+                                    .and_then(|a| content::address::with_file(&a, presemble_file));
                             let md = node_attr_str(store, id, crate::constants::KEY_EDITOR_MD);
                             link_editor.extend(editor_attrs(address, md));
                         }
-                        source_attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source)));
+                        source_attrs.push((
+                            crate::constants::ATTR_SOURCE_SLOT.to_string(),
+                            Form::Str(source),
+                        ));
                     } else if parent_slot(store, id).is_some() {
                         link_editor.extend(editor_here());
                     } else if let EditorAttrs::Computed { page: Some(page) } = editor
@@ -852,11 +1013,15 @@ fn render_insert_native(
                             crate::constants::ATTR_SOURCE_SLOT.to_string(),
                             Form::Str("title".to_string()),
                         ));
-                        let heading = page_document(store, page)
-                            .and_then(|document| document_slot_blocks(store, document, "title").into_iter().next());
+                        let heading = page_document(store, page).and_then(|document| {
+                            document_slot_blocks(store, document, "title")
+                                .into_iter()
+                                .next()
+                        });
                         if let Some(heading) = heading {
                             // The heading's own editor record.
-                            link_editor.extend(native_block_bundle(store, heading).unwrap_or_default());
+                            link_editor
+                                .extend(native_block_bundle(store, heading).unwrap_or_default());
                         }
                     }
 
@@ -866,7 +1031,10 @@ fn render_insert_native(
                                 ("href".to_string(), Form::Str(href)),
                                 ("class".to_string(), Form::Str(class.to_string())),
                                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
-                                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                                (
+                                    crate::constants::ATTR_FILE.to_string(),
+                                    Form::Str(presemble_file.to_string()),
+                                ),
                             ];
                             elem_attrs.extend(source_attrs);
                             elem_attrs.extend(link_editor);
@@ -881,7 +1049,10 @@ fn render_insert_native(
                             let mut inner_attrs = vec![
                                 ("class".to_string(), Form::Str(class.to_string())),
                                 (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
-                                (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                                (
+                                    crate::constants::ATTR_FILE.to_string(),
+                                    Form::Str(presemble_file.to_string()),
+                                ),
                             ];
                             inner_attrs.extend(source_attrs);
                             inner_attrs.extend(link_editor);
@@ -903,17 +1074,20 @@ fn render_insert_native(
                 if let Some(src) = path_val {
                     let alt = match &lone {
                         Some(Lone::Image { alt, .. }) => alt.clone(),
-                        _ => attrs.iter().find_map(|(n, v)| {
-                            if store.resolve_name(*n) == "alt" {
-                                if let Some(node_store::Node::Text(t)) = store.get(*v) {
-                                    Some(t.clone())
+                        _ => attrs
+                            .iter()
+                            .find_map(|(n, v)| {
+                                if store.resolve_name(*n) == "alt" {
+                                    if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                        Some(t.clone())
+                                    } else {
+                                        None
+                                    }
                                 } else {
                                     None
                                 }
-                            } else {
-                                None
-                            }
-                        }).unwrap_or_default(),
+                            })
+                            .unwrap_or_default(),
                     };
                     let tag = as_tag.unwrap_or("img").to_string();
                     let slot = slot_name_from_path(data_path);
@@ -922,7 +1096,10 @@ fn render_insert_native(
                         ("alt".to_string(), Form::Str(alt)),
                         ("class".to_string(), Form::Str(class.to_string())),
                         (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
-                        (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                        (
+                            crate::constants::ATTR_FILE.to_string(),
+                            Form::Str(presemble_file.to_string()),
+                        ),
                     ];
                     img_attrs.extend(editor_here());
                     img_attrs.extend(constraint_attrs.iter().cloned());
@@ -935,7 +1112,9 @@ fn render_insert_native(
                 }
 
                 // Unknown element type — check for synthesized link record (ConsistsOf "link")
-                let link_part = store.consists_of(id).iter()
+                let link_part = store
+                    .consists_of(id)
+                    .iter()
                     .find(|(name, _)| store.resolve_name(*name) == "link")
                     .map(|(_, id)| *id);
                 if let Some(link_id) = link_part {
@@ -943,13 +1122,25 @@ fn render_insert_native(
                     let link_attrs = store.attributes(link_id);
                     let href = link_attrs.iter().find_map(|(n, v)| {
                         if store.resolve_name(*n) == "href" {
-                            if let Some(node_store::Node::Text(t)) = store.get(*v) { Some(t.clone()) } else { None }
-                        } else { None }
+                            if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                Some(t.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     });
                     let text = link_attrs.iter().find_map(|(n, v)| {
                         if store.resolve_name(*n) == "text" {
-                            if let Some(node_store::Node::Text(t)) = store.get(*v) { Some(t.clone()) } else { None }
-                        } else { None }
+                            if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                                Some(t.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
                     });
                     if let Some(href) = href {
                         let text = text.unwrap_or_default();
@@ -959,15 +1150,22 @@ fn render_insert_native(
                             ("href".to_string(), Form::Str(href)),
                             ("class".to_string(), Form::Str(class.to_string())),
                             (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot)),
-                            (crate::constants::ATTR_FILE.to_string(), Form::Str(presemble_file.to_string())),
+                            (
+                                crate::constants::ATTR_FILE.to_string(),
+                                Form::Str(presemble_file.to_string()),
+                            ),
                         ];
                         // A link slot of this page that resolves to another page.
                         if let EditorAttrs::Computed { page: Some(page) } = editor
                             && let Some(document) = page_document(store, page)
                         {
                             link_elem_attrs.extend(
-                                page_slot_block_bundle(store, document, &slot_name_from_path(data_path))
-                                    .unwrap_or_default(),
+                                page_slot_block_bundle(
+                                    store,
+                                    document,
+                                    &slot_name_from_path(data_path),
+                                )
+                                .unwrap_or_default(),
                             );
                         }
                         link_elem_attrs.extend(constraint_attrs.iter().cloned());
@@ -997,12 +1195,18 @@ fn render_insert_native(
 /// `content_store::block_from_node`. `None` for what renders nothing: a node
 /// that does not decode. Link expressions decode and render nothing in
 /// `block_nodes` (ADR-058 section 4: ignored in the body).
-fn body_block(store: &node_store::NodeStore, id: node_store::NodeId) -> Option<content::ContentElement> {
+fn body_block(
+    store: &node_store::NodeStore,
+    id: node_store::NodeId,
+) -> Option<content::ContentElement> {
     content_store::block_from_node(store, id).ok()
 }
 
 /// The `slot` element `block` sits under, if any.
-fn parent_slot(store: &node_store::NodeStore, block: node_store::NodeId) -> Option<node_store::NodeId> {
+fn parent_slot(
+    store: &node_store::NodeStore,
+    block: node_store::NodeId,
+) -> Option<node_store::NodeId> {
     store.parents(block).into_iter().find(|p| {
         matches!(store.get(*p), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == "slot")
     })
@@ -1010,7 +1214,10 @@ fn parent_slot(store: &node_store::NodeStore, block: node_store::NodeId) -> Opti
 
 /// The document that owns `node`: the nearest ancestor (or `node` itself)
 /// that names a `file`.
-fn owning_document(store: &node_store::NodeStore, node: node_store::NodeId) -> Option<node_store::NodeId> {
+fn owning_document(
+    store: &node_store::NodeStore,
+    node: node_store::NodeId,
+) -> Option<node_store::NodeId> {
     let mut current = node;
     // Documents are shallow; the bound only guards against a cycle.
     for _ in 0..16 {
@@ -1048,10 +1255,11 @@ fn page_slot_block_bundle(
 /// The document of the page whose node is `page`: what a semantic content
 /// node points at by its `_document` edge, or `page` itself when it is the
 /// document (it has a preamble). `None` for any other node.
-fn page_document(store: &node_store::NodeStore, page: node_store::NodeId) -> Option<node_store::NodeId> {
-    let named = |id: node_store::NodeId, wanted: &str| {
-        matches!(store.get(id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == wanted)
-    };
+fn page_document(
+    store: &node_store::NodeStore,
+    page: node_store::NodeId,
+) -> Option<node_store::NodeId> {
+    let named = |id: node_store::NodeId, wanted: &str| matches!(store.get(id), Some(node_store::Node::Element(n)) if store.resolve_name(*n) == wanted);
     if let Some((_, document)) = store
         .derived(page)
         .into_iter()
@@ -1059,7 +1267,11 @@ fn page_document(store: &node_store::NodeStore, page: node_store::NodeId) -> Opt
     {
         return Some(document);
     }
-    store.children(page).into_iter().any(|c| named(c, "preamble")).then_some(page)
+    store
+        .children(page)
+        .into_iter()
+        .any(|c| named(c, "preamble"))
+        .then_some(page)
 }
 
 /// The blocks of preamble slot `slot` in `document`, in order.
@@ -1099,23 +1311,37 @@ fn native_block_bundle(
             .filter_map(|c| body_block(store, c).map(|el| (c, el)))
             .collect();
         let position = siblings.iter().position(|(c, _)| *c == block)?;
-        let elements: Vec<content::ContentElement> = siblings.into_iter().map(|(_, el)| el).collect();
-        content::block_addresses(&file, content::AddressContainer::Slot(&slot_name), &elements)
-            .into_iter()
-            .nth(position)?
+        let elements: Vec<content::ContentElement> =
+            siblings.into_iter().map(|(_, el)| el).collect();
+        content::block_addresses(
+            &file,
+            content::AddressContainer::Slot(&slot_name),
+            &elements,
+        )
+        .into_iter()
+        .nth(position)?
     })();
     Some(editor_attrs(address, md))
 }
 
 /// Get a string attribute value from a node.
-fn node_attr_str(store: &node_store::NodeStore, id: node_store::NodeId, name: &str) -> Option<String> {
+fn node_attr_str(
+    store: &node_store::NodeStore,
+    id: node_store::NodeId,
+    name: &str,
+) -> Option<String> {
     store.attributes(id).iter().find_map(|(n, v)| {
         if store.resolve_name(*n) == name {
-            if let Some(node_store::Node::Text(t)) = store.get(*v) { Some(t.clone()) } else { None }
-        } else { None }
+            if let Some(node_store::Node::Text(t)) = store.get(*v) {
+                Some(t.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     })
 }
-
 
 fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> String {
     let key_file = crate::constants::KEY_PRESEMBLE_FILE;
@@ -1124,15 +1350,23 @@ fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> Stri
         *last = key_file;
     }
     // Try _presemble_file via the data path (legacy DataGraph)
-    if let Some(t) = graph.resolve(&file_path_segments)
-        .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
-    {
+    if let Some(t) = graph.resolve(&file_path_segments).and_then(|r| {
+        if let Value::Text(t) = r.into_owned() {
+            Some(t)
+        } else {
+            None
+        }
+    }) {
         return t;
     }
     // Try direct _presemble_file key (legacy DataGraph)
-    if let Some(t) = graph.resolve(&[key_file])
-        .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
-    {
+    if let Some(t) = graph.resolve(&[key_file]).and_then(|r| {
+        if let Value::Text(t) = r.into_owned() {
+            Some(t)
+        } else {
+            None
+        }
+    }) {
         return t;
     }
     // NodeStore fallback: try "file" attribute via the data path prefix
@@ -1142,22 +1376,37 @@ fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> Stri
         if let Some(last) = node_file_segs.last_mut() {
             *last = "file";
         }
-        if let Some(t) = graph.resolve(&node_file_segs)
-            .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
-        {
+        if let Some(t) = graph.resolve(&node_file_segs).and_then(|r| {
+            if let Value::Text(t) = r.into_owned() {
+                Some(t)
+            } else {
+                None
+            }
+        }) {
             return t;
         }
         // Try just [prefix, "file"] (two-segment path: prefix + "file")
         let prefix = path_segments[0];
-        if let Some(t) = graph.resolve(&[prefix, "file"])
-            .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
-        {
+        if let Some(t) = graph.resolve(&[prefix, "file"]).and_then(|r| {
+            if let Value::Text(t) = r.into_owned() {
+                Some(t)
+            } else {
+                None
+            }
+        }) {
             return t;
         }
     }
     // Direct "file" attribute on the graph root (NodeStoreView without prefix)
-    graph.resolve(&["file"])
-        .and_then(|r| if let Value::Text(t) = r.into_owned() { Some(t) } else { None })
+    graph
+        .resolve(&["file"])
+        .and_then(|r| {
+            if let Value::Text(t) = r.into_owned() {
+                Some(t)
+            } else {
+                None
+            }
+        })
         .unwrap_or_default()
 }
 
@@ -1170,9 +1419,16 @@ fn resolve_presemble_file(path_segments: &[&str], graph: &dyn GraphView) -> Stri
 /// path is `["input", "_presemble_schema_constraints_title"]`; for `data="(ref title)"` it is
 /// `["_presemble_schema_constraints_title"]`.  Falls back to a top-level lookup if the
 /// scoped lookup returns nothing (mirrors `resolve_presemble_file`).
-fn resolve_slot_constraint_form_attrs(data_path: &str, graph: &dyn GraphView) -> Vec<(String, Form)> {
+fn resolve_slot_constraint_form_attrs(
+    data_path: &str,
+    graph: &dyn GraphView,
+) -> Vec<(String, Form)> {
     let slot_name = slot_name_from_path(data_path);
-    let key = format!("{}{}", crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX, slot_name);
+    let key = format!(
+        "{}{}",
+        crate::constants::KEY_SCHEMA_CONSTRAINTS_PREFIX,
+        slot_name
+    );
 
     // Build a scoped path by replacing the last segment with the constraint key.
     let path_segments: Vec<&str> = data_path.split('.').collect();
@@ -1181,13 +1437,15 @@ fn resolve_slot_constraint_form_attrs(data_path: &str, graph: &dyn GraphView) ->
         *last = key.as_str();
     }
 
-    let resolved = graph.resolve(&scoped)
+    let resolved = graph
+        .resolve(&scoped)
         .or_else(|| graph.resolve(&[key.as_str()]));
 
     match resolved {
         Some(data_ref) => {
             if let Value::Record(record) = data_ref.into_owned() {
-                record.iter()
+                record
+                    .iter()
                     .map(|(suffix, val)| {
                         let attr_name = crate::constraints::constraint_attr_name(suffix);
                         let attr_val = match val {
@@ -1218,11 +1476,20 @@ fn record_attrs(
 ) -> Vec<(String, Form)> {
     let mut attrs = vec![
         ("class".to_string(), Form::Str(class.to_string())),
-        (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-        (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
+        (
+            crate::constants::ATTR_SLOT.to_string(),
+            Form::Str(slot.to_string()),
+        ),
+        (
+            crate::constants::ATTR_FILE.to_string(),
+            Form::Str(file.to_string()),
+        ),
     ];
     if let Some(Value::Text(source)) = sub_graph.resolve(&[crate::constants::KEY_SOURCE_SLOT]) {
-        attrs.push((crate::constants::ATTR_SOURCE_SLOT.to_string(), Form::Str(source.clone())));
+        attrs.push((
+            crate::constants::ATTR_SOURCE_SLOT.to_string(),
+            Form::Str(source.clone()),
+        ));
         if editorial {
             attrs.extend(source_text_attrs(source, sub_graph, file));
         }
@@ -1251,7 +1518,10 @@ fn empty_slot_editor_attrs(file: &str, slot_name: &str) -> Vec<(String, Form)> {
     if file.is_empty() || slot_name == "body" {
         return Vec::new();
     }
-    editor_attrs(Some(content::address::slot_address(file, slot_name)), Some(String::new()))
+    editor_attrs(
+        Some(content::address::slot_address(file, slot_name)),
+        Some(String::new()),
+    )
 }
 
 /// The editor attributes of one element: `data-presemble-md` and
@@ -1278,7 +1548,11 @@ fn editor_record_attrs(record: &DataGraph, file: &str) -> Vec<(String, Form)> {
 /// The editor value of slot `data_path` in its parent record: a record, or a
 /// list of records. Like the stored text there is no top-level fallback.
 fn resolve_editor_value(data_path: &str, graph: &dyn GraphView) -> Option<Value> {
-    let key = format!("{}{}", crate::constants::KEY_EDITOR_PREFIX, slot_name_from_path(data_path));
+    let key = format!(
+        "{}{}",
+        crate::constants::KEY_EDITOR_PREFIX,
+        slot_name_from_path(data_path)
+    );
     let mut scoped: Vec<&str> = data_path.split('.').collect();
     if let Some(last) = scoped.last_mut() {
         *last = key.as_str();
@@ -1295,7 +1569,11 @@ fn resolve_editor_attrs(data_path: &str, graph: &dyn GraphView, file: &str) -> V
 }
 
 /// The editor attributes of each item of a multi-value slot, in order.
-fn resolve_editor_list(data_path: &str, graph: &dyn GraphView, file: &str) -> Vec<Vec<(String, Form)>> {
+fn resolve_editor_list(
+    data_path: &str,
+    graph: &dyn GraphView,
+    file: &str,
+) -> Vec<Vec<(String, Form)>> {
     match resolve_editor_value(data_path, graph) {
         Some(Value::List(records)) => records
             .iter()
@@ -1412,8 +1690,14 @@ fn render_list_item(
     let slot_attrs = || {
         vec![
             ("class".to_string(), Form::Str(class.to_string())),
-            (crate::constants::ATTR_SLOT.to_string(), Form::Str(slot.to_string())),
-            (crate::constants::ATTR_FILE.to_string(), Form::Str(file.to_string())),
+            (
+                crate::constants::ATTR_SLOT.to_string(),
+                Form::Str(slot.to_string()),
+            ),
+            (
+                crate::constants::ATTR_FILE.to_string(),
+                Form::Str(file.to_string()),
+            ),
         ]
     };
     match item {
@@ -1436,9 +1720,15 @@ fn render_list_item(
             Ok(placement.place(attrs, nodes.to_vec()))
         }
 
-        Value::Record(sub_graph) => {
-            render_record(sub_graph, placement.tag(), class, slot, file, editorial, editor)
-        }
+        Value::Record(sub_graph) => render_record(
+            sub_graph,
+            placement.tag(),
+            class,
+            slot,
+            file,
+            editorial,
+            editor,
+        ),
 
         Value::Absent => Ok(Vec::new()),
 
@@ -1606,7 +1896,10 @@ pub fn attach_schema_instance_attrs(
 ///
 /// If `nodes` contains no root `Element` (e.g. pure text or empty) the list
 /// is returned unmodified.
-pub fn attach_schema_included_by_attr(mut nodes: Vec<Node>, included: &[(&str, &str)]) -> Vec<Node> {
+pub fn attach_schema_included_by_attr(
+    mut nodes: Vec<Node>,
+    included: &[(&str, &str)],
+) -> Vec<Node> {
     let json = crate::data::build_schema_included_by_json(included);
     for node in &mut nodes {
         if let Node::Element(el) = node {
@@ -1628,7 +1921,7 @@ pub fn attach_schema_included_by_attr(mut nodes: Vec<Node>, included: &[(&str, &
 mod tests {
     use super::*;
     use crate::data::{DataGraph, Value};
-    use crate::dom::{parse_template_xml, serialize_nodes, Form, Node};
+    use crate::dom::{Form, Node, parse_template_xml, serialize_nodes};
     use crate::registry::{NullRegistry, RenderContext};
 
     fn make_graph_with_title(title: &str) -> DataGraph {
@@ -1648,7 +1941,10 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert_eq!(html, r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello World</h1>"#);
+        assert_eq!(
+            html,
+            r#"<h1 class="article-title" data-presemble-slot="title" data-presemble-file="">Hello World</h1>"#
+        );
     }
 
     #[test]
@@ -1671,7 +1967,10 @@ mod tests {
     fn insert_nodes_value_renders_nodes() {
         let mut graph = DataGraph::new();
         let mut article = DataGraph::new();
-        article.insert("body", Value::Nodes(parse_template_xml("<p>Body text</p>").unwrap().into()));
+        article.insert(
+            "body",
+            Value::Nodes(parse_template_xml("<p>Body text</p>").unwrap().into()),
+        );
         graph.insert("article", Value::Record(article));
 
         let src = r#"<presemble:insert data="(ref article.body)" />"#;
@@ -1825,7 +2124,10 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert_eq!(html, r#"<img src="img.jpg" alt="Photo" class="article-cover" data-presemble-slot="cover" data-presemble-file="" />"#);
+        assert_eq!(
+            html,
+            r#"<img src="img.jpg" alt="Photo" class="article-cover" data-presemble-slot="cover" data-presemble-file="" />"#
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1894,8 +2196,14 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert!(!html.contains("<template"), "output should not contain <template>: {html}");
-        assert_eq!(html, r#"<h3 class="item-title" data-presemble-slot="title" data-presemble-file="">Only Article</h3>"#);
+        assert!(
+            !html.contains("<template"),
+            "output should not contain <template>: {html}"
+        );
+        assert_eq!(
+            html,
+            r#"<h3 class="item-title" data-presemble-slot="title" data-presemble-file="">Only Article</h3>"#
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1933,8 +2241,14 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert!(html.contains("<h3"), "callable body should be rendered: {html}");
-        assert!(html.contains("My Feature"), "data should flow into callable: {html}");
+        assert!(
+            html.contains("<h3"),
+            "callable body should be rendered: {html}"
+        );
+        assert!(
+            html.contains("My Feature"),
+            "data should flow into callable: {html}"
+        );
     }
 
     #[test]
@@ -1981,7 +2295,10 @@ mod tests {
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert!(html.contains("Jo"), "field inside callable should resolve against passed data: {html}");
+        assert!(
+            html.contains("Jo"),
+            "field inside callable should resolve against passed data: {html}"
+        );
     }
 
     #[test]
@@ -1992,9 +2309,12 @@ mod tests {
         impl crate::registry::TemplateRegistry for SelfRefRegistry {
             fn resolve(&self, name: &str) -> Option<Vec<Node>> {
                 if name == "recurse" {
-                    Some(parse_template_xml(
-                        r#"<div><presemble:insert data="(recurse input)" /></div>"#
-                    ).unwrap())
+                    Some(
+                        parse_template_xml(
+                            r#"<div><presemble:insert data="(recurse input)" /></div>"#,
+                        )
+                        .unwrap(),
+                    )
                 } else {
                     None
                 }
@@ -2013,7 +2333,10 @@ mod tests {
         let src = r#"<presemble:insert data="(recurse item)" />"#;
         let nodes = parse_template_xml(src).unwrap();
         let result = transform(nodes, &graph, &ctx);
-        assert!(result.is_err(), "self-referencing callable should hit depth limit");
+        assert!(
+            result.is_err(),
+            "self-referencing callable should hit depth limit"
+        );
     }
 
     #[test]
@@ -2047,7 +2370,10 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert!(html.contains("<p>Hello</p>"), "included fragment should appear: {html}");
+        assert!(
+            html.contains("<p>Hello</p>"),
+            "included fragment should appear: {html}"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -2077,9 +2403,18 @@ mod tests {
         let html = serialize_nodes(&result);
 
         assert!(html.contains("<h1"), "output should contain h1 tag: {html}");
-        assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
-        assert!(html.contains("Your blog post title"), "output should contain hint text: {html}");
-        assert!(html.contains(r#"data-presemble-slot="title""#), "output should have data-presemble-slot: {html}");
+        assert!(
+            html.contains("presemble-suggestion"),
+            "output should have presemble-suggestion class: {html}"
+        );
+        assert!(
+            html.contains("Your blog post title"),
+            "output should contain hint text: {html}"
+        );
+        assert!(
+            html.contains(r#"data-presemble-slot="title""#),
+            "output should have data-presemble-slot: {html}"
+        );
     }
 
     #[test]
@@ -2104,8 +2439,14 @@ mod tests {
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
-        assert!(html.contains("<h2"), "heading suggestion without 'as' should use element_kind level: {html}");
-        assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
+        assert!(
+            html.contains("<h2"),
+            "heading suggestion without 'as' should use element_kind level: {html}"
+        );
+        assert!(
+            html.contains("presemble-suggestion"),
+            "output should have presemble-suggestion class: {html}"
+        );
     }
 
     #[test]
@@ -2130,12 +2471,30 @@ mod tests {
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
-        assert!(html.contains("<img"), "output should contain img tag: {html}");
-        assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
-        assert!(html.contains(r#"data-presemble-hint="cover image description""#), "output should have hint attribute: {html}");
-        assert!(html.contains(r#"alt="""#), "output should have empty alt attribute: {html}");
-        assert!(html.contains(r#"src="""#) || html.contains(r#"src= "#), "output should have empty src: {html}");
-        assert!(html.contains(r#"data-presemble-slot="cover""#), "output should have data-presemble-slot: {html}");
+        assert!(
+            html.contains("<img"),
+            "output should contain img tag: {html}"
+        );
+        assert!(
+            html.contains("presemble-suggestion"),
+            "output should have presemble-suggestion class: {html}"
+        );
+        assert!(
+            html.contains(r#"data-presemble-hint="cover image description""#),
+            "output should have hint attribute: {html}"
+        );
+        assert!(
+            html.contains(r#"alt="""#),
+            "output should have empty alt attribute: {html}"
+        );
+        assert!(
+            html.contains(r#"src="""#) || html.contains(r#"src= "#),
+            "output should have empty src: {html}"
+        );
+        assert!(
+            html.contains(r#"data-presemble-slot="cover""#),
+            "output should have data-presemble-slot: {html}"
+        );
     }
 
     #[test]
@@ -2161,10 +2520,22 @@ mod tests {
         let html = serialize_nodes(&result);
 
         assert!(html.contains("<a"), "output should contain a tag: {html}");
-        assert!(html.contains("presemble-suggestion"), "output should have presemble-suggestion class: {html}");
-        assert!(html.contains("href=\"#\""), "output should have href=#: {html}");
-        assert!(html.contains("Author name"), "output should have hint text: {html}");
-        assert!(html.contains(r#"data-presemble-slot="author""#), "output should have data-presemble-slot: {html}");
+        assert!(
+            html.contains("presemble-suggestion"),
+            "output should have presemble-suggestion class: {html}"
+        );
+        assert!(
+            html.contains("href=\"#\""),
+            "output should have href=#: {html}"
+        );
+        assert!(
+            html.contains("Author name"),
+            "output should have hint text: {html}"
+        );
+        assert!(
+            html.contains(r#"data-presemble-slot="author""#),
+            "output should have data-presemble-slot: {html}"
+        );
     }
 
     #[test]
@@ -2190,9 +2561,18 @@ mod tests {
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
-        assert!(!result.is_empty(), "suggestion slot block should NOT be dropped");
-        assert!(html.contains("<h1"), "inner insert should produce a suggestion node: {html}");
-        assert!(html.contains("presemble-suggestion"), "inner insert should have suggestion class: {html}");
+        assert!(
+            !result.is_empty(),
+            "suggestion slot block should NOT be dropped"
+        );
+        assert!(
+            html.contains("<h1"),
+            "inner insert should produce a suggestion node: {html}"
+        );
+        assert!(
+            html.contains("presemble-suggestion"),
+            "inner insert should have suggestion class: {html}"
+        );
     }
 
     #[test]
@@ -2228,8 +2608,14 @@ mod tests {
         let html = serialize_nodes(&result);
 
         assert!(html.contains("<a"), "should render as anchor: {html}");
-        assert!(html.contains(r#"href="/article/hello-world""#), "should have href: {html}");
-        assert!(html.contains("Hello World"), "should have link text: {html}");
+        assert!(
+            html.contains(r#"href="/article/hello-world""#),
+            "should have href: {html}"
+        );
+        assert!(
+            html.contains("Hello World"),
+            "should have link text: {html}"
+        );
         assert!(
             html.contains(r#"data-presemble-source-slot="title""#),
             "should have source slot attribute: {html}"
@@ -2283,15 +2669,14 @@ mod tests {
     #[test]
     fn no_data_presemble_text_in_editorial_output() {
         const OLD_ATTR: &str = "data-presemble-text";
-        let title_link =
-            |graph: &mut DataGraph| {
-                let link = crate::data::synthesize_link(
-                    "Hello src",
-                    "/article/hello",
-                    Some(&title_editor_record("Hello *src*")),
-                );
-                graph.insert("link", Value::Record(link));
-            };
+        let title_link = |graph: &mut DataGraph| {
+            let link = crate::data::synthesize_link(
+                "Hello src",
+                "/article/hello",
+                Some(&title_editor_record("Hello *src*")),
+            );
+            graph.insert("link", Value::Record(link));
+        };
         let mut link_graph = DataGraph::new();
         title_link(&mut link_graph);
 
@@ -2311,13 +2696,25 @@ mod tests {
             native_link_store.add_edge(record, node_store::Edge::Attribute { name, value: val });
         }
         let link_name = native_link_store.intern("link");
-        native_link_store.add_edge(root, node_store::Edge::ConsistsOf { name: link_name, part: record });
-        let native_link = NodeStoreGraphView { store: native_link_store, root };
+        native_link_store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: link_name,
+                part: record,
+            },
+        );
+        let native_link = NodeStoreGraphView {
+            store: native_link_store,
+            root,
+        };
 
         let cases: Vec<(&str, String)> = vec![
             (
                 "native heading slot",
-                render_with(&heading_store("Tom & \"Jerry\""), r#"<presemble:insert data="(ref title)" as="h1" />"#),
+                render_with(
+                    &heading_store("Tom & \"Jerry\""),
+                    r#"<presemble:insert data="(ref title)" as="h1" />"#,
+                ),
             ),
             (
                 "legacy heading slot",
@@ -2332,7 +2729,10 @@ mod tests {
             ),
             (
                 "legacy synthesized title link, (text link)",
-                render_with(&link_graph, r#"<presemble:insert data="(text link)" as="h3" />"#),
+                render_with(
+                    &link_graph,
+                    r#"<presemble:insert data="(text link)" as="h3" />"#,
+                ),
             ),
             (
                 "native synthesized title link",
@@ -2340,7 +2740,10 @@ mod tests {
             ),
         ];
         for (what, html) in cases {
-            assert!(!html.contains(OLD_ATTR), "{what} still carries {OLD_ATTR}: {html}");
+            assert!(
+                !html.contains(OLD_ATTR),
+                "{what} still carries {OLD_ATTR}: {html}"
+            );
         }
         // The synthesized title link still carries what the editor needs.
         let html = render_with(&link_graph, r#"<presemble:insert data="(ref link)" />"#);
@@ -2402,10 +2805,17 @@ mod tests {
         let heading_text = store.add_node(node_store::Node::Text("My Heading".into()));
         store.add_edge(heading, node_store::Edge::Child(heading_text));
         let title_name = store.intern("title");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: title_name,
+                part: heading,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
-        let nodes = parse_template_xml(r#"<presemble:insert data="(ref title)" as="h1" />"#).unwrap();
+        let nodes =
+            parse_template_xml(r#"<presemble:insert data="(ref title)" as="h1" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::published(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
@@ -2448,7 +2858,13 @@ mod tests {
             &mut store,
         );
         let title_name = store.intern("title");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: title_name,
+                part: heading,
+            },
+        );
         NodeStoreGraphView { store, root }
     }
 
@@ -2503,7 +2919,10 @@ mod tests {
         );
         for html in [legacy, native] {
             assert!(html.contains(">Use &lt;div&gt;"), "{html}");
-            assert!(!html.contains(">Use \\"), "no backslash in the text: {html}");
+            assert!(
+                !html.contains(">Use \\"),
+                "no backslash in the text: {html}"
+            );
         }
     }
 
@@ -2513,7 +2932,8 @@ mod tests {
     /// would show a varying order).
     #[test]
     fn schema_constraint_attributes_are_in_a_fixed_order() {
-        const SCHEMA: &str = "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n";
+        const SCHEMA: &str =
+            "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n";
         let grammar = schema::parse_schema(SCHEMA).expect("schema parses");
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..64 {
@@ -2521,7 +2941,11 @@ mod tests {
             let mut graph = DataGraph::new();
             graph.insert(
                 "input",
-                Value::Record(crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial)),
+                Value::Record(crate::data::build_article_graph(
+                    &doc,
+                    &grammar,
+                    crate::data::OutputMode::Editorial,
+                )),
             );
             let html = render_for(
                 &graph,
@@ -2569,7 +2993,13 @@ mod tests {
             &mut store,
         );
         let summary_name = store.intern("summary");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: summary_name, part: paragraph });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: summary_name,
+                part: paragraph,
+            },
+        );
         NodeStoreGraphView { store, root }
     }
 
@@ -2603,7 +3033,11 @@ mod tests {
         use crate::data::OutputMode::Editorial;
         let legacy = paragraph_graph("A summary.", Editorial);
         let native = paragraph_store("A summary.");
-        let html = render_for(&legacy, r#"<a title="(ref input.summary)">x</a>"#, Editorial);
+        let html = render_for(
+            &legacy,
+            r#"<a title="(ref input.summary)">x</a>"#,
+            Editorial,
+        );
         assert_eq!(html, r#"<a title="A summary.">x</a>"#);
         let html = render_for(&native, r#"<a title="(ref summary)">x</a>"#, Editorial);
         assert_eq!(html, r#"<a title="A summary.">x</a>"#);
@@ -2617,7 +3051,11 @@ mod tests {
         let source = "A *summary* of \\<div> <!-- note -->";
         let legacy = paragraph_graph(source, Editorial);
         let native = paragraph_store(source);
-        let html = render_for(&legacy, r#"<a title="(ref input.summary)">x</a>"#, Editorial);
+        let html = render_for(
+            &legacy,
+            r#"<a title="(ref input.summary)">x</a>"#,
+            Editorial,
+        );
         assert_eq!(html, r#"<a title="A summary of &lt;div&gt;">x</a>"#);
         let html = render_for(&native, r#"<a title="(ref summary)">x</a>"#, Editorial);
         assert_eq!(html, r#"<a title="A summary of &lt;div&gt;">x</a>"#);
@@ -2659,7 +3097,10 @@ mod tests {
         assert!(
             matches!(graph.resolve(&["input", "cover", "alt"]), Some(Value::Text(s)) if s == "A cat")
         );
-        assert!(graph.resolve(&["input", "cover", "path"]).is_none(), "no `path` alias");
+        assert!(
+            graph.resolve(&["input", "cover", "path"]).is_none(),
+            "no `path` alias"
+        );
     }
 
     /// A template that reads the image's `src` renders it.
@@ -2707,12 +3148,22 @@ mod tests {
         let graph = records_graph();
         // A field alone, inserted as content, between two markers.
         let field = |path: &str| {
-            render_for(&graph, &format!(r#"<p>[<presemble:insert data="(ref {path})" as="b" />]</p>"#), Published)
+            render_for(
+                &graph,
+                &format!(r#"<p>[<presemble:insert data="(ref {path})" as="b" />]</p>"#),
+                Published,
+            )
         };
         let inside = |html: String| {
-            let start = html.find('>').and_then(|_| html.find("<b").map(|b| b + 2)).unwrap_or(0);
+            let start = html
+                .find('>')
+                .and_then(|_| html.find("<b").map(|b| b + 2))
+                .unwrap_or(0);
             let open = html[start..].find('>').map(|i| start + i + 1).unwrap_or(0);
-            let close = html[open..].find("</b>").map(|i| open + i).unwrap_or(html.len());
+            let close = html[open..]
+                .find("</b>")
+                .map(|i| open + i)
+                .unwrap_or(html.len());
             html[open..close].to_string()
         };
         assert_eq!(inside(field("input.author.href")), "/author/jo");
@@ -2720,7 +3171,11 @@ mod tests {
         assert_eq!(inside(field("input.cover.src")), "images/cat.jpg");
         assert_eq!(inside(field("input.cover.alt")), "A cat");
         let whole = |path: &str| {
-            render_for(&graph, &format!(r#"<presemble:insert data="(ref {path})" />"#), Published)
+            render_for(
+                &graph,
+                &format!(r#"<presemble:insert data="(ref {path})" />"#),
+                Published,
+            )
         };
         assert_eq!(
             whole("input.cover"),
@@ -2739,7 +3194,7 @@ mod tests {
     /// block, that is what it places.
     #[test]
     fn guide_examples_render_as_documented() {
-        use crate::registry::{extract_definitions, TemplateRegistry};
+        use crate::registry::{TemplateRegistry, extract_definitions};
         const GUIDE: &str = include_str!("../../../site/content/guide/user-guide.md");
 
         struct Site;
@@ -2784,8 +3239,14 @@ mod tests {
         );
         input.insert("author", record(("href", "/author/jo"), ("text", "Jo")));
         input.insert("cover", record(("src", "c.png"), ("alt", "A cat")));
-        input.insert("body", Value::Nodes(parse_template_xml("<p>Body</p>").unwrap().into()));
-        input.insert("post", Value::List(vec![post("One", "/post/one"), post("Two", "/post/two")]));
+        input.insert(
+            "body",
+            Value::Nodes(parse_template_xml("<p>Body</p>").unwrap().into()),
+        );
+        input.insert(
+            "post",
+            Value::List(vec![post("One", "/post/one"), post("Two", "/post/two")]),
+        );
         let mut graph = DataGraph::new();
         graph.insert("input", Value::Record(input));
 
@@ -2796,7 +3257,8 @@ mod tests {
                 crate::hiccup::parse_template_hiccup(src).expect("the example parses")
             };
             let (nodes, defs) = extract_definitions(nodes);
-            let ctx = RenderContext::with_local_defs(&Site, &defs, crate::data::OutputMode::Published);
+            let ctx =
+                RenderContext::with_local_defs(&Site, &defs, crate::data::OutputMode::Published);
             Ok(serialize_nodes(&transform(nodes, &graph, &ctx)?))
         };
 
@@ -2832,11 +3294,17 @@ mod tests {
             .iter()
             .filter(|(lang, text, _)| {
                 (lang == "html"
-                    && (text.contains("presemble:") || text.contains("<template ") || text.contains("(ref ")))
+                    && (text.contains("presemble:")
+                        || text.contains("<template ")
+                        || text.contains("(ref ")))
                     || lang == "clojure"
             })
             .collect();
-        assert!(examples.len() >= 20, "the guide has its template examples: {}", examples.len());
+        assert!(
+            examples.len() >= 20,
+            "the guide has its template examples: {}",
+            examples.len()
+        );
 
         let mut rendered = Vec::new();
         for (lang, text, output) in examples {
@@ -2847,22 +3315,38 @@ mod tests {
             rendered.push((text.as_str(), html));
         }
         let of = |needle: &str| -> Vec<&String> {
-            rendered.iter().filter(|(text, _)| text.contains(needle)).map(|(_, html)| html).collect()
+            rendered
+                .iter()
+                .filter(|(text, _)| text.contains(needle))
+                .map(|(_, html)| html)
+                .collect()
         };
 
         // The documented outputs: the output blocks above, and these.
         let read_more = of("Read more");
         assert!(read_more.len() >= 2, "the data-each examples");
         for html in read_more.iter().filter(|h| h.contains("post")) {
-            assert!(html.contains(r#"<a href="/post/one">Read more</a>"#), "{html}");
-            assert!(html.contains(r#"<a href="/post/two">Read more</a>"#), "{html}");
+            assert!(
+                html.contains(r#"<a href="/post/one">Read more</a>"#),
+                "{html}"
+            );
+            assert!(
+                html.contains(r#"<a href="/post/two">Read more</a>"#),
+                "{html}"
+            );
         }
         let draft = of("(draft)");
-        assert!(draft.iter().any(|h| h.trim() == r#"<a title="(draft)">Notes</a>"#), "{draft:?}");
+        assert!(
+            draft
+                .iter()
+                .any(|h| h.trim() == r#"<a title="(draft)">Notes</a>"#),
+            "{draft:?}"
+        );
         let link_as = of(r#"data="(ref input.author)" as="h3""#);
         let link_as = link_as.first().expect("the link example");
         assert!(
-            link_as.starts_with(r#"<a href="/author/jo"><h3"#) && link_as.trim_end().ends_with(">Jo</h3></a>"),
+            link_as.starts_with(r#"<a href="/author/jo"><h3"#)
+                && link_as.trim_end().ends_with(">Jo</h3></a>"),
             "{link_as}"
         );
         // An absent value is left out of an attribute.
@@ -2897,22 +3381,34 @@ mod tests {
         let img = render_for(&with_alt, LINES[0], Published);
         assert!(img.starts_with(r#"<img src="c.png" alt="A cat""#), "{img}");
         let caption = render_for(&with_alt, LINES[1], Published);
-        assert!(caption.contains("<figcaption") && caption.contains(">A cat</figcaption>"), "{caption}");
+        assert!(
+            caption.contains("<figcaption") && caption.contains(">A cat</figcaption>"),
+            "{caption}"
+        );
 
         let without_alt = page("![](c.png)");
         let img = render_for(&without_alt, LINES[0], Published);
         assert!(img.starts_with(r#"<img src="c.png""#), "{img}");
         let caption = render_for(&without_alt, LINES[1], Published);
-        assert!(!caption.contains("figcaption"), "no figcaption element: {caption}");
+        assert!(
+            !caption.contains("figcaption"),
+            "no figcaption element: {caption}"
+        );
     }
 
     /// Guard: inserting the whole image record renders the `<img>` it always did.
     #[test]
     fn whole_image_record_insert_renders_unchanged() {
         use crate::data::OutputMode::Published;
-        let html =
-            render_for(&cover_graph(), r#"<presemble:insert data="(ref input.cover)" />"#, Published);
-        assert!(html.contains(r#"<img src="images/cat.jpg" alt="A cat""#), "{html}");
+        let html = render_for(
+            &cover_graph(),
+            r#"<presemble:insert data="(ref input.cover)" />"#,
+            Published,
+        );
+        assert!(
+            html.contains(r#"<img src="images/cat.jpg" alt="A cat""#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -2981,8 +3477,14 @@ mod tests {
     fn paragraph_slot_has_no_stored_text_attribute() {
         // Legacy: a paragraph slot from build_article_graph.
         let graph = stored_text_graph("# Title\n\nA summary.\n");
-        let html = render_with(&graph, r#"<presemble:insert data="(ref summary)" as="p" />"#);
-        assert!(html.contains("A summary."), "paragraph should render: {html}");
+        let html = render_with(
+            &graph,
+            r#"<presemble:insert data="(ref summary)" as="p" />"#,
+        );
+        assert!(
+            html.contains("A summary."),
+            "paragraph should render: {html}"
+        );
         assert!(
             !html.contains("data-presemble-text"),
             "legacy paragraph slot must not carry stored text: {html}"
@@ -2997,11 +3499,23 @@ mod tests {
         let para_text = store.add_node(node_store::Node::Text("A summary.".into()));
         store.add_edge(para, node_store::Edge::Child(para_text));
         let summary_name = store.intern("summary");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: summary_name, part: para });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: summary_name,
+                part: para,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
-        let html = render_with(&graph, r#"<presemble:insert data="(ref summary)" as="p" />"#);
-        assert!(html.contains("A summary."), "paragraph should render: {html}");
+        let html = render_with(
+            &graph,
+            r#"<presemble:insert data="(ref summary)" as="p" />"#,
+        );
+        assert!(
+            html.contains("A summary."),
+            "paragraph should render: {html}"
+        );
         assert!(
             !html.contains("data-presemble-text"),
             "native paragraph slot must not carry stored text: {html}"
@@ -3032,9 +3546,18 @@ mod tests {
 
         assert!(html.contains("<h3"), "should render as h3: {html}");
         assert!(html.contains("Hello"), "should contain link text: {html}");
-        assert!(!html.contains("<a"), "should NOT render as anchor with (text ..): {html}");
-        assert!(!html.contains("href"), "should NOT have href with (text ..): {html}");
-        assert!(html.contains(r#"data-presemble-slot="link""#), "should have data-presemble-slot: {html}");
+        assert!(
+            !html.contains("<a"),
+            "should NOT render as anchor with (text ..): {html}"
+        );
+        assert!(
+            !html.contains("href"),
+            "should NOT have href with (text ..): {html}"
+        );
+        assert!(
+            html.contains(r#"data-presemble-slot="link""#),
+            "should have data-presemble-slot: {html}"
+        );
     }
 
     #[test]
@@ -3051,8 +3574,14 @@ mod tests {
         let html = serialize_nodes(&result);
 
         assert!(html.contains("<h1"), "should render as h1: {html}");
-        assert!(html.contains("My Title"), "should contain title text: {html}");
-        assert!(html.contains(r#"data-presemble-slot="title""#), "should have data-presemble-slot: {html}");
+        assert!(
+            html.contains("My Title"),
+            "should contain title text: {html}"
+        );
+        assert!(
+            html.contains(r#"data-presemble-slot="title""#),
+            "should have data-presemble-slot: {html}"
+        );
     }
 
     #[test]
@@ -3061,7 +3590,11 @@ mod tests {
         let mut graph = DataGraph::new();
         graph.insert(
             "body",
-            Value::Nodes(parse_template_xml("<p>Hello <strong>world</strong></p>").unwrap().into()),
+            Value::Nodes(
+                parse_template_xml("<p>Hello <strong>world</strong></p>")
+                    .unwrap()
+                    .into(),
+            ),
         );
 
         let src = r#"<presemble:insert data="(text body)" as="div" />"#;
@@ -3072,9 +3605,18 @@ mod tests {
         let html = serialize_nodes(&result);
 
         assert!(html.contains("<div"), "should render as div: {html}");
-        assert!(html.contains("Hello world"), "should contain stripped text: {html}");
-        assert!(!html.contains("<p>"), "should not contain p tag after stripping: {html}");
-        assert!(!html.contains("<strong>"), "should not contain strong tag after stripping: {html}");
+        assert!(
+            html.contains("Hello world"),
+            "should contain stripped text: {html}"
+        );
+        assert!(
+            !html.contains("<p>"),
+            "should not contain p tag after stripping: {html}"
+        );
+        assert!(
+            !html.contains("<strong>"),
+            "should not contain strong tag after stripping: {html}"
+        );
     }
 
     #[test]
@@ -3093,8 +3635,14 @@ mod tests {
         let html = serialize_nodes(&result);
 
         assert!(html.contains("<h3"), "should render as h3: {html}");
-        assert!(html.contains("Hello World"), "should contain link text: {html}");
-        assert!(!html.contains("<a"), "should NOT wrap in anchor with (text ..): {html}");
+        assert!(
+            html.contains("Hello World"),
+            "should contain link text: {html}"
+        );
+        assert!(
+            !html.contains("<a"),
+            "should NOT wrap in anchor with (text ..): {html}"
+        );
         assert!(
             html.contains(r#"data-presemble-source-slot="title""#),
             "should preserve source-slot attribute: {html}"
@@ -3115,7 +3663,10 @@ mod tests {
 
         assert!(result.is_err(), "unknown function should produce an error");
         if let Err(RenderError::Render(msg)) = result {
-            assert!(msg.contains("foo"), "error message should mention unknown function name: {msg}");
+            assert!(
+                msg.contains("foo"),
+                "error message should mention unknown function name: {msg}"
+            );
         }
     }
 
@@ -3129,7 +3680,10 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
 
-        assert!(result.is_empty(), "absent value under (text ..) should produce no output");
+        assert!(
+            result.is_empty(),
+            "absent value under (text ..) should produce no output"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -3167,7 +3721,10 @@ mod tests {
             r#"<presemble:insert data="(-> title text to_lower capitalize)" as="span" />"#,
         );
 
-        assert!(html.contains("Hello world"), "chain should produce Hello world: {html}");
+        assert!(
+            html.contains("Hello world"),
+            "chain should produce Hello world: {html}"
+        );
     }
 
     #[test]
@@ -3196,7 +3753,10 @@ mod tests {
             r#"<presemble:insert data="(-> link text to_upper)" as="span" />"#,
         );
 
-        assert!(html.contains("TITLE TEXT"), "thread on record should uppercase display text: {html}");
+        assert!(
+            html.contains("TITLE TEXT"),
+            "thread on record should uppercase display text: {html}"
+        );
         assert!(!html.contains("<a"), "should NOT render as anchor: {html}");
     }
 
@@ -3204,13 +3764,17 @@ mod tests {
     fn threaded_unknown_function_errors() {
         let mut graph = DataGraph::new();
         graph.insert("title", Value::Text("hello".to_string()));
-        let nodes = parse_template_xml(r#"<presemble:insert data="(-> title text unknown_fn)" />"#).unwrap();
+        let nodes = parse_template_xml(r#"<presemble:insert data="(-> title text unknown_fn)" />"#)
+            .unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx);
         assert!(result.is_err(), "unknown function in a thread should error");
         if let Err(RenderError::Render(msg)) = result {
-            assert!(msg.contains("unknown_fn"), "error should mention the function name: {msg}");
+            assert!(
+                msg.contains("unknown_fn"),
+                "error should mention the function name: {msg}"
+            );
         }
     }
 
@@ -3224,14 +3788,23 @@ mod tests {
             &graph,
             r#"<presemble:insert data="(truncate title)" as="span" />"#,
         );
-        assert!(html.contains("short text"), "truncate should pass through short text: {html}");
+        assert!(
+            html.contains("short text"),
+            "truncate should pass through short text: {html}"
+        );
 
         let html = render_text_expression(
             &graph,
             r#"<presemble:insert data="(truncate long)" as="span" />"#,
         );
-        assert!(html.contains('…'), "long string should end with ellipsis: {html}");
-        assert!(!html.contains(&"a".repeat(150)), "long string should be cut: {html}");
+        assert!(
+            html.contains('…'),
+            "long string should end with ellipsis: {html}"
+        );
+        assert!(
+            !html.contains(&"a".repeat(150)),
+            "long string should be cut: {html}"
+        );
     }
 
     #[test]
@@ -3275,7 +3848,12 @@ mod tests {
         fn with_binding(&self, _key: String, _value: Value) -> Box<dyn GraphView> {
             Box::new(DataGraph::new())
         }
-        fn with_node_binding(&self, key: String, id: node_store::NodeId, _store: &node_store::NodeStore) -> Option<Box<dyn GraphView + '_>> {
+        fn with_node_binding(
+            &self,
+            key: String,
+            id: node_store::NodeId,
+            _store: &node_store::NodeStore,
+        ) -> Option<Box<dyn GraphView + '_>> {
             // Create a new NodeStoreGraphView with the bound root
             // For data-each: the bound item becomes the new root, accessible under `key`
             // We need a multi-root view but can't import node_store_bridge here.
@@ -3288,7 +3866,10 @@ mod tests {
             }))
         }
         fn root_node(&self) -> Option<crate::graph_view::ResolvedNode<'_>> {
-            Some(crate::graph_view::ResolvedNode { id: self.root, store: &self.store })
+            Some(crate::graph_view::ResolvedNode {
+                id: self.root,
+                store: &self.store,
+            })
         }
         fn resolve_node(&self, path: &[&str]) -> Option<crate::graph_view::ResolvedNode<'_>> {
             // Walk ConsistsOf, Reference, and Attribute edges for each segment
@@ -3297,27 +3878,45 @@ mod tests {
                 let is_last = i == path.len() - 1;
                 // ConsistsOf
                 let parts = self.store.consists_of(current);
-                if let Some((_, id)) = parts.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
+                if let Some((_, id)) = parts
+                    .iter()
+                    .find(|(n, _)| self.store.resolve_name(*n) == *segment)
+                {
                     if is_last {
-                        return Some(crate::graph_view::ResolvedNode { id: *id, store: &self.store });
+                        return Some(crate::graph_view::ResolvedNode {
+                            id: *id,
+                            store: &self.store,
+                        });
                     }
                     current = *id;
                     continue;
                 }
                 // Reference edges
                 let refs = self.store.references(current);
-                if let Some((_, id)) = refs.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
+                if let Some((_, id)) = refs
+                    .iter()
+                    .find(|(n, _)| self.store.resolve_name(*n) == *segment)
+                {
                     if is_last {
-                        return Some(crate::graph_view::ResolvedNode { id: *id, store: &self.store });
+                        return Some(crate::graph_view::ResolvedNode {
+                            id: *id,
+                            store: &self.store,
+                        });
                     }
                     current = *id;
                     continue;
                 }
                 // Attribute edges
                 let attrs = self.store.attributes(current);
-                if let Some((_, id)) = attrs.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
+                if let Some((_, id)) = attrs
+                    .iter()
+                    .find(|(n, _)| self.store.resolve_name(*n) == *segment)
+                {
                     if is_last {
-                        return Some(crate::graph_view::ResolvedNode { id: *id, store: &self.store });
+                        return Some(crate::graph_view::ResolvedNode {
+                            id: *id,
+                            store: &self.store,
+                        });
                     }
                     current = *id;
                     continue;
@@ -3349,7 +3948,12 @@ mod tests {
         fn with_binding(&self, _key: String, _value: Value) -> Box<dyn GraphView> {
             Box::new(DataGraph::new())
         }
-        fn with_node_binding(&self, key: String, id: node_store::NodeId, _store: &node_store::NodeStore) -> Option<Box<dyn GraphView + '_>> {
+        fn with_node_binding(
+            &self,
+            key: String,
+            id: node_store::NodeId,
+            _store: &node_store::NodeStore,
+        ) -> Option<Box<dyn GraphView + '_>> {
             Some(Box::new(BoundNodeStoreGraphView {
                 store: self.store,
                 parent_root: self.parent_root,
@@ -3359,7 +3963,10 @@ mod tests {
         }
         fn root_node(&self) -> Option<crate::graph_view::ResolvedNode<'_>> {
             // Inside data-each the page is the item.
-            Some(crate::graph_view::ResolvedNode { id: self.bound_root, store: self.store })
+            Some(crate::graph_view::ResolvedNode {
+                id: self.bound_root,
+                store: self.store,
+            })
         }
         fn resolve_node(&self, path: &[&str]) -> Option<crate::graph_view::ResolvedNode<'_>> {
             match path {
@@ -3370,28 +3977,50 @@ mod tests {
                     for (i, segment) in rest.iter().enumerate() {
                         let is_last = i == rest.len() - 1;
                         let parts = self.store.consists_of(current);
-                        if let Some((_, id)) = parts.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
-                            if is_last { return Some(crate::graph_view::ResolvedNode { id: *id, store: self.store }); }
+                        if let Some((_, id)) = parts
+                            .iter()
+                            .find(|(n, _)| self.store.resolve_name(*n) == *segment)
+                        {
+                            if is_last {
+                                return Some(crate::graph_view::ResolvedNode {
+                                    id: *id,
+                                    store: self.store,
+                                });
+                            }
                             current = *id;
                             continue;
                         }
                         let refs = self.store.references(current);
-                        if let Some((_, id)) = refs.iter().find(|(n, _)| self.store.resolve_name(*n) == *segment) {
-                            if is_last { return Some(crate::graph_view::ResolvedNode { id: *id, store: self.store }); }
+                        if let Some((_, id)) = refs
+                            .iter()
+                            .find(|(n, _)| self.store.resolve_name(*n) == *segment)
+                        {
+                            if is_last {
+                                return Some(crate::graph_view::ResolvedNode {
+                                    id: *id,
+                                    store: self.store,
+                                });
+                            }
                             current = *id;
                             continue;
                         }
                         return None;
                     }
                     if rest.is_empty() {
-                        Some(crate::graph_view::ResolvedNode { id: self.bound_root, store: self.store })
+                        Some(crate::graph_view::ResolvedNode {
+                            id: self.bound_root,
+                            store: self.store,
+                        })
                     } else {
                         None
                     }
                 }
                 _ => {
                     // Delegate to parent root
-                    let view = NodeStoreGraphView { store: self.store.clone(), root: self.parent_root };
+                    let view = NodeStoreGraphView {
+                        store: self.store.clone(),
+                        root: self.parent_root,
+                    };
                     // Can't delegate because NodeStoreGraphView owns the store.
                     // For tests, just return None for parent lookups.
                     let _ = view;
@@ -3408,7 +4037,13 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let title_name = store.intern("title");
         let title_val = store.add_node(node_store::Node::Text("Native Title".into()));
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: title_val });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: title_name,
+                part: title_val,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let src = r#"<presemble:insert data="(ref title)" as="h1" />"#;
@@ -3417,7 +4052,10 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert_eq!(html, r#"<h1 class="title" data-presemble-slot="title" data-presemble-file="">Native Title</h1>"#);
+        assert_eq!(
+            html,
+            r#"<h1 class="title" data-presemble-slot="title" data-presemble-file="">Native Title</h1>"#
+        );
     }
 
     #[test]
@@ -3427,7 +4065,13 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let count_name = store.intern("count");
         let count_val = store.add_node(node_store::Node::Integer(42));
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: count_name, part: count_val });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: count_name,
+                part: count_val,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let src = r#"<presemble:insert data="(ref count)" as="span" />"#;
@@ -3447,7 +4091,13 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let field_name = store.intern("empty");
         let nil_val = store.add_node(node_store::Node::Nil);
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: field_name, part: nil_val });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: field_name,
+                part: nil_val,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let src = r#"<presemble:insert data="(ref empty)" />"#;
@@ -3469,14 +4119,32 @@ mod tests {
 
         let href_name = store.intern("href");
         let href_val = store.add_node(node_store::Node::Text("/about".into()));
-        store.add_edge(link, node_store::Edge::Attribute { name: href_name, value: href_val });
+        store.add_edge(
+            link,
+            node_store::Edge::Attribute {
+                name: href_name,
+                value: href_val,
+            },
+        );
 
         let text_name = store.intern("text");
         let text_val = store.add_node(node_store::Node::Text("About Us".into()));
-        store.add_edge(link, node_store::Edge::Attribute { name: text_name, value: text_val });
+        store.add_edge(
+            link,
+            node_store::Edge::Attribute {
+                name: text_name,
+                value: text_val,
+            },
+        );
 
         let nav_link_name = store.intern("nav_link");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: nav_link_name, part: link });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: nav_link_name,
+                part: link,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let src = r#"<presemble:insert data="(ref nav_link)" />"#;
@@ -3485,7 +4153,10 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert!(html.contains(r#"href="/about""#), "link should have href: {html}");
+        assert!(
+            html.contains(r#"href="/about""#),
+            "link should have href: {html}"
+        );
         assert!(html.contains("About Us"), "link should have text: {html}");
         assert!(html.contains("<a"), "should render as anchor: {html}");
     }
@@ -3503,7 +4174,13 @@ mod tests {
         store.add_edge(collection, node_store::Edge::Child(item2));
 
         let items_name = store.intern("items");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: items_name, part: collection });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: items_name,
+                part: collection,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let src = r#"<presemble:insert data="(ref items)" as="li" />"#;
@@ -3514,7 +4191,11 @@ mod tests {
         let html = serialize_nodes(&result);
         assert!(html.contains("Item 1"), "first item should appear: {html}");
         assert!(html.contains("Item 2"), "second item should appear: {html}");
-        assert_eq!(html.matches("<li").count(), 2, "should produce 2 li elements: {html}");
+        assert_eq!(
+            html.matches("<li").count(),
+            2,
+            "should produce 2 li elements: {html}"
+        );
     }
 
     #[test]
@@ -3529,7 +4210,13 @@ mod tests {
         store.add_edge(heading, node_store::Edge::Child(heading_text));
 
         let title_name = store.intern("title");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: title_name,
+                part: heading,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let src = r#"<presemble:insert data="(ref title)" as="h2" />"#;
@@ -3538,7 +4225,10 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let result = transform(nodes, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
-        assert!(html.contains("My Heading"), "heading text should be extracted: {html}");
+        assert!(
+            html.contains("My Heading"),
+            "heading text should be extracted: {html}"
+        );
         assert!(html.contains("<h2"), "should use h2 tag: {html}");
     }
 
@@ -3549,7 +4239,13 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let title_name = store.intern("tagline");
         let title_val = store.add_node(node_store::Node::Text("Fast path text".into()));
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: title_val });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: title_name,
+                part: title_val,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let html = render_with(&graph, r#"<a title="(ref tagline)">x</a>"#);
@@ -3574,7 +4270,13 @@ mod tests {
         store.add_edge(body, node_store::Edge::Child(para));
 
         let body_co_name = store.intern("body");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: body_co_name,
+                part: body,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let src = r#"<presemble:insert data="(ref body)" />"#;
@@ -3605,13 +4307,25 @@ mod tests {
         let h1 = store.add_node(node_store::Node::Element(heading_name));
         let t1 = store.add_node(node_store::Node::Text("Feature Alpha".into()));
         store.add_edge(h1, node_store::Edge::Child(t1));
-        store.add_edge(feature1, node_store::Edge::ConsistsOf { name: title_name, part: h1 });
+        store.add_edge(
+            feature1,
+            node_store::Edge::ConsistsOf {
+                name: title_name,
+                part: h1,
+            },
+        );
 
         let feature2 = store.add_node(node_store::Node::Element(sem_name));
         let h2 = store.add_node(node_store::Node::Element(heading_name));
         let t2 = store.add_node(node_store::Node::Text("Feature Beta".into()));
         store.add_edge(h2, node_store::Edge::Child(t2));
-        store.add_edge(feature2, node_store::Edge::ConsistsOf { name: title_name, part: h2 });
+        store.add_edge(
+            feature2,
+            node_store::Edge::ConsistsOf {
+                name: title_name,
+                part: h2,
+            },
+        );
 
         // Create a collection of these features
         let collection = store.add_node(node_store::Node::Collection);
@@ -3621,9 +4335,18 @@ mod tests {
         // Create the index page semantic root with highlight → collection
         let index_root = store.add_node(node_store::Node::Element(sem_name));
         let highlight_name = store.intern("highlight");
-        store.add_edge(index_root, node_store::Edge::ConsistsOf { name: highlight_name, part: collection });
+        store.add_edge(
+            index_root,
+            node_store::Edge::ConsistsOf {
+                name: highlight_name,
+                part: collection,
+            },
+        );
 
-        let graph = NodeStoreGraphView { store, root: index_root };
+        let graph = NodeStoreGraphView {
+            store,
+            root: index_root,
+        };
 
         let src = r#"<ul><template data-each="(ref highlight)"><li><presemble:insert data="(ref item.title)" as="h3" /></li></template></ul>"#;
         let nodes = parse_template_xml(src).unwrap();
@@ -3663,15 +4386,23 @@ mod tests {
         let reg = TwoTemplateRegistry;
         let ctx = RenderContext::editorial(&reg);
 
-        let juxt_node = parse_template_xml(r#"<presemble:insert data="((juxt header footer) input)" />"#)
-            .unwrap();
+        let juxt_node =
+            parse_template_xml(r#"<presemble:insert data="((juxt header footer) input)" />"#)
+                .unwrap();
 
         let result = transform(juxt_node, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
         // Both outputs should appear in order
-        let header_pos = html.find("<header>HEADER</header>").expect("header should appear");
-        let footer_pos = html.find("<footer>FOOTER</footer>").expect("footer should appear");
-        assert!(header_pos < footer_pos, "header should come before footer in: {html}");
+        let header_pos = html
+            .find("<header>HEADER</header>")
+            .expect("header should appear");
+        let footer_pos = html
+            .find("<footer>FOOTER</footer>")
+            .expect("footer should appear");
+        assert!(
+            header_pos < footer_pos,
+            "header should come before footer in: {html}"
+        );
     }
 
     #[test]
@@ -3684,8 +4415,18 @@ mod tests {
         impl crate::registry::TemplateRegistry for DataReadRegistry {
             fn resolve(&self, name: &str) -> Option<Vec<Node>> {
                 match name {
-                    "part1" => Some(parse_template_xml(r#"<span><presemble:insert data="(ref greeting)" /></span>"#).unwrap()),
-                    "part2" => Some(parse_template_xml(r#"<em><presemble:insert data="(ref greeting)" /></em>"#).unwrap()),
+                    "part1" => Some(
+                        parse_template_xml(
+                            r#"<span><presemble:insert data="(ref greeting)" /></span>"#,
+                        )
+                        .unwrap(),
+                    ),
+                    "part2" => Some(
+                        parse_template_xml(
+                            r#"<em><presemble:insert data="(ref greeting)" /></em>"#,
+                        )
+                        .unwrap(),
+                    ),
                     _ => None,
                 }
             }
@@ -3694,19 +4435,30 @@ mod tests {
         let reg = DataReadRegistry;
         let ctx = RenderContext::editorial(&reg);
 
-        let juxt_node = parse_template_xml(r#"<presemble:insert data="((juxt part1 part2) input)" />"#)
-            .unwrap();
+        let juxt_node =
+            parse_template_xml(r#"<presemble:insert data="((juxt part1 part2) input)" />"#)
+                .unwrap();
 
         let result = transform(juxt_node, &graph, &ctx).unwrap();
         let html = serialize_nodes(&result);
 
         // Both children should have seen "greeting" = "Hello"
-        assert_eq!(html.matches("Hello").count(), 2, "both children should see 'Hello': {html}");
-        assert!(html.contains("<em"), "second template output (em) should appear: {html}");
+        assert_eq!(
+            html.matches("Hello").count(),
+            2,
+            "both children should see 'Hello': {html}"
+        );
+        assert!(
+            html.contains("<em"),
+            "second template output (em) should appear: {html}"
+        );
         // The output should contain both template wrappers
         let part1_pos = html.find("<span").expect("span from part1 should appear");
         let part2_pos = html.find("<em").expect("em from part2 should appear");
-        assert!(part1_pos < part2_pos, "part1 output should come before part2: {html}");
+        assert!(
+            part1_pos < part2_pos,
+            "part1 output should come before part2: {html}"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -3720,14 +4472,21 @@ mod tests {
         let result = attach_schema_included_by_attr(nodes, pairs);
         let html = serialize_nodes(&result);
         assert!(
-            html.contains(r#"data-presemble-schema-included-by="[{&quot;schema&quot;:&quot;post&quot;"#)
-                || html.contains("data-presemble-schema-included-by="),
+            html.contains(
+                r#"data-presemble-schema-included-by="[{&quot;schema&quot;:&quot;post&quot;"#
+            ) || html.contains("data-presemble-schema-included-by="),
             "expected data-presemble-schema-included-by attribute: {html}"
         );
         // Also verify the raw attribute is on the root element
         if let Some(Node::Element(el)) = result.first() {
-            let has_attr = el.attrs.iter().any(|(k, _)| k == "data-presemble-schema-included-by");
-            assert!(has_attr, "root element should have data-presemble-schema-included-by attribute");
+            let has_attr = el
+                .attrs
+                .iter()
+                .any(|(k, _)| k == "data-presemble-schema-included-by");
+            assert!(
+                has_attr,
+                "root element should have data-presemble-schema-included-by attribute"
+            );
         } else {
             panic!("expected root element");
         }
@@ -3738,8 +4497,14 @@ mod tests {
         let nodes = parse_template_xml(r#"<div></div>"#).unwrap();
         let result = attach_schema_included_by_attr(nodes, &[]);
         if let Some(Node::Element(el)) = result.first() {
-            let attr = el.attrs.iter().find(|(k, _)| k == "data-presemble-schema-included-by");
-            assert!(attr.is_some(), "attribute should be present even for empty list");
+            let attr = el
+                .attrs
+                .iter()
+                .find(|(k, _)| k == "data-presemble-schema-included-by");
+            assert!(
+                attr.is_some(),
+                "attribute should be present even for empty list"
+            );
             if let Some((_, Form::Str(val))) = attr {
                 assert_eq!(val, "[]", "empty list should produce '[]'");
             }
@@ -3794,7 +4559,10 @@ mod tests {
     /// built by `render_body_nodes`, inserted by `transform`.
     fn legacy_body_html(elements: &im::Vector<schema::Spanned<content::ContentElement>>) -> String {
         let mut graph = DataGraph::new();
-        graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(BODY_FILE.to_string()));
+        graph.insert(
+            crate::constants::KEY_PRESEMBLE_FILE,
+            Value::Text(BODY_FILE.to_string()),
+        );
         graph.insert(
             "body",
             Value::Nodes(crate::body_nodes::render_body_nodes(elements, true).into()),
@@ -3820,7 +4588,12 @@ mod tests {
             let t = store.add_node(node_store::Node::Text(text.into()));
             store.add_edge(parent, node_store::Edge::Child(t));
         }
-        fn text_attr(store: &mut node_store::NodeStore, host: node_store::NodeId, name: &str, v: &str) {
+        fn text_attr(
+            store: &mut node_store::NodeStore,
+            host: node_store::NodeId,
+            name: &str,
+            v: &str,
+        ) {
             let name = store.intern(name);
             let value = store.add_node(node_store::Node::Text(v.into()));
             store.add_edge(host, node_store::Edge::Attribute { name, value });
@@ -3858,13 +4631,25 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let file_name = store.intern("file");
         let file_val = store.add_node(node_store::Node::Text(BODY_FILE.into()));
-        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        store.add_edge(
+            root,
+            node_store::Edge::Attribute {
+                name: file_name,
+                value: file_val,
+            },
+        );
         let body_name = store.intern("body");
         let body = store.add_node(node_store::Node::Element(body_name));
         for el in elements {
             add_native_block(&mut store, body, el);
         }
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_name, part: body });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: body_name,
+                part: body,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
@@ -3877,7 +4662,9 @@ mod tests {
         let line = |cells: &[&str]| format!("| {} |", cells.join(" | "));
         let mut md = vec![line(headers), line(&vec!["---"; headers.len()])];
         md.extend(rows.iter().map(|r| line(r)));
-        content::parse_document(&md.join("\n")).unwrap().elements[0].node.clone()
+        content::parse_document(&md.join("\n")).unwrap().elements[0]
+            .node
+            .clone()
     }
 
     /// Every block kind, including the ones whose output the two paths used to
@@ -3888,18 +4675,42 @@ mod tests {
             C::heading_from_markdown(schema::HeadingLevel::new(3).unwrap(), "Head *em* <b>x</b>"),
             C::paragraph_from_markdown("a <script>x</script> **b** `c<d` [l](/a \"t\")"),
             C::Separator,
-            C::HtmlBlock { source: "<div>secret</div>".to_string() },
+            C::HtmlBlock {
+                source: "<div>secret</div>".to_string(),
+            },
             C::lone_link("A link", "/a?x=1&y=2"),
             C::lone_image("An image", "/i.png"),
             C::lone_image("", "/j.png"),
             table_of(&["`a\\|b`", "**H**"], &[&["x", "<i>y</i>"], &["-", ""]]),
             table_of(&["only"], &[]),
-            content::parse_document("- one\n- **two**\n").unwrap().elements[0].node.clone(),
-            content::parse_document("3. x\n\n4. *y*\n").unwrap().elements[0].node.clone(),
-            content::parse_document("- a\n  - b\n  > q\n\n  c\n").unwrap().elements[0].node.clone(),
-            content::parse_document("> quoted *x*\n> more\n").unwrap().elements[0].node.clone(),
-            C::CodeBlock { language: Some("rust".to_string()), code: "fn x() { 1 < 2 }\n".to_string() },
-            C::CodeBlock { language: None, code: "plain\n".to_string() },
+            content::parse_document("- one\n- **two**\n")
+                .unwrap()
+                .elements[0]
+                .node
+                .clone(),
+            content::parse_document("3. x\n\n4. *y*\n")
+                .unwrap()
+                .elements[0]
+                .node
+                .clone(),
+            content::parse_document("- a\n  - b\n  > q\n\n  c\n")
+                .unwrap()
+                .elements[0]
+                .node
+                .clone(),
+            content::parse_document("> quoted *x*\n> more\n")
+                .unwrap()
+                .elements[0]
+                .node
+                .clone(),
+            C::CodeBlock {
+                language: Some("rust".to_string()),
+                code: "fn x() { 1 < 2 }\n".to_string(),
+            },
+            C::CodeBlock {
+                language: None,
+                code: "plain\n".to_string(),
+            },
             C::LinkExpression {
                 text: LinkText::Static("label".to_string()),
                 target: LinkTarget::PathRef("post".to_string()),
@@ -3914,15 +4725,28 @@ mod tests {
         let spanned: im::Vector<_> = elements
             .iter()
             .cloned()
-            .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+            .map(|node| schema::Spanned {
+                node,
+                span: schema::Span { start: 0, end: 0 },
+            })
             .collect();
         let legacy = legacy_body_html(&spanned);
         let native = native_body_html(&elements);
         use crate::markdown_nodes::tests::normalise_html;
-        assert_eq!(normalise_html(&legacy), normalise_html(&native), "legacy: {legacy}\nnative: {native}");
+        assert_eq!(
+            normalise_html(&legacy),
+            normalise_html(&native),
+            "legacy: {legacy}\nnative: {native}"
+        );
         // Both carry the file on every slot element, and nothing for the link expression.
-        assert!(legacy.contains(r#"data-presemble-file="content/page.md""#), "{legacy}");
-        assert!(!legacy.contains("label") && !native.contains("label"), "{legacy}\n{native}");
+        assert!(
+            legacy.contains(r#"data-presemble-file="content/page.md""#),
+            "{legacy}"
+        );
+        assert!(
+            !legacy.contains("label") && !native.contains("label"),
+            "{legacy}\n{native}"
+        );
     }
 
     #[test]
@@ -3939,7 +4763,9 @@ mod tests {
                 schema::HeadingLevel::new(2).unwrap(),
                 "Section",
             )),
-            mk_spanned(content::ContentElement::paragraph_from_markdown("A paragraph.")),
+            mk_spanned(content::ContentElement::paragraph_from_markdown(
+                "A paragraph.",
+            )),
             mk_spanned(content::ContentElement::CodeBlock {
                 language: Some("rust".to_string()),
                 code: "fn main() {}\n".to_string(),
@@ -3955,7 +4781,13 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let file_name = store.intern("file");
         let file_val = store.add_node(node_store::Node::Text("content/page.md".into()));
-        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        store.add_edge(
+            root,
+            node_store::Edge::Attribute {
+                name: file_name,
+                value: file_val,
+            },
+        );
 
         let body_name = store.intern("body");
         let body = store.add_node(node_store::Node::Element(body_name));
@@ -3965,7 +4797,13 @@ mod tests {
         let heading = store.add_node(node_store::Node::Element(heading_name));
         let level_name = store.intern("level");
         let level_val = store.add_node(node_store::Node::Integer(2));
-        store.add_edge(heading, node_store::Edge::Attribute { name: level_name, value: level_val });
+        store.add_edge(
+            heading,
+            node_store::Edge::Attribute {
+                name: level_name,
+                value: level_val,
+            },
+        );
         let heading_text = store.add_node(node_store::Node::Text("Section".into()));
         store.add_edge(heading, node_store::Edge::Child(heading_text));
         store.add_edge(body, node_store::Edge::Child(heading));
@@ -3982,13 +4820,25 @@ mod tests {
         let cb = store.add_node(node_store::Node::Element(cb_name));
         let lang_name = store.intern("language");
         let lang_val = store.add_node(node_store::Node::Text("rust".into()));
-        store.add_edge(cb, node_store::Edge::Attribute { name: lang_name, value: lang_val });
+        store.add_edge(
+            cb,
+            node_store::Edge::Attribute {
+                name: lang_name,
+                value: lang_val,
+            },
+        );
         let code_text = store.add_node(node_store::Node::Text("fn main() {}\n".into()));
         store.add_edge(cb, node_store::Edge::Child(code_text));
         store.add_edge(body, node_store::Edge::Child(cb));
 
         let body_co_name = store.intern("body");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: body_co_name,
+                part: body,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let src = r#"<presemble:insert data="(ref body)" />"#;
@@ -4010,7 +4860,9 @@ mod tests {
 
         // Both paths must emit data-presemble-slot="body" on every body element
         let data_slot_count = data_html.matches("data-presemble-slot=\"body\"").count();
-        let transformer_slot_count = transformer_html.matches("data-presemble-slot=\"body\"").count();
+        let transformer_slot_count = transformer_html
+            .matches("data-presemble-slot=\"body\"")
+            .count();
         assert_eq!(
             data_slot_count, 3,
             "data.rs path: expected 3 body-slot markers; got {data_slot_count} in: {data_html}"
@@ -4021,13 +4873,31 @@ mod tests {
         );
 
         // Both must contain kind-marker tags
-        assert!(data_html.contains("<h2"), "data.rs path: expected <h2 tag; got: {data_html}");
-        assert!(data_html.contains("<p"), "data.rs path: expected <p tag; got: {data_html}");
-        assert!(data_html.contains("<pre"), "data.rs path: expected <pre tag; got: {data_html}");
+        assert!(
+            data_html.contains("<h2"),
+            "data.rs path: expected <h2 tag; got: {data_html}"
+        );
+        assert!(
+            data_html.contains("<p"),
+            "data.rs path: expected <p tag; got: {data_html}"
+        );
+        assert!(
+            data_html.contains("<pre"),
+            "data.rs path: expected <pre tag; got: {data_html}"
+        );
 
-        assert!(transformer_html.contains("<h2"), "transformer.rs path: expected <h2 tag; got: {transformer_html}");
-        assert!(transformer_html.contains("<p"), "transformer.rs path: expected <p tag; got: {transformer_html}");
-        assert!(transformer_html.contains("<pre"), "transformer.rs path: expected <pre tag; got: {transformer_html}");
+        assert!(
+            transformer_html.contains("<h2"),
+            "transformer.rs path: expected <h2 tag; got: {transformer_html}"
+        );
+        assert!(
+            transformer_html.contains("<p"),
+            "transformer.rs path: expected <p tag; got: {transformer_html}"
+        );
+        assert!(
+            transformer_html.contains("<pre"),
+            "transformer.rs path: expected <pre tag; got: {transformer_html}"
+        );
 
         // TODO(post-Phase-C): assert data-presemble-md parity once transformer.rs emits it
 
@@ -4070,7 +4940,10 @@ mod tests {
             html.contains("data-presemble-md=\"## Section"),
             "block heading keeps its markers: {html}"
         );
-        assert!(!html.contains(r#"data-presemble-md="""#), "no empty md attr: {html}");
+        assert!(
+            !html.contains(r#"data-presemble-md="""#),
+            "no empty md attr: {html}"
+        );
     }
 
     /// A column's alignment renders on its `<th>` and `<td>` cells through
@@ -4078,7 +4951,9 @@ mod tests {
     #[test]
     fn aligned_column_renders_its_alignment() {
         let md = "| a | b | c |\n|:--|--:|---|\n| 1 | 2 | 3 |\n";
-        let table = content::parse_document(md).unwrap().elements[0].node.clone();
+        let table = content::parse_document(md).unwrap().elements[0]
+            .node
+            .clone();
         let spanned: im::Vector<_> = im::vector![schema::Spanned {
             node: table.clone(),
             span: schema::Span { start: 0, end: 0 },
@@ -4109,11 +4984,17 @@ mod tests {
         let spanned: im::Vector<_> = elements
             .iter()
             .cloned()
-            .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+            .map(|node| schema::Spanned {
+                node,
+                span: schema::Span { start: 0, end: 0 },
+            })
             .collect();
         for html in [native_body_html(&elements), legacy_body_html(&spanned)] {
             assert_eq!(html.matches("data-presemble-md=").count(), 2, "{html}");
-            assert!(html.contains("data-presemble-md=\"![a](/i.png)\""), "{html}");
+            assert!(
+                html.contains("data-presemble-md=\"![a](/i.png)\""),
+                "{html}"
+            );
         }
     }
 
@@ -4127,7 +5008,10 @@ mod tests {
         let spanned: im::Vector<_> = elements
             .iter()
             .cloned()
-            .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+            .map(|node| schema::Spanned {
+                node,
+                span: schema::Span { start: 0, end: 0 },
+            })
             .collect();
         let count = |html: &str| html.matches("data-presemble-md=").count();
         let (legacy, native) = (legacy_body_html(&spanned), native_body_html(&elements));
@@ -4154,9 +5038,18 @@ mod tests {
         let para_text = store.add_node(node_store::Node::Text("A summary.".into()));
         store.add_edge(para, node_store::Edge::Child(para_text));
         let summary_name = store.intern("summary");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: summary_name, part: para });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: summary_name,
+                part: para,
+            },
+        );
         let graph = NodeStoreGraphView { store, root };
-        let html = render_with(&graph, r#"<presemble:insert data="(ref summary)" as="p" />"#);
+        let html = render_with(
+            &graph,
+            r#"<presemble:insert data="(ref summary)" as="p" />"#,
+        );
         assert!(html.contains(&want), "native: {html}");
     }
 
@@ -4245,7 +5138,10 @@ mod tests {
             Published,
         );
         for html in [legacy, native] {
-            assert!(html.starts_with("<h1 ") && html.ends_with("></h1>"), "{html}");
+            assert!(
+                html.starts_with("<h1 ") && html.ends_with("></h1>"),
+                "{html}"
+            );
         }
     }
 
@@ -4263,7 +5159,10 @@ mod tests {
         let native = native_body_html(&[el]);
         for html in [legacy, native] {
             assert!(html.contains(">1. Intro</h2>"), "{html}");
-            assert!(!html.contains("<ol") && !html.contains("<li"), "no list: {html}");
+            assert!(
+                !html.contains("<ol") && !html.contains("<li"),
+                "no list: {html}"
+            );
         }
     }
 
@@ -4289,7 +5188,13 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let file_name = store.intern("file");
         let file_val = store.add_node(node_store::Node::Text(ADDRESS_FILE.into()));
-        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        store.add_edge(
+            root,
+            node_store::Edge::Attribute {
+                name: file_name,
+                value: file_val,
+            },
+        );
         let preamble_name = store.intern("preamble");
         let preamble = store.add_node(node_store::Node::Element(preamble_name));
         store.add_edge(root, node_store::Edge::Child(preamble));
@@ -4297,7 +5202,13 @@ mod tests {
         let slot = store.add_node(node_store::Node::Element(slot_name));
         let name_key = store.intern("name");
         let name_val = store.add_node(node_store::Node::Text("title".into()));
-        store.add_edge(slot, node_store::Edge::Attribute { name: name_key, value: name_val });
+        store.add_edge(
+            slot,
+            node_store::Edge::Attribute {
+                name: name_key,
+                value: name_val,
+            },
+        );
         store.add_edge(preamble, node_store::Edge::Child(slot));
         let heading = content_store::block_to_store(&heading_el(1, "_x_"), &mut store);
         store.add_edge(slot, node_store::Edge::Child(heading));
@@ -4308,7 +5219,13 @@ mod tests {
             let val = store.add_node(node_store::Node::Text(value.into()));
             store.add_edge(link, node_store::Edge::Attribute { name, value: val });
         }
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: link_name, part: link });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: link_name,
+                part: link,
+            },
+        );
         let native = render_for(
             &NodeStoreGraphView { store, root },
             r#"<presemble:insert data="(ref link)" />"#,
@@ -4366,7 +5283,10 @@ mod tests {
         let doc = content::parse_and_assign(ADDRESS_CONTENT, &grammar).expect("content parses");
         let mut graph =
             crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial);
-        graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
+        graph.insert(
+            crate::constants::KEY_PRESEMBLE_FILE,
+            Value::Text(ADDRESS_FILE.to_string()),
+        );
         let html = render_with(
             &graph,
             r#"<presemble:insert data="(ref title)" as="h1" /><presemble:insert data="(ref summary)" as="p" /><presemble:insert data="(ref body)" />"#,
@@ -4387,7 +5307,10 @@ mod tests {
         let file_free = |a: String| a.replace("content/post/x.md", BODY_FILE);
         assert_eq!(
             attr_values(&native, "data-presemble-address"),
-            expected_body_addresses().into_iter().map(file_free).collect::<Vec<_>>(),
+            expected_body_addresses()
+                .into_iter()
+                .map(file_free)
+                .collect::<Vec<_>>(),
             "{native}"
         );
 
@@ -4396,13 +5319,22 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let file_name = store.intern("file");
         let file_val = store.add_node(node_store::Node::Text(ADDRESS_FILE.into()));
-        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        store.add_edge(
+            root,
+            node_store::Edge::Attribute {
+                name: file_name,
+                value: file_val,
+            },
+        );
         // The document shape: `preamble > slot(name) > block`, and the page
         // reaches each block through a `ConsistsOf` of the slot's name.
         let preamble_name = store.intern("preamble");
         let preamble = store.add_node(node_store::Node::Element(preamble_name));
         store.add_edge(root, node_store::Edge::Child(preamble));
-        for (slot, kind, text) in [("title", "heading", "My *Title*"), ("summary", "paragraph", "A summary.")] {
+        for (slot, kind, text) in [
+            ("title", "heading", "My *Title*"),
+            ("summary", "paragraph", "A summary."),
+        ] {
             let el = if kind == "heading" {
                 content_store::block_to_store(
                     &content::ContentElement::heading_from_markdown(
@@ -4422,11 +5354,23 @@ mod tests {
             let slot_node = store.add_node(node_store::Node::Element(slot_element));
             let name_key = store.intern("name");
             let name_val = store.add_node(node_store::Node::Text(slot.into()));
-            store.add_edge(slot_node, node_store::Edge::Attribute { name: name_key, value: name_val });
+            store.add_edge(
+                slot_node,
+                node_store::Edge::Attribute {
+                    name: name_key,
+                    value: name_val,
+                },
+            );
             store.add_edge(preamble, node_store::Edge::Child(slot_node));
             store.add_edge(slot_node, node_store::Edge::Child(el));
             let slot_name = store.intern(slot);
-            store.add_edge(root, node_store::Edge::ConsistsOf { name: slot_name, part: el });
+            store.add_edge(
+                root,
+                node_store::Edge::ConsistsOf {
+                    name: slot_name,
+                    part: el,
+                },
+            );
         }
         let graph = NodeStoreGraphView { store, root };
         let html = render_with(
@@ -4452,15 +5396,24 @@ mod tests {
         // Item graphs as the site builder makes them: one per document.
         let grammar = schema::parse_schema(ADDRESS_SCHEMA).expect("schema parses");
         let mut items = Vec::new();
-        for (file, title) in [("content/post/a.md", "Alpha"), ("content/post/b.md", "Beta")] {
+        for (file, title) in [
+            ("content/post/a.md", "Alpha"),
+            ("content/post/b.md", "Beta"),
+        ] {
             let doc = content::parse_and_assign(
                 &format!("# {title}\n\nSummary of {title}.\n\n----\n\nBody.\n"),
                 &grammar,
             )
             .expect("content parses");
-            let mut item =
-                crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial);
-            item.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(file.to_string()));
+            let mut item = crate::data::build_article_graph(
+                &doc,
+                &grammar,
+                crate::data::OutputMode::Editorial,
+            );
+            item.insert(
+                crate::constants::KEY_PRESEMBLE_FILE,
+                Value::Text(file.to_string()),
+            );
             let link = crate::data::synthesize_link(title, "/x", crate::data::title_editor(&item));
             item.insert("link", Value::Record(link));
             items.push(Value::Record(item));
@@ -4521,19 +5474,37 @@ mod tests {
         let root = element(&mut store, "semantic-content");
         text_attr(&mut store, root, "file", ADDRESS_FILE);
         let document_edge = store.intern("_document");
-        store.add_edge(root, node_store::Edge::Derived { name: document_edge, target: document });
+        store.add_edge(
+            root,
+            node_store::Edge::Derived {
+                name: document_edge,
+                target: document,
+            },
+        );
 
         if with_title {
             let title_slot = slot(&mut store, "title");
             let heading = element(&mut store, "heading");
             let level_name = store.intern("level");
             let level = store.add_node(node_store::Node::Integer(1));
-            store.add_edge(heading, node_store::Edge::Attribute { name: level_name, value: level });
+            store.add_edge(
+                heading,
+                node_store::Edge::Attribute {
+                    name: level_name,
+                    value: level,
+                },
+            );
             let source = store.add_node(node_store::Node::Text("A title".into()));
             store.add_edge(heading, node_store::Edge::Child(source));
             store.add_edge(title_slot, node_store::Edge::Child(heading));
             let title_name = store.intern("title");
-            store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+            store.add_edge(
+                root,
+                node_store::Edge::ConsistsOf {
+                    name: title_name,
+                    part: heading,
+                },
+            );
         }
 
         let author_slot = slot(&mut store, "author");
@@ -4552,18 +5523,36 @@ mod tests {
             text_attr(&mut store, page_link, "href", href);
             text_attr(&mut store, page_link, "text", &format!("Page of {text}"));
             let link_name = store.intern("link");
-            store.add_edge(target, node_store::Edge::ConsistsOf { name: link_name, part: page_link });
+            store.add_edge(
+                target,
+                node_store::Edge::ConsistsOf {
+                    name: link_name,
+                    part: page_link,
+                },
+            );
             targets.push(target);
         }
         let author_name = store.intern("author");
         if let [target] = targets[..] {
-            store.add_edge(root, node_store::Edge::Reference { name: author_name, target });
+            store.add_edge(
+                root,
+                node_store::Edge::Reference {
+                    name: author_name,
+                    target,
+                },
+            );
         } else {
             let collection = store.add_node(node_store::Node::Collection);
             for target in targets {
                 store.add_edge(collection, node_store::Edge::Child(target));
             }
-            store.add_edge(root, node_store::Edge::ConsistsOf { name: author_name, part: collection });
+            store.add_edge(
+                root,
+                node_store::Edge::ConsistsOf {
+                    name: author_name,
+                    part: collection,
+                },
+            );
         }
         NodeStoreGraphView { store, root }
     }
@@ -4571,18 +5560,30 @@ mod tests {
     #[test]
     fn single_link_slot_resolving_to_a_page_carries_its_link_block_address() {
         use crate::data::OutputMode::Editorial;
-        let address = format!(
-            r#"(ned/nth-of-kind {} "paragraph" 0)"#,
-            doc_slot("author")
-        );
+        let address = format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("author"));
         let md = "[Joakim](/author/joakim)";
 
         // Native: the page's own link block, reached from the page.
         let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
-        let native = render_for(&graph, r#"<presemble:insert data="(ref author)" />"#, Editorial);
-        assert!(native.contains("Page of Joakim"), "renders the target's link: {native}");
-        assert_eq!(attr_values(&native, "data-presemble-address"), vec![address.clone()], "{native}");
-        assert_eq!(attr_values(&native, "data-presemble-md"), vec![md.to_string()], "{native}");
+        let native = render_for(
+            &graph,
+            r#"<presemble:insert data="(ref author)" />"#,
+            Editorial,
+        );
+        assert!(
+            native.contains("Page of Joakim"),
+            "renders the target's link: {native}"
+        );
+        assert_eq!(
+            attr_values(&native, "data-presemble-address"),
+            vec![address.clone()],
+            "{native}"
+        );
+        assert_eq!(
+            attr_values(&native, "data-presemble-md"),
+            vec![md.to_string()],
+            "{native}"
+        );
 
         // Legacy: the link slot of the document.
         let schema = "# Title {#title}\noccurs\n: exactly once\n\n\
@@ -4594,18 +5595,40 @@ mod tests {
         )
         .expect("content parses");
         let mut data = crate::data::build_article_graph(&doc, &grammar, Editorial);
-        data.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
-        let legacy = render_for(&data, r#"<presemble:insert data="(ref author)" />"#, Editorial);
-        assert_eq!(attr_values(&legacy, "data-presemble-address"), vec![address], "{legacy}");
-        assert_eq!(attr_values(&legacy, "data-presemble-md"), vec![md.to_string()], "{legacy}");
+        data.insert(
+            crate::constants::KEY_PRESEMBLE_FILE,
+            Value::Text(ADDRESS_FILE.to_string()),
+        );
+        let legacy = render_for(
+            &data,
+            r#"<presemble:insert data="(ref author)" />"#,
+            Editorial,
+        );
+        assert_eq!(
+            attr_values(&legacy, "data-presemble-address"),
+            vec![address],
+            "{legacy}"
+        );
+        assert_eq!(
+            attr_values(&legacy, "data-presemble-md"),
+            vec![md.to_string()],
+            "{legacy}"
+        );
     }
 
     #[test]
     fn multi_value_link_slot_gets_no_bundle() {
         use crate::data::OutputMode::Editorial;
         let graph = page_with_link_slot(&[("A", "/author/a"), ("B", "/author/b")], true);
-        let html = render_for(&graph, r#"<presemble:insert data="(ref author)" />"#, Editorial);
-        assert!(html.contains("Page of A") && html.contains("Page of B"), "{html}");
+        let html = render_for(
+            &graph,
+            r#"<presemble:insert data="(ref author)" />"#,
+            Editorial,
+        );
+        assert!(
+            html.contains("Page of A") && html.contains("Page of B"),
+            "{html}"
+        );
         assert!(!html.contains("data-presemble-address"), "{html}");
         assert!(!html.contains("data-presemble-md"), "{html}");
     }
@@ -4614,13 +5637,23 @@ mod tests {
     fn link_slot_bundle_without_a_title_slot() {
         use crate::data::OutputMode::Editorial;
         let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], false);
-        let html = render_for(&graph, r#"<presemble:insert data="(ref author)" />"#, Editorial);
+        let html = render_for(
+            &graph,
+            r#"<presemble:insert data="(ref author)" />"#,
+            Editorial,
+        );
         assert_eq!(
             attr_values(&html, "data-presemble-address"),
-            vec![format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("author"))],
+            vec![format!(
+                r#"(ned/nth-of-kind {} "paragraph" 0)"#,
+                doc_slot("author")
+            )],
             "{html}"
         );
-        assert_eq!(attr_values(&html, "data-presemble-md"), vec!["[Joakim](/author/joakim)".to_string()]);
+        assert_eq!(
+            attr_values(&html, "data-presemble-md"),
+            vec!["[Joakim](/author/joakim)".to_string()]
+        );
     }
 
     /// A template that names the slot without a prefix (`data="(ref author)"`): the
@@ -4629,10 +5662,17 @@ mod tests {
     fn unprefixed_link_slot_carries_bundle() {
         use crate::data::OutputMode::Editorial;
         let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
-        let html = render_for(&graph, r#"<presemble:insert data="(ref author)" />"#, Editorial);
+        let html = render_for(
+            &graph,
+            r#"<presemble:insert data="(ref author)" />"#,
+            Editorial,
+        );
         assert_eq!(
             attr_values(&html, "data-presemble-address"),
-            vec![format!(r#"(ned/nth-of-kind {} "paragraph" 0)"#, doc_slot("author"))],
+            vec![format!(
+                r#"(ned/nth-of-kind {} "paragraph" 0)"#,
+                doc_slot("author")
+            )],
             "{html}"
         );
     }
@@ -4641,7 +5681,11 @@ mod tests {
     fn semantic_document_edge_is_not_a_template_path() {
         use crate::data::OutputMode::Editorial;
         let graph = page_with_link_slot(&[("Joakim", "/author/joakim")], true);
-        let html = render_for(&graph, r#"<presemble:insert data="(ref _document)" />"#, Editorial);
+        let html = render_for(
+            &graph,
+            r#"<presemble:insert data="(ref _document)" />"#,
+            Editorial,
+        );
         assert_eq!(html, "", "{html}");
     }
 
@@ -4651,7 +5695,10 @@ mod tests {
         let want_md = md_attr("Plain *em* title");
         // Legacy: the link record beside the document's slots.
         let mut graph = DataGraph::new();
-        graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
+        graph.insert(
+            crate::constants::KEY_PRESEMBLE_FILE,
+            Value::Text(ADDRESS_FILE.to_string()),
+        );
         // The title heading's editor record: its address, built without a
         // file, and its `Content` projection.
         let heading = heading_el(1, "Plain *em* title");
@@ -4670,16 +5717,26 @@ mod tests {
         );
         editor.insert(
             crate::constants::KEY_EDITOR_MD,
-            Value::Text(
-                content::project_markdown(&heading, content::Projection::Content).unwrap(),
-            ),
+            Value::Text(content::project_markdown(&heading, content::Projection::Content).unwrap()),
         );
         graph.insert(
             "link",
-            Value::Record(crate::data::synthesize_link("Plain em title", "/x", Some(&editor))),
+            Value::Record(crate::data::synthesize_link(
+                "Plain em title",
+                "/x",
+                Some(&editor),
+            )),
         );
-        let legacy = render_for(&graph, r#"<presemble:insert data="(ref link)" />"#, Editorial);
-        assert_eq!(attr_values(&legacy, "data-presemble-address"), vec![title_address(ADDRESS_FILE)], "{legacy}");
+        let legacy = render_for(
+            &graph,
+            r#"<presemble:insert data="(ref link)" />"#,
+            Editorial,
+        );
+        assert_eq!(
+            attr_values(&legacy, "data-presemble-address"),
+            vec![title_address(ADDRESS_FILE)],
+            "{legacy}"
+        );
         assert!(legacy.contains(&want_md), "{legacy}");
 
         // Native: the link the store pipeline adds has href and text only; it
@@ -4690,7 +5747,13 @@ mod tests {
         let root = store.add_node(node_store::Node::Element(root_name));
         let file_name = store.intern("file");
         let file_val = store.add_node(node_store::Node::Text(ADDRESS_FILE.into()));
-        store.add_edge(root, node_store::Edge::Attribute { name: file_name, value: file_val });
+        store.add_edge(
+            root,
+            node_store::Edge::Attribute {
+                name: file_name,
+                value: file_val,
+            },
+        );
         let preamble_name = store.intern("preamble");
         let preamble = store.add_node(node_store::Node::Element(preamble_name));
         store.add_edge(root, node_store::Edge::Child(preamble));
@@ -4698,7 +5761,13 @@ mod tests {
         let slot = store.add_node(node_store::Node::Element(slot_name));
         let name_key = store.intern("name");
         let name_val = store.add_node(node_store::Node::Text("title".into()));
-        store.add_edge(slot, node_store::Edge::Attribute { name: name_key, value: name_val });
+        store.add_edge(
+            slot,
+            node_store::Edge::Attribute {
+                name: name_key,
+                value: name_val,
+            },
+        );
         store.add_edge(preamble, node_store::Edge::Child(slot));
         let heading = content_store::block_to_store(
             &content::ContentElement::heading_from_markdown(
@@ -4709,7 +5778,13 @@ mod tests {
         );
         store.add_edge(slot, node_store::Edge::Child(heading));
         let title_name = store.intern("title");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: title_name, part: heading });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: title_name,
+                part: heading,
+            },
+        );
         let link_name = store.intern("link");
         let link = store.add_node(node_store::Node::Element(link_name));
         for (key, value) in [("href", "/x"), ("text", "Plain em title")] {
@@ -4717,9 +5792,23 @@ mod tests {
             let val = store.add_node(node_store::Node::Text(value.into()));
             store.add_edge(link, node_store::Edge::Attribute { name, value: val });
         }
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: link_name, part: link });
-        let native = render_for(&NodeStoreGraphView { store, root }, r#"<presemble:insert data="(ref link)" />"#, Editorial);
-        assert_eq!(attr_values(&native, "data-presemble-address"), vec![title_address(ADDRESS_FILE)], "{native}");
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: link_name,
+                part: link,
+            },
+        );
+        let native = render_for(
+            &NodeStoreGraphView { store, root },
+            r#"<presemble:insert data="(ref link)" />"#,
+            Editorial,
+        );
+        assert_eq!(
+            attr_values(&native, "data-presemble-address"),
+            vec![title_address(ADDRESS_FILE)],
+            "{native}"
+        );
         assert!(native.contains(&want_md), "{native}");
     }
 
@@ -4729,7 +5818,10 @@ mod tests {
         let grammar = schema::parse_schema(ADDRESS_SCHEMA).expect("schema parses");
         let doc = content::parse_and_assign(ADDRESS_CONTENT, &grammar).expect("content parses");
         let mut graph = crate::data::build_article_graph(&doc, &grammar, Published);
-        graph.insert(crate::constants::KEY_PRESEMBLE_FILE, Value::Text(ADDRESS_FILE.to_string()));
+        graph.insert(
+            crate::constants::KEY_PRESEMBLE_FILE,
+            Value::Text(ADDRESS_FILE.to_string()),
+        );
         let html = render_for(
             &graph,
             r#"<presemble:insert data="(ref title)" as="h1" /><presemble:insert data="(ref summary)" as="p" /><presemble:insert data="(ref body)" />"#,
@@ -4746,11 +5838,17 @@ mod tests {
             let spanned: im::Vector<_> = elements
                 .iter()
                 .cloned()
-                .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+                .map(|node| schema::Spanned {
+                    node,
+                    span: schema::Span { start: 0, end: 0 },
+                })
                 .collect();
             crate::dom::serialize_nodes(&crate::body_nodes::render_body_nodes(&spanned, false))
         };
-        let body = published(&[heading_el(2, "S"), content::ContentElement::paragraph_from_markdown("p")]);
+        let body = published(&[
+            heading_el(2, "S"),
+            content::ContentElement::paragraph_from_markdown("p"),
+        ]);
         assert!(!body.contains("data-presemble-md"), "{body}");
         let slot = render_for(
             &heading_store("Plain *em* title"),
@@ -4794,7 +5892,9 @@ mod tests {
         } else if kind == "blockquote" || kind == "list" {
             // A quote or a list as the store holds it: blocks (ADR-059 §13);
             // `text` is its markdown, markers included.
-            let container = content::parse_document(text).unwrap().elements[0].node.clone();
+            let container = content::parse_document(text).unwrap().elements[0]
+                .node
+                .clone();
             content_store::block_to_store(&container, &mut store)
         } else {
             let kind_name = store.intern(kind);
@@ -4802,7 +5902,13 @@ mod tests {
             if let Some(level) = level {
                 let level_name = store.intern("level");
                 let level_val = store.add_node(node_store::Node::Integer(level));
-                store.add_edge(block, node_store::Edge::Attribute { name: level_name, value: level_val });
+                store.add_edge(
+                    block,
+                    node_store::Edge::Attribute {
+                        name: level_name,
+                        value: level_val,
+                    },
+                );
             }
             let text_node = store.add_node(node_store::Node::Text(text.into()));
             store.add_edge(block, node_store::Edge::Child(text_node));
@@ -4810,7 +5916,13 @@ mod tests {
         };
         store.add_edge(body, node_store::Edge::Child(block));
         let body_co_name = store.intern("body");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: body_co_name,
+                part: body,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
@@ -4834,19 +5946,34 @@ mod tests {
         let block = store.add_node(node_store::Node::Element(heading_name));
         let level_name = store.intern("level");
         let level_val = store.add_node(node_store::Node::Text("3".into()));
-        store.add_edge(block, node_store::Edge::Attribute { name: level_name, value: level_val });
+        store.add_edge(
+            block,
+            node_store::Edge::Attribute {
+                name: level_name,
+                value: level_val,
+            },
+        );
         let text_node = store.add_node(node_store::Node::Text("Title".into()));
         store.add_edge(block, node_store::Edge::Child(text_node));
         store.add_edge(body, node_store::Edge::Child(block));
         let body_co_name = store.intern("body");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: body_co_name,
+                part: body,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
         let reg = NullRegistry;
         let ctx = RenderContext::published(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
-        assert!(html.contains("<h3") && html.contains("Title"), "expected an h3; got: {html}");
+        assert!(
+            html.contains("<h3") && html.contains("Title"),
+            "expected an h3; got: {html}"
+        );
     }
 
     #[test]
@@ -4855,62 +5982,111 @@ mod tests {
         let spanned: im::Vector<_> = elements
             .iter()
             .cloned()
-            .map(|node| schema::Spanned { node, span: schema::Span { start: 0, end: 0 } })
+            .map(|node| schema::Spanned {
+                node,
+                span: schema::Span { start: 0, end: 0 },
+            })
             .collect();
         let legacy = legacy_body_html(&spanned);
         let native = native_body_html(&elements);
-        assert!(legacy.contains(r#"href="""#), "legacy renders the link: {legacy}");
+        assert!(
+            legacy.contains(r#"href="""#),
+            "legacy renders the link: {legacy}"
+        );
         use crate::markdown_nodes::tests::normalise_html;
-        assert_eq!(normalise_html(&legacy), normalise_html(&native), "legacy: {legacy}\nnative: {native}");
+        assert_eq!(
+            normalise_html(&legacy),
+            normalise_html(&native),
+            "legacy: {legacy}\nnative: {native}"
+        );
     }
 
     #[test]
     fn native_body_paragraph_inline_html_renders_escaped() {
         let html = render_native_body_block("paragraph", "a <script>x</script> b", None);
-        assert!(!html.contains("<script"), "inline HTML must not be rendered; got: {html}");
-        assert!(html.contains("&lt;script&gt;"), "inline HTML must render escaped; got: {html}");
+        assert!(
+            !html.contains("<script"),
+            "inline HTML must not be rendered; got: {html}"
+        );
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "inline HTML must render escaped; got: {html}"
+        );
     }
 
     #[test]
     fn native_body_heading_literal_html_renders_escaped() {
         let html = render_native_body_block("heading", "<script>x</script>", Some(2));
         assert!(html.contains("<h2"), "expected h2; got: {html}");
-        assert!(!html.contains("<script"), "heading HTML must not be rendered; got: {html}");
-        assert!(html.contains("&lt;script&gt;"), "heading HTML must render escaped; got: {html}");
+        assert!(
+            !html.contains("<script"),
+            "heading HTML must not be rendered; got: {html}"
+        );
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "heading HTML must render escaped; got: {html}"
+        );
     }
 
     #[test]
     fn native_body_list_with_nested_html_block_renders_the_placeholder() {
         let html = render_native_body_block("list", "- item\n\n  <div>inner</div>\n", None);
-        assert!(!html.contains("inner"), "nested HTML block must not be rendered; got: {html}");
-        assert!(html.contains("presemble-html-removed"), "expected the placeholder; got: {html}");
+        assert!(
+            !html.contains("inner"),
+            "nested HTML block must not be rendered; got: {html}"
+        );
+        assert!(
+            html.contains("presemble-html-removed"),
+            "expected the placeholder; got: {html}"
+        );
     }
 
     #[test]
     fn native_body_paragraph_inline_comment_is_stripped() {
         let html = render_native_body_block("paragraph", "a <!-- secret --> b", None);
-        assert!(!html.contains("secret"), "inline comment must be stripped; got: {html}");
+        assert!(
+            !html.contains("secret"),
+            "inline comment must be stripped; got: {html}"
+        );
     }
 
     #[test]
     fn native_body_html_block_renders_only_the_placeholder() {
         let html = render_native_body_block("html-block", "<div>secret</div>", None);
-        assert!(!html.contains("secret"), "HTML block source must not be rendered; got: {html}");
-        assert!(html.contains("presemble-html-removed"), "expected the placeholder class; got: {html}");
+        assert!(
+            !html.contains("secret"),
+            "HTML block source must not be rendered; got: {html}"
+        );
+        assert!(
+            html.contains("presemble-html-removed"),
+            "expected the placeholder class; got: {html}"
+        );
         assert!(
             html.contains("Raw HTML is not published. Remove it to publish this page."),
             "expected the placeholder message; got: {html}"
         );
-        assert!(!html.contains("data-presemble-slot"), "placeholder must not be a slot; got: {html}");
+        assert!(
+            !html.contains("data-presemble-slot"),
+            "placeholder must not be a slot; got: {html}"
+        );
     }
 
     #[test]
     fn native_body_paragraph_inline_markdown_still_renders() {
         let html = render_native_body_block("paragraph", "**b** _i_ `x<y` [here](/a)", None);
-        assert!(html.contains("<strong>b</strong>"), "expected strong; got: {html}");
+        assert!(
+            html.contains("<strong>b</strong>"),
+            "expected strong; got: {html}"
+        );
         assert!(html.contains("<em>i</em>"), "expected em; got: {html}");
-        assert!(html.contains("<code>x&lt;y</code>"), "expected code span; got: {html}");
-        assert!(html.contains(r#"<a href="/a">here</a>"#), "expected link; got: {html}");
+        assert!(
+            html.contains("<code>x&lt;y</code>"),
+            "expected code span; got: {html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/a">here</a>"#),
+            "expected link; got: {html}"
+        );
     }
 
     /// Render a body with one table through the native NodeStore path, using
@@ -4929,7 +6105,13 @@ mod tests {
         let table = content_store::block_to_store(&table, &mut store);
         store.add_edge(body, node_store::Edge::Child(table));
         let body_co_name = store.intern("body");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: body_co_name,
+                part: body,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
@@ -4941,7 +6123,10 @@ mod tests {
     #[test]
     fn native_table_renders_body_rows() {
         let html = render_native_table(&["H"], &[&["one"], &["two"]]);
-        assert!(html.contains("<td>one</td>") && html.contains("<td>two</td>"), "got: {html}");
+        assert!(
+            html.contains("<td>one</td>") && html.contains("<td>two</td>"),
+            "got: {html}"
+        );
     }
 
     #[test]
@@ -4953,22 +6138,31 @@ mod tests {
             assert!(!html.contains(tag), "unexpected {tag}; got: {html}");
         }
         for expected in ["-", "+", "#", "1.", "&gt; q", "***"] {
-            assert!(html.contains(&format!("<th>{expected}</th>")), "th {expected}; got: {html}");
-            assert!(html.contains(&format!("<td>{expected}</td>")), "td {expected}; got: {html}");
+            assert!(
+                html.contains(&format!("<th>{expected}</th>")),
+                "th {expected}; got: {html}"
+            );
+            assert!(
+                html.contains(&format!("<td>{expected}</td>")),
+                "td {expected}; got: {html}"
+            );
         }
     }
 
     #[test]
     fn native_table_cells_render_inline_markdown_and_escape_html() {
-        let html = render_native_table(
-            &["`a\\|b`", "**b**"],
-            &[&["\\<script>", "<b>x</b>"]],
-        );
+        let html = render_native_table(&["`a\\|b`", "**b**"], &[&["\\<script>", "<b>x</b>"]]);
         assert!(html.contains("<th><code>a|b</code></th>"), "got: {html}");
         assert!(html.contains("<th><strong>b</strong></th>"), "got: {html}");
         assert!(html.contains("<td>&lt;script&gt;</td>"), "got: {html}");
-        assert!(html.contains("<td>&lt;b&gt;x&lt;/b&gt;</td>"), "got: {html}");
-        assert!(!html.contains("<script") && !html.contains("<b>"), "got: {html}");
+        assert!(
+            html.contains("<td>&lt;b&gt;x&lt;/b&gt;</td>"),
+            "got: {html}"
+        );
+        assert!(
+            !html.contains("<script") && !html.contains("<b>"),
+            "got: {html}"
+        );
     }
 
     /// A pipe in a cell's text is text: the cell is nodes, not a source to
@@ -4978,7 +6172,10 @@ mod tests {
         use content::inline::{Inline, InlineContext, Inlines};
         let cell = Inlines::new(vec![Inline::Text("a | b".into())], InlineContext::Cell);
         let table = content::ContentElement::Table {
-            columns: vec![content::Column { header: cell.clone(), align: content::Align::Default }],
+            columns: vec![content::Column {
+                header: cell.clone(),
+                align: content::Align::Default,
+            }],
             rows: vec![vec![cell]],
         };
         let html = render_native_table_element(table);
@@ -4989,9 +6186,15 @@ mod tests {
     #[test]
     fn native_literal_angle_brackets_in_headings_and_blockquotes_render_escaped() {
         let html = render_native_body_block("heading", "The <div> element", Some(2));
-        assert!(html.contains("The &lt;div&gt; element") && !html.contains("<div"), "{html}");
+        assert!(
+            html.contains("The &lt;div&gt; element") && !html.contains("<div"),
+            "{html}"
+        );
         let html = render_native_body_block("blockquote", "> a \\<b>", None);
-        assert!(html.contains("a &lt;b&gt;") && !html.contains("<b>"), "{html}");
+        assert!(
+            html.contains("a &lt;b&gt;") && !html.contains("<b>"),
+            "{html}"
+        );
     }
 
     #[test]
@@ -5013,10 +6216,22 @@ mod tests {
             let comment = store.add_node(node_store::Node::Text("<!-- secret -->".into()));
             store.add_edge(trivia, node_store::Edge::Child(comment));
             let attr_name = store.intern(attr);
-            store.add_edge(host, node_store::Edge::Attribute { name: attr_name, value: trivia });
+            store.add_edge(
+                host,
+                node_store::Edge::Attribute {
+                    name: attr_name,
+                    value: trivia,
+                },
+            );
         }
         let body_co_name = store.intern("body");
-        store.add_edge(root, node_store::Edge::ConsistsOf { name: body_co_name, part: body });
+        store.add_edge(
+            root,
+            node_store::Edge::ConsistsOf {
+                name: body_co_name,
+                part: body,
+            },
+        );
 
         let graph = NodeStoreGraphView { store, root };
         let nodes = parse_template_xml(r#"<presemble:insert data="(ref body)" />"#).unwrap();
@@ -5024,14 +6239,23 @@ mod tests {
         let ctx = RenderContext::editorial(&reg);
         let html = serialize_nodes(&transform(nodes, &graph, &ctx).unwrap());
         assert!(html.contains("Visible."), "got: {html}");
-        assert!(!html.contains("secret") && !html.contains("<!--"), "got: {html}");
+        assert!(
+            !html.contains("secret") && !html.contains("<!--"),
+            "got: {html}"
+        );
     }
 
     #[test]
     fn native_body_code_block_is_escaped_once() {
         let html = render_native_body_block("code-block", "x<y", None);
-        assert!(html.contains("<code>x&lt;y</code>"), "expected single escaping; got: {html}");
-        assert!(!html.contains("&amp;lt;"), "must not double-escape; got: {html}");
+        assert!(
+            html.contains("<code>x&lt;y</code>"),
+            "expected single escaping; got: {html}"
+        );
+        assert!(
+            !html.contains("&amp;lt;"),
+            "must not double-escape; got: {html}"
+        );
     }
 
     // ── N2 characterisation: native body arms ───────────────────────────────
@@ -5044,7 +6268,11 @@ mod tests {
 
     fn assert_renders_as(html: &str, expected: &str) {
         use crate::markdown_nodes::tests::normalise_html;
-        assert_eq!(normalise_html(html), normalise_html(expected), "got: {html}");
+        assert_eq!(
+            normalise_html(html),
+            normalise_html(expected),
+            "got: {html}"
+        );
     }
 
     #[test]
@@ -5078,7 +6306,11 @@ mod tests {
     /// data paths agree.
     #[test]
     fn blockquote_renders_its_blocks() {
-        let quote = content::parse_document("> a\n>\n> b\n>\n> # H\n").unwrap().elements[0].node.clone();
+        let quote = content::parse_document("> a\n>\n> b\n>\n> # H\n")
+            .unwrap()
+            .elements[0]
+            .node
+            .clone();
         let spanned: im::Vector<_> = im::vector![schema::Spanned {
             node: quote.clone(),
             span: schema::Span { start: 0, end: 0 },
@@ -5087,8 +6319,15 @@ mod tests {
         let data = legacy_body_html(&spanned);
         assert_eq!(native, data, "native and data paths render the same");
         let (head, tail) = native.split_once('>').expect("a start tag");
-        assert!(head.starts_with("<blockquote data-presemble-slot=\"body\""), "{native}");
-        assert_eq!(head.matches("data-presemble-").count(), 4, "slot, md, address and file: {native}");
+        assert!(
+            head.starts_with("<blockquote data-presemble-slot=\"body\""),
+            "{native}"
+        );
+        assert_eq!(
+            head.matches("data-presemble-").count(),
+            4,
+            "slot, md, address and file: {native}"
+        );
         // The children carry no slot data of their own, only where they are in
         // the quote (editorial output; FU-7b).
         assert_eq!(
@@ -5159,5 +6398,4 @@ mod tests {
             r#"<p data-presemble-slot="body">é&amp;ü &lt;x&gt;ñ ©</p>"#,
         );
     }
-
 }
