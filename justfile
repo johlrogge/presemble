@@ -280,6 +280,11 @@ smoketest profile="dev":
 test:
     cargo polylith cargo --profile dev test
 
+# Lint every target (libs, bins, tests, benches) as CI does.
+[group('develop')]
+clippy:
+    cargo polylith cargo --profile dev clippy --all-targets -- -D warnings
+
 # Preview changes to the conductor box / network. The Caddy basic_auth hash is
 # sourced from the auth-file just-in-time into -var (rendered into cloud-init).
 # Preview changes to the conductor box.

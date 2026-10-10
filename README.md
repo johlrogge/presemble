@@ -162,7 +162,7 @@ ADRs live in `docs/adr/`. The presemble.io site is in `site/` and is built with 
 ```
 cargo check          # type-check the workspace
 cargo test           # run all tests
-cargo clippy         # lint
+just clippy          # lint every target (libs, bins, tests, benches) as CI does
 cargo run -p publisher -- site/    # run the publisher on the dogfood site
 tools/smoketest.sh                 # end-to-end smoke test (requires curl and rep)
 ```

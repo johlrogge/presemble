@@ -33,4 +33,4 @@ jobs:
         run: devenv shell -- cargo polylith cargo --profile dev test
 
       - name: Clippy
-        run: devenv shell -- cargo polylith cargo --profile dev clippy -- -D warnings
+        run: devenv shell -- cargo polylith cargo --profile dev clippy --all-targets -- -D warnings
