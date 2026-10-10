@@ -8,6 +8,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -25,9 +27,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            profiles/dev/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('devenv.lock', 'devenv.nix') }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ hashFiles('devenv.lock', 'devenv.nix') }}-
 
       - name: Format
         run: devenv shell -- just fmt-check
