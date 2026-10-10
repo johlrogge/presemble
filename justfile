@@ -280,9 +280,14 @@ smoketest profile="dev":
 test:
     cargo polylith cargo --profile dev test
 
-# Lint every target (libs, bins, tests, benches) as CI does.
+# Lint as CI does: libs and bins of the live profile, then every target of
+# the dev profile (tests use the in-memory site repository, which only the
+# dev profile has).
 [group('develop')]
 clippy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo polylith cargo --profile live clippy -- -D warnings
     cargo polylith cargo --profile dev clippy --all-targets -- -D warnings
 
 # Format every crate of both polylith profiles with rustfmt (default
