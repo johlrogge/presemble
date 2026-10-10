@@ -163,11 +163,18 @@ ADRs live in `docs/adr/`. The presemble.io site is in `site/` and is built with 
 cargo check          # type-check the workspace
 cargo test           # run all tests
 just clippy          # lint every target (libs, bins, tests, benches) as CI does
+just fmt             # format every crate (CI checks it with just fmt-check)
 cargo run -p publisher -- site/    # run the publisher on the dogfood site
 tools/smoketest.sh                 # end-to-end smoke test (requires curl and rep)
 ```
 
 Requires the Nix devenv shell. Do not install packages with `cargo install -g` or `apt`; add them to `devenv.nix` instead.
+
+Formatting-only commits are listed in `.git-blame-ignore-revs`. GitHub skips them in blame automatically; to skip them locally too, run once:
+
+```
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
 
 ## Version
 
