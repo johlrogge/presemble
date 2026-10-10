@@ -14,6 +14,7 @@ mod slot_assignment;
 pub mod slot_editor;
 pub mod sync;
 mod transform;
+pub mod unfinished;
 mod validator;
 
 pub use adapters::{
@@ -45,6 +46,7 @@ pub use slot_assignment::{UnassignedReason, assign_slots, unassigned_reason};
 pub use transform::{
     Capitalize, CompositeTransform, InsertSeparator, InsertSlot, Transform, TransformError,
 };
+pub use unfinished::{Hit, Unfinished, unfinished_markup};
 pub use validator::{
     Location, NestedStep, Severity, ValidationDiagnostic, ValidationResult, validate,
 };
