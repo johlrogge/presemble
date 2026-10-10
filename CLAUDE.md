@@ -76,7 +76,7 @@ When an MCP tool exists but misbehaves:
 **Build and test:**
 - `cargo check` — type-check the workspace
 - `cargo test` — run all tests
-- `cargo clippy` — lint
+- `just clippy` — lint every target (libs, bins, tests, benches) as CI does
 - `cargo run -p publisher -- <site-dir>` — run the publisher CLI
 
 **Code style:**
