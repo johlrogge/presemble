@@ -216,3 +216,29 @@ is flagged. So §1 (push) and §2 (lowering) both stand, with auto-save.
 - **If the check shows that Helix compares modification times, not contents:**
   auto-save leaves documents open in an editor to the editor's `:w`, which is
   then the only writer of those files; everything else stands.
+
+## Done in LSP-1
+
+Decision 1 (N pushes every change to every open buffer) is built.
+
+- **The push.** After a command or plan that changed a document's N, other
+  than through its open editor's own text, the conductor emits
+  `ConductorEvent::DocumentModelChanged { file }`. The LSP
+  subscribes to these events and asks with `GetEditorUpdate`, which answers
+  `EditorUpdate { last_hash, edits }`: the minimal edits to the editor's last
+  text, and the hash of that text. The LSP sends them as one versioned
+  `workspace/applyEdit`.
+- **What is never pushed.**
+  - Held regions and drifted regions keep the buffer's text.
+  - Nothing is pushed while the buffer's text is in flight: an update is asked
+    for only when the file's text has reached the conductor, and otherwise
+    once it is idle.
+  - Edits are applied only if the current buffer hashes to the text they were
+    computed for (`last_hash`). Otherwise the update is stale and is asked for
+    again; the versioned `applyEdit` is a second guard.
+- **Conflict diagnostics follow events.** They are seeded when a file is
+  opened and on reconnect, and republished on every change, not only on the
+  editor's own requests. "Take the file's version of this block" from the
+  editor only resolves the conflict; the push brings the buffer along.
+- **Canonical text before a save** (the amendment's first point) is left to
+  auto-save (ADR-070).
