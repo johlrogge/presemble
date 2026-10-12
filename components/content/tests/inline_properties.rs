@@ -801,6 +801,38 @@ fn inline_source_is_fixed_point_after_one_save() {
     );
 }
 
+/// UM-1 guard: every corpus and generated source, as a page's body, validates
+/// against its source without panicking, and every span it reports lies
+/// inside the source on character boundaries. Hits are allowed.
+#[test]
+fn unfinished_markup_never_panics_on_generated_documents() {
+    let grammar = schema::parse_schema(
+        "# Title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\nheadings\n: h3..h6\n",
+    )
+    .expect("schema parses");
+    let mut failures = Vec::new();
+    for body in corpus_group("corpus")
+        .into_iter()
+        .chain(generated_sources())
+    {
+        let src = format!("# Title\n\n----\n\n{body}\n");
+        let Ok(doc) = content::parse_and_assign(&src, &grammar) else {
+            continue;
+        };
+        for d in content::validate_source(&doc, &grammar, &src).diagnostics {
+            if let Some(span) = d.span
+                && (span.start > span.end
+                    || span.end > src.len()
+                    || !src.is_char_boundary(span.start)
+                    || !src.is_char_boundary(span.end))
+            {
+                failures.push(format!("{body:?}: span {span:?}: {}", d.message));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 // ── SearchReplace ───────────────────────────────────────────────────────────
 
 const REPLACEMENTS: &[&str] = &[

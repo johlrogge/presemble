@@ -1036,6 +1036,24 @@ mod tests {
         );
     }
 
+    /// UM-1: the range covers only the flagged characters, in UTF-16 code
+    /// units (the emoji before them counts twice).
+    #[test]
+    fn unfinished_markup_has_an_inline_range() {
+        let base = include_str!("../../../fixtures/blog-site/content/article/hello-world.md");
+        let src = format!("{base}\nA \u{1F600} **bold claim.\n");
+        let grammar = article_grammar();
+        let diags = validate_with_positions(&src, &grammar);
+        let d = diags
+            .iter()
+            .find(|d| d.message.contains("looks like unfinished formatting"))
+            .unwrap_or_else(|| panic!("an unfinished-markup diagnostic: {diags:#?}"));
+        let line = src.lines().count() as u32 - 1;
+        // `A 😀 ` is 1 + 1 + 2 + 1 UTF-16 code units.
+        assert_eq!(d.start, (line, 5), "{d:#?}");
+        assert_eq!(d.end, (line, 7), "{d:#?}");
+    }
+
     #[test]
     fn validate_with_positions_detects_missing_title() {
         let src = "Some paragraph.\n\n[Author](/authors/test)\n\n![Cover](images/cover.jpg)\n\n----\n\n### Body\n";

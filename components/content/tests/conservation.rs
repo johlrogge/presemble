@@ -630,6 +630,26 @@ fn conservation() {
     });
 }
 
+/// UM-1 guard: validating against the source never panics, and every span it
+/// reports lies inside the source, on character boundaries. Hits are allowed.
+#[test]
+fn unfinished_markup_never_panics_on_generated_documents() {
+    check_all("unfinished markup spans", |src, grammar| {
+        let doc = assign(src, grammar);
+        for d in content::validate_source(&doc, grammar, src).diagnostics {
+            if let Some(span) = d.span
+                && (span.start > span.end
+                    || span.end > src.len()
+                    || !src.is_char_boundary(span.start)
+                    || !src.is_char_boundary(span.end))
+            {
+                return Err(format!("span {span:?} outside the source: {}", d.message));
+            }
+        }
+        Ok(())
+    });
+}
+
 /// Every line of every generated document, and every pair of consecutive
 /// lines, wrapped as an ATX and as a setext heading, reads back as heading
 /// content. A heading that did not would hit the parser's `debug_assert` (and

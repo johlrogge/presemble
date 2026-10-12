@@ -195,6 +195,31 @@ fn html_inside_code_fence_does_not_fail() {
     assert!(index_html(&tmp).exists(), "index.html should be written");
 }
 
+/// UM-1: markup that looks unfinished is an Error, reported where the
+/// flagged characters are.
+#[test]
+fn a_site_with_unfinished_markup_does_not_publish() {
+    let (tmp, site) = valid_site_with_body_appended("\nSee the **bold claim here.\n");
+    let text = fs::read_to_string(site.join("content/article/hello-world.md")).expect("read");
+    let at = text.find("See the **").expect("the paragraph") + "See the ".len();
+    let line = text[..at].matches('\n').count() + 1;
+    let col = text[..at].rsplit('\n').next().unwrap_or("").chars().count() + 1;
+
+    let out = presemble_build(&site);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
+    let expected = format!(
+        "content/article/hello-world.md:{line}:{col}: error: paragraph: `See the **bold claim` \
+         looks like unfinished formatting (an unclosed bold)"
+    );
+    assert!(
+        stderr.contains(&expected),
+        "expected {expected:?} in stderr:\n{stderr}"
+    );
+    assert!(!index_html(&tmp).exists(), "no page should be written");
+}
+
 #[test]
 fn build_publishes_valid_site() {
     let (tmp, site) = copy_fixture_site();

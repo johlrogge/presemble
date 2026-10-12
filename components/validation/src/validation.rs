@@ -41,7 +41,9 @@ pub fn validate_content(src: &str, grammar: &Grammar) -> Vec<Diagnostic> {
 /// diagnostics. Returns the same diagnostics as [`validate_content`] does for
 /// a source that parses.
 pub fn validate_document(src: &str, doc: &Document, grammar: &Grammar) -> Vec<Diagnostic> {
-    let result = content::validate(doc, grammar);
+    // `src` is what `doc` was read from: diagnostics inside a block (UM-1)
+    // get the span of exactly what they are about.
+    let result = content::validate_source(doc, grammar, src);
 
     let mut diagnostics: Vec<Diagnostic> = result
         .diagnostics

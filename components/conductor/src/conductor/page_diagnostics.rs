@@ -654,6 +654,28 @@ mod tests {
         }
     }
 
+    /// UM-1: markup that looks unfinished is marked on the element it is in.
+    #[test]
+    fn editorial_page_marks_unfinished_markup_on_its_element() {
+        let html = editorial_page("# Title\n\n----\n\nFine.\n\nA **bold claim.\n");
+        let tags = tags_with(&html, "data-presemble-diagnostics");
+        assert_eq!(tags.len(), 1, "{tags:#?}");
+        assert!(tags[0].starts_with("<p "), "{}", tags[0]);
+        assert!(
+            tags[0].contains("&quot;paragraph&quot; 1"),
+            "the second paragraph: {}",
+            tags[0]
+        );
+        let diagnostics = carried(&tags[0]);
+        assert_eq!(diagnostics[0]["severity"], "error");
+        assert!(
+            messages(&diagnostics)[0]
+                .contains("looks like unfinished formatting (an unclosed bold)"),
+            "{diagnostics:#?}"
+        );
+        assert_eq!(page_script(&html)["errors"], 1);
+    }
+
     /// GUARD: a page with nothing to report has no attribute, and a page
     /// script with zero counts.
     #[test]
