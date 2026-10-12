@@ -62,6 +62,25 @@ Accepted
 - Not covered here: positions for parse errors, per-rebuild reporting and a
   browser overlay in serve, and content directories that have no schema.
 
+## Amendments
+
+### UM-1 (2026-10): markup that looks unfinished is an Error
+
+- **What is reported:** a backtick attached to a word, `](`, `![` at the
+  start of a word, or a one-sided `**`/`__` run, left as literal text in a
+  paragraph, heading, table cell or link text, at any depth.
+- **One Error per occurrence:** it carries the block's location and, with the
+  source, the span of the flagged characters.
+- **The way out:** a code span. An escape doesn't help, because the model
+  holds the same literal text.
+- **Overlap with link expressions:** a complete link expression written
+  inside text is left to the link-expression check (ADR-058); an unclosed one
+  is unfinished markup.
+- **Before it was turned on:** the rule was checked against every content
+  file with `just census-markup` (0 hits).
+- **Related:** ADR-059's canonical form now escapes minimally, so unpaired
+  runs are saved as typed.
+
 ## Related
 
-ADR-019, ADR-057, ADR-060.
+ADR-019, ADR-057, ADR-058, ADR-059, ADR-060.

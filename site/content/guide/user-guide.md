@@ -200,6 +200,15 @@ Presemble keeps content free of HTML, even though markdown allows it, like Hugo 
 - **HTML comments** (`<!-- … -->`) are kept in the file, move with the block that follows them, and are never published.
 - **At the start of a line** inside a paragraph, HTML or a comment is kept as it is: Presemble writes that line indented by four spaces, so it stays part of the paragraph.
 
+**Markup that looks unfinished** blocks publishing too. When markdown formatting never closes, its characters stay as literal text, and readers would see them. Presemble reports four cases:
+
+- a backtick attached to a word with no closing backtick: `` see `config ``;
+- a link or image whose target never closes: `[text](https://example.com`;
+- an image mark at the start of a word with nothing after it: `see ![diagram`;
+- a `**` or `__` that can only open or only close: `**bold` with no closing `**`.
+
+Finish the markup, or, if you mean the characters themselves, put them in a code span (`` `**` ``). An escape like `\*\*` doesn't help: Presemble stores the text the same way either way, so it is still reported. The page stays editable and saveable, and saving keeps the characters as you typed them. Each case is marked on its element in the editorial view, and at the exact characters in your editor and in `presemble build`'s report (`path:line:col`). A link expression written inside a sentence is reported by the link-expression check instead, as before.
+
 ### Full schema example
 
 ```markdown
