@@ -85,7 +85,7 @@ pub struct PresembleLsp {
     publisher: Publisher,
     /// Everything that is sent to the conductor in the editor's name goes
     /// through this one queue, off the handlers.
-    sender: buffer::Sender,
+    sender: Arc<buffer::Sender>,
     /// The runtime the sender's callbacks hand their async work to.
     handle: tokio::runtime::Handle,
 }
@@ -100,24 +100,157 @@ struct Publisher {
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
     synced: Arc<Mutex<HashMap<String, Synced>>>,
+    /// The version of each open document, as the client last said.
+    versions: Arc<Mutex<HashMap<String, i32>>>,
+    /// Each open buffer's version and text from the same notification: what
+    /// an update from N is checked against (LSP-1).
+    buffers: Arc<Mutex<buffer::OpenBuffers>>,
+    /// Each file's conflict with the file on disk, as the conductor last said
+    /// (its events; what it listed when the file was opened).
+    conflicts: Arc<Mutex<buffer::ConflictView>>,
     conductor: Arc<Mutex<conductor::ConductorClient>>,
+    /// The queue to the conductor (held weakly: the server owns it).
+    sender: std::sync::Weak<buffer::Sender>,
+    handle: tokio::runtime::Handle,
 }
 
 impl Publisher {
-    /// The conflict of this file's unsaved edits in the conductor with a change
-    /// on disk: `None` when there is none (or it has been resolved). Asked
-    /// synchronously: the conductor is the source of truth and the LSP has no
-    /// channel for it to push (channel gap 8).
-    async fn disk_conflict(&self, uri: &Url) -> Option<conductor::ConflictState> {
+    /// The site-relative path of the file behind `uri`.
+    fn rel_of(&self, uri: &Url) -> Option<String> {
         let path = uri.to_file_path().ok()?;
-        let rel = path.strip_prefix(&self.site_dir).ok()?;
-        let rel = rel.to_string_lossy().replace('\\', "/");
-        let cond = self.conductor.lock().await;
-        match cond.send(&conductor::Command::GetConflicts) {
-            Ok(conductor::Response::Conflicts(files)) => {
-                files.into_iter().find(|c| c.file == rel).map(|c| c.state)
+        Some(site_path_for(&self.site_dir, &path)?.as_str().to_string())
+    }
+
+    /// The open document whose file is site-relative `file`.
+    async fn open_uri(&self, file: &str) -> Option<Url> {
+        let versions = self.versions.lock().await;
+        versions
+            .keys()
+            .filter_map(|key| Url::parse(key).ok())
+            .find(|uri| self.rel_of(uri).as_deref() == Some(file))
+    }
+
+    /// The conflict the file behind `uri` is in, as the conductor last said.
+    async fn conflict_of(&self, uri: &Url) -> Option<conductor::ConflictState> {
+        let rel = self.rel_of(uri)?;
+        self.conflicts.lock().await.state(&rel).cloned()
+    }
+
+    /// Ask the conductor which files are in conflict, and take its answer
+    /// for `uris` (the open documents): a conflict there may have begun or
+    /// ended while nobody was listening.
+    async fn seed_conflicts(&self, uris: &[Url]) {
+        let listed = {
+            let cond = self.conductor.lock().await;
+            match cond.send(&conductor::Command::GetConflicts) {
+                Ok(conductor::Response::Conflicts(files)) => files,
+                _ => return,
             }
-            _ => None,
+        };
+        let mut view = self.conflicts.lock().await;
+        for uri in uris {
+            let Some(rel) = self.rel_of(uri) else {
+                continue;
+            };
+            let state = listed
+                .iter()
+                .find(|c| c.file == rel)
+                .map(|c| c.state.clone())
+                .unwrap_or(conductor::ConflictState::Resolved);
+            view.apply(&rel, state);
+        }
+    }
+
+    /// The open documents.
+    async fn open_uris(&self) -> Vec<Url> {
+        self.versions
+            .lock()
+            .await
+            .keys()
+            .filter_map(|key| Url::parse(key).ok())
+            .collect()
+    }
+
+    /// A `DiskConflict` event: the file's conflict diagnostics follow it.
+    async fn conflict_changed(&self, file: String, state: conductor::ConflictState) {
+        self.conflicts.lock().await.apply(&file, state);
+        if let Some(uri) = self.open_uri(&file).await {
+            self.publish_content_diagnostics(uri).await;
+        }
+    }
+
+    /// A `DocumentModelChanged` event: an open buffer of the file asks for its
+    /// update, once nothing it typed is still on its way.
+    async fn model_changed(&self, file: String) {
+        let (Some(uri), Some(sender)) = (self.open_uri(&file).await, self.sender.upgrade()) else {
+            return;
+        };
+        let Some(job) = self.update_job(&uri) else {
+            return;
+        };
+        sender.request_update(uri.as_str(), &job);
+    }
+
+    /// How to ask for the update of the open document behind `uri`.
+    fn update_job(&self, uri: &Url) -> Option<buffer::UpdateJob> {
+        let path = content_path_for(&self.site_dir, &uri.to_file_path().ok()?)?;
+        let publisher = self.clone();
+        let uri = uri.clone();
+        Some(Arc::new(move || {
+            let publisher = publisher.clone();
+            let uri = uri.clone();
+            let done: buffer::Done = Box::new(move |reply| {
+                let handle = publisher.handle.clone();
+                handle.spawn(async move { publisher.apply_update(uri, reply).await });
+            });
+            (
+                conductor::Command::GetEditorUpdate { path: path.clone() },
+                done,
+            )
+        }))
+    }
+
+    /// Apply an update the conductor answered to the buffer, when the buffer
+    /// as it is now (the client's latest notification) is the text it was
+    /// computed for; at that notification's version, so the client still
+    /// refuses it if it has moved on. Otherwise it is asked for again: now,
+    /// or once the buffer's text is idle.
+    async fn apply_update(&self, uri: Url, reply: Result<conductor::Response, String>) {
+        let (last_hash, edits) = match reply {
+            Ok(conductor::Response::EditorUpdate { last_hash, edits }) => (last_hash, edits),
+            Ok(conductor::Response::Error(e)) | Err(e) => {
+                eprintln!("presemble-lsp: no update for {uri}: {e}");
+                return;
+            }
+            Ok(_) => return,
+        };
+        let key = uri.to_string();
+        let (Some(sender), Some(job)) = (self.sender.upgrade(), self.update_job(&uri)) else {
+            return;
+        };
+        // Checked against the buffer as it is now (the client's latest
+        // notification), not as it was when the update was asked for.
+        let decision = self.buffers.lock().await.decide(&key, last_hash, &edits);
+        match decision {
+            buffer::UpdateDecision::Nothing => {}
+            buffer::UpdateDecision::Stale => sender.request_update(&key, &job),
+            buffer::UpdateDecision::Apply { version, edits } => {
+                let applied = matches!(
+                    self.client
+                        .apply_edit(buffer::versioned_edit(&uri, version, edits))
+                        .await,
+                    Ok(ApplyWorkspaceEditResponse { applied: true, .. })
+                );
+                if !applied {
+                    let now = self.buffers.lock().await.get(&key).map(|b| b.version);
+                    if now == Some(version) {
+                        // Refused for no reason the buffer shows.
+                        sender.update_later(&key, &job);
+                    } else {
+                        sender.request_update(&key, &job);
+                    }
+                }
+            }
         }
     }
 
@@ -214,9 +347,10 @@ impl Publisher {
         }
         // ADR-065: unsaved edits that conflict with this file on disk are never
         // discarded automatically; tell the author where they stand, on each
-        // block that conflicts (found in the buffer by its location in N). A
-        // resolved conflict is no longer listed, so its diagnostics go.
-        let conflict = self.disk_conflict(&uri).await;
+        // block that conflicts (found in the buffer by its location in N). The
+        // conflict is as the conductor's events last said; a resolved one is
+        // gone, and so are its diagnostics.
+        let conflict = self.conflict_of(&uri).await;
         if conflict.is_some() {
             let (text, doc) = self.buffer_doc(&uri).await;
             let buffer = buffer::BufferDoc {
@@ -227,6 +361,140 @@ impl Publisher {
         }
         self.client.publish_diagnostics(uri, diags, None).await;
     }
+}
+
+const LISTEN_BACKOFF_INITIAL: std::time::Duration = std::time::Duration::from_millis(250);
+const LISTEN_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Listen to the conductor's events for as long as the server lives
+/// (LSP-1), reconnecting with a capped backoff as `presemble serve` does.
+/// `DocumentModelChanged` and `DiskConflict` go into the sender's queue, so
+/// they are dealt with in one order with everything the editor sends. On every
+/// (re)connection the open files' conflicts are asked for again: an event may
+/// have been missed.
+fn listen_to_the_conductor(pub_url: &str, publisher: &Publisher) {
+    listen(
+        || {
+            let subscriber = conductor::ConductorSubscriber::connect(pub_url)?;
+            // Woken at least this often to see whether the session has ended.
+            subscriber.set_recv_timeout(LISTEN_TIMEOUT)?;
+            Ok(subscriber)
+        },
+        // The session is gone once its queue is.
+        || publisher.sender.upgrade().is_some(),
+        || {
+            let publisher = publisher.clone();
+            publisher.handle.clone().spawn(async move {
+                let open = publisher.open_uris().await;
+                publisher.seed_conflicts(&open).await;
+                for uri in open {
+                    publisher.publish_content_diagnostics(uri).await;
+                }
+            });
+        },
+        |event| {
+            if let Some(sender) = publisher.sender.upgrade() {
+                forward_event(event, publisher, &sender);
+            }
+        },
+    );
+}
+
+/// How long a receive waits before the listener looks at its session again.
+const LISTEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Where conductor events come from (a subscriber, or a test's fake).
+trait EventSource {
+    fn recv(&self) -> Result<conductor::ConductorEvent, conductor::SubscriberError>;
+}
+
+impl EventSource for conductor::ConductorSubscriber {
+    fn recv(&self) -> Result<conductor::ConductorEvent, conductor::SubscriberError> {
+        conductor::ConductorSubscriber::recv(self)
+    }
+}
+
+/// Connect (`connect`, retried with a capped backoff), say so (`connected`),
+/// and hand every event to `deliver`, for as long as `alive` says the session
+/// lives: it is asked before each connection, after each event, and at each
+/// receive timeout, so the listener ends soon after its session.
+fn listen<S: EventSource>(
+    connect: impl Fn() -> Result<S, String>,
+    alive: impl Fn() -> bool,
+    connected: impl Fn(),
+    deliver: impl Fn(conductor::ConductorEvent),
+) {
+    let mut backoff = LISTEN_BACKOFF_INITIAL;
+    while alive() {
+        let source = match connect() {
+            Ok(source) => source,
+            Err(e) => {
+                eprintln!("presemble-lsp: no conductor events ({e}); retrying");
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(LISTEN_BACKOFF_MAX);
+                continue;
+            }
+        };
+        connected();
+        loop {
+            match source.recv() {
+                Ok(event) => {
+                    backoff = LISTEN_BACKOFF_INITIAL;
+                    if !alive() {
+                        return;
+                    }
+                    deliver(event);
+                }
+                // Quiet for a while: is anyone still listening?
+                Err(conductor::SubscriberError::TimedOut) => {
+                    if !alive() {
+                        return;
+                    }
+                }
+                Err(conductor::SubscriberError::Decode(e)) => {
+                    eprintln!("presemble-lsp: skipping an undecodable event: {e}");
+                }
+                Err(conductor::SubscriberError::Transport(e)) => {
+                    eprintln!("presemble-lsp: conductor events lost ({e}); reconnecting");
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(LISTEN_BACKOFF_MAX);
+    }
+}
+
+/// Put a conductor event in the sender's queue: it is dealt with after what
+/// the editor queued before it.
+fn forward_event(event: conductor::ConductorEvent, publisher: &Publisher, sender: &buffer::Sender) {
+    let (file, task): (String, buffer::Done) = match event {
+        conductor::ConductorEvent::DocumentModelChanged { file } => {
+            let publisher = publisher.clone();
+            let changed = file.clone();
+            (
+                file,
+                Box::new(move |_| {
+                    let handle = publisher.handle.clone();
+                    handle.spawn(async move { publisher.model_changed(changed).await });
+                }),
+            )
+        }
+        conductor::ConductorEvent::DiskConflict { file, state } => {
+            let publisher = publisher.clone();
+            let changed = file.clone();
+            (
+                file,
+                Box::new(move |_| {
+                    let handle = publisher.handle.clone();
+                    handle.spawn(async move { publisher.conflict_changed(changed, state).await });
+                }),
+            )
+        }
+        _ => return,
+    };
+    // Keyed by the file: only the queue's order matters for a task.
+    sender.push_task(&file, task);
 }
 
 /// The line to the conductor for the sender thread. The handlers share the
@@ -251,26 +519,41 @@ impl PresembleLsp {
         let doc_diagnostics = Arc::new(Mutex::new(HashMap::new()));
         let doc_sources = Arc::new(Mutex::new(HashMap::new()));
         let synced = Arc::new(Mutex::new(HashMap::new()));
+        let versions = Arc::new(Mutex::new(HashMap::new()));
+        let sender = Arc::new(buffer::Sender::start(ConductorLink(conductor.clone())));
+        let handle = tokio::runtime::Handle::current();
         let publisher = Publisher {
             client: client.clone(),
             site_dir: site_dir.clone(),
             doc_sources: doc_sources.clone(),
             doc_diagnostics: doc_diagnostics.clone(),
             synced: synced.clone(),
+            versions: versions.clone(),
+            buffers: Arc::new(Mutex::new(buffer::OpenBuffers::default())),
+            conflicts: Arc::new(Mutex::new(buffer::ConflictView::default())),
             conductor: conductor.clone(),
+            sender: Arc::downgrade(&sender),
+            handle: handle.clone(),
         };
+        // The conductor's events: what changes in N for an open buffer, and
+        // its conflicts with the file on disk (LSP-1).
+        {
+            let pub_url = format!("{}-pub", conductor::socket_url(&site_dir));
+            let publisher = publisher.clone();
+            std::thread::spawn(move || listen_to_the_conductor(&pub_url, &publisher));
+        }
         Self {
             client,
             repo,
             site_dir,
             doc_sources,
             doc_diagnostics,
-            sender: buffer::Sender::start(ConductorLink(conductor.clone())),
+            sender,
             conductor,
             synced,
-            versions: Arc::new(Mutex::new(HashMap::new())),
+            versions,
             publisher,
-            handle: tokio::runtime::Handle::current(),
+            handle,
         }
     }
 
@@ -408,9 +691,9 @@ impl PresembleLsp {
     }
 
     /// The conflict of this file's unsaved edits with a change on disk, if any
-    /// (see [`Publisher::disk_conflict`]).
+    /// (as the conductor last said).
     async fn disk_conflict(&self, uri: &Url) -> Option<conductor::ConflictState> {
-        self.publisher.disk_conflict(uri).await
+        self.publisher.conflict_of(uri).await
     }
 
     async fn validate_and_publish(&self, uri: Url, src: String) {
@@ -743,6 +1026,12 @@ impl LanguageServer for PresembleLsp {
         // the file is gone.
         if let Some(content_path) = content_path_for(&self.site_dir, &path) {
             self.synced.lock().await.remove(&uri.to_string());
+            // What an update from N is checked against (LSP-1).
+            self.publisher.buffers.lock().await.opened(
+                uri.as_str(),
+                p.text_document.version,
+                src.clone(),
+            );
             self.queue_command(
                 &uri,
                 conductor::Command::EditorOpened {
@@ -750,6 +1039,11 @@ impl LanguageServer for PresembleLsp {
                     text: src.clone(),
                 },
             );
+            // Its conflict with the file on disk, if any, as it stands now;
+            // the events keep it from here on.
+            self.publisher
+                .seed_conflicts(std::slice::from_ref(&uri))
+                .await;
         }
         let kind = self.classify_path(&path).await;
         match kind {
@@ -770,6 +1064,7 @@ impl LanguageServer for PresembleLsp {
         let uri = p.text_document.uri;
         let path = uri.to_file_path().unwrap_or_default();
         self.versions.lock().await.remove(&uri.to_string());
+        self.publisher.buffers.lock().await.closed(uri.as_str());
         if let Some(content_path) = content_path_for(&self.site_dir, &path) {
             self.synced.lock().await.remove(&uri.to_string());
             // Behind the text that waits: both are sent, in order.
@@ -788,6 +1083,12 @@ impl LanguageServer for PresembleLsp {
             let version = p.text_document.version;
             self.versions.lock().await.insert(uri.to_string(), version);
             let text = c.text;
+            // The version and the text of this one notification, together.
+            self.publisher
+                .buffers
+                .lock()
+                .await
+                .changed(uri.as_str(), version, text.clone());
             // Local validation first: it does not wait for the conductor.
             match kind {
                 conductor::FileClassification::Template { .. } => {
@@ -1390,8 +1691,9 @@ impl LanguageServer for PresembleLsp {
                 self.queue_and_republish(&rel, conductor::Command::ReloadDocument { path });
             }
             // One block conflict ends: the file's version, or the unsaved one.
-            // The conductor resolves one block; taking the file's version also
-            // replaces the block in the buffer, once the conductor has taken it.
+            // The conductor resolves one block. Taking the file's version
+            // changes N, and the buffer follows N by the push (LSP-1), as it
+            // does for every change of N.
             buffer::RESOLVE_CONFLICT => {
                 let Some(resolution) = buffer::parse_resolution(&params.arguments) else {
                     return Ok(None);
@@ -1399,19 +1701,11 @@ impl LanguageServer for PresembleLsp {
                 let Ok(uri) = Url::from_file_path(self.site_dir.join(&resolution.rel)) else {
                     return Ok(None);
                 };
-                let client = self.client.clone();
                 let publisher = self.publisher.clone();
                 let handle = self.handle.clone();
                 let key = uri.to_string();
-                buffer::resolve_conflict(&self.sender, &key, resolution, move |edit| {
-                    handle.spawn(async move {
-                        if let Some(edit) = edit
-                            && let Err(e) = client.apply_edit(edit).await
-                        {
-                            eprintln!("presemble-lsp: the block edit was not applied: {e}");
-                        }
-                        publisher.publish_content_diagnostics(uri).await;
-                    });
+                buffer::resolve_conflict(&self.sender, &key, resolution, move || {
+                    handle.spawn(async move { publisher.publish_content_diagnostics(uri).await });
                 });
             }
             // The unsaved edits win; the user said which file to overwrite.
@@ -1467,5 +1761,43 @@ mod tests {
         let site = Path::new("/srv/site");
         let sent = site_path_for(site, Path::new("/srv/site/content/post/a.md")).expect("inside");
         assert_eq!(sent.as_str(), "content/post/a.md");
+    }
+
+    /// A conductor that never says anything: every receive times out (fast).
+    struct Silent;
+
+    impl EventSource for Silent {
+        fn recv(&self) -> Result<conductor::ConductorEvent, conductor::SubscriberError> {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            Err(conductor::SubscriberError::TimedOut)
+        }
+    }
+
+    /// The session ends (its queue is closed) while the listener waits for
+    /// events: at the next receive timeout the listener sees it and ends.
+    #[test]
+    fn the_subscriber_stops_when_its_session_ends() {
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (done, finished) = std::sync::mpsc::channel();
+        {
+            let asked = asked.clone();
+            std::thread::spawn(move || {
+                listen(
+                    || Ok(Silent),
+                    // Alive when first asked (it connects), closed from then on.
+                    move || asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0,
+                    || {},
+                    |_| {},
+                );
+                done.send(()).unwrap();
+            });
+        }
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok(),
+            "the listener ends with its session"
+        );
+        assert!(asked.load(std::sync::atomic::Ordering::SeqCst) >= 2);
     }
 }

@@ -155,6 +155,11 @@ pub enum SubscriberError {
     Transport(String),
     #[error("failed to deserialize event: {0}")]
     Decode(String),
+    /// No event within the receive timeout (see
+    /// [`ConductorSubscriber::set_recv_timeout`]); the subscription is
+    /// healthy.
+    #[error("no event within the receive timeout")]
+    TimedOut,
 }
 
 /// Subscriber for receiving broadcast events from the conductor via nng SUB socket.
@@ -177,16 +182,25 @@ impl ConductorSubscriber {
         Ok(Self { socket })
     }
 
-    /// Receive the next event (blocking).
+    /// Wait at most `timeout` in [`ConductorSubscriber::recv`]; past it,
+    /// `recv` answers [`SubscriberError::TimedOut`].
+    pub fn set_recv_timeout(&self, timeout: std::time::Duration) -> Result<(), String> {
+        self.socket
+            .set_opt::<nng::options::RecvTimeout>(Some(timeout))
+            .map_err(|e| format!("failed to set the receive timeout: {e}"))
+    }
+
+    /// Receive the next event (blocking, or up to the receive timeout).
     ///
-    /// Returns [`SubscriberError::Transport`] when the socket itself fails and
-    /// [`SubscriberError::Decode`] when a message arrived but was not a valid
-    /// [`ConductorEvent`].
+    /// Returns [`SubscriberError::Transport`] when the socket itself fails,
+    /// [`SubscriberError::TimedOut`] when no event came within the receive
+    /// timeout, and [`SubscriberError::Decode`] when a message arrived but was
+    /// not a valid [`ConductorEvent`].
     pub fn recv(&self) -> Result<ConductorEvent, SubscriberError> {
-        let msg = self
-            .socket
-            .recv()
-            .map_err(|e| SubscriberError::Transport(e.to_string()))?;
+        let msg = self.socket.recv().map_err(|e| match e {
+            nng::Error::TimedOut => SubscriberError::TimedOut,
+            e => SubscriberError::Transport(e.to_string()),
+        })?;
         serde_json::from_slice(&msg).map_err(|e| SubscriberError::Decode(e.to_string()))
     }
 }
@@ -368,7 +382,7 @@ mod tests {
         for _ in 0..50 {
             publisher.send(nng::Message::from(garbage)).unwrap();
             match sub.recv() {
-                Err(SubscriberError::Transport(_)) => continue, // timeout: not yet attached
+                Err(SubscriberError::TimedOut) => continue, // not yet attached
                 other => {
                     first = Some(other);
                     break;
@@ -400,7 +414,9 @@ mod tests {
                     break;
                 }
                 Err(SubscriberError::Decode(_)) => continue,
-                Err(SubscriberError::Transport(e)) => panic!("unexpected transport error: {e}"),
+                Err(e @ (SubscriberError::Transport(_) | SubscriberError::TimedOut)) => {
+                    panic!("unexpected error: {e}")
+                }
             }
         }
         match received {

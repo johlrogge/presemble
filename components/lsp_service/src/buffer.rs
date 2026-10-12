@@ -23,12 +23,19 @@ pub trait Link: Send + 'static {
 /// What runs when the conductor has answered (or failed to).
 pub type Done = Box<dyn FnOnce(Result<conductor::Response, String>) + Send>;
 
+/// How to ask for a file's editor update (LSP-1): a fresh command and what to
+/// do with its answer, each time it is asked.
+pub type UpdateJob = std::sync::Arc<dyn Fn() -> (conductor::Command, Done) + Send + Sync>;
+
 struct Job {
     /// The file the job is about (coalescing is per file).
     key: String,
-    /// Whether a newer text of the same file may replace this job while it waits.
+    /// Whether a newer text of the same file may replace this job while it
+    /// waits: the job is an editor's text.
     latest_wins: bool,
-    cmd: conductor::Command,
+    /// What to send; `None` for a task that only runs `done` in the queue's
+    /// order.
+    cmd: Option<conductor::Command>,
     done: Done,
 }
 
@@ -37,7 +44,39 @@ struct State {
     jobs: std::collections::VecDeque<Job>,
     /// A send is in flight.
     busy: bool,
+    /// The file of the job in flight, and whether it is a text.
+    in_flight: Option<(String, bool)>,
+    /// The files whose editor update is wanted once their text is idle.
+    wanted: std::collections::HashMap<String, UpdateJob>,
     stopped: bool,
+}
+
+impl State {
+    /// Whether a text of the file at `key` is queued or on its way.
+    fn text_pending(&self, key: &str) -> bool {
+        self.in_flight
+            .as_ref()
+            .is_some_and(|(k, text)| *text && k == key)
+            || self.jobs.iter().any(|j| j.latest_wins && j.key == key)
+    }
+
+    /// Queue the file's update, unless one already waits (it will be computed
+    /// for the same text).
+    fn queue_update(&mut self, key: &str, job: &UpdateJob) {
+        let waiting = self.jobs.iter().any(|j| {
+            j.key == key && matches!(j.cmd, Some(conductor::Command::GetEditorUpdate { .. }))
+        });
+        if waiting {
+            return;
+        }
+        let (cmd, done) = job();
+        self.jobs.push_back(Job {
+            key: key.to_string(),
+            latest_wins: false,
+            cmd: Some(cmd),
+            done,
+        });
+    }
 }
 
 struct Shared {
@@ -80,6 +119,7 @@ impl Sender {
                     loop {
                         if let Some(job) = state.jobs.pop_front() {
                             state.busy = true;
+                            state.in_flight = Some((job.key.clone(), job.latest_wins));
                             break job;
                         }
                         if state.stopped {
@@ -88,9 +128,25 @@ impl Sender {
                         state = worker.wake.wait(state).unwrap_or_else(|e| e.into_inner());
                     }
                 };
-                let reply = link.send(&job.cmd);
+                let (key, text) = (job.key.clone(), job.latest_wins);
+                let reply = match &job.cmd {
+                    Some(cmd) => link.send(cmd),
+                    None => Ok(conductor::Response::Ok),
+                };
                 (job.done)(reply);
-                worker.lock().busy = false;
+                {
+                    let mut state = worker.lock();
+                    state.busy = false;
+                    state.in_flight = None;
+                    // A text taken and none behind it: the file's text is idle,
+                    // and an update wanted for it is asked for now (LSP-1).
+                    if text
+                        && !state.text_pending(&key)
+                        && let Some(update) = state.wanted.remove(&key)
+                    {
+                        state.queue_update(&key, &update);
+                    }
+                }
                 worker.wake.notify_all();
             }
         });
@@ -102,7 +158,7 @@ impl Sender {
         self.queue(Job {
             key: key.to_string(),
             latest_wins: false,
-            cmd,
+            cmd: Some(cmd),
             done,
         });
     }
@@ -113,7 +169,7 @@ impl Sender {
         self.queue(Job {
             key: key.to_string(),
             latest_wins: true,
-            cmd,
+            cmd: Some(cmd),
             done,
         });
     }
@@ -127,6 +183,42 @@ impl Sender {
         }
         drop(state);
         self.shared.wake.notify_all();
+    }
+
+    /// Ask the conductor for the editor update of the file at `key` (LSP-1):
+    /// at once when none of its text is queued or on its way, otherwise once
+    /// its last text has been taken. An update is computed for the editor's
+    /// last text, so it is never asked for while the buffer is ahead of it.
+    pub fn request_update(&self, key: &str, job: &UpdateJob) {
+        let mut state = self.shared.lock();
+        if state.text_pending(key) {
+            state.wanted.insert(key.to_string(), job.clone());
+        } else {
+            state.queue_update(key, job);
+        }
+        drop(state);
+        self.shared.wake.notify_all();
+    }
+
+    /// Ask for the update of the file at `key` again the next time its text
+    /// is idle (a text taken): an update the editor refused for no reason the
+    /// buffer shows is not asked for again at once.
+    pub fn update_later(&self, key: &str, job: &UpdateJob) {
+        self.shared
+            .lock()
+            .wanted
+            .insert(key.to_string(), job.clone());
+    }
+
+    /// Run `done` in the queue's order, with no conductor call (it is given
+    /// `Ok(Response::Ok)`).
+    pub fn push_task(&self, key: &str, done: Done) {
+        self.queue(Job {
+            key: key.to_string(),
+            latest_wins: false,
+            cmd: None,
+            done,
+        });
     }
 
     /// Wait until nothing is queued and nothing is in flight.
@@ -177,7 +269,7 @@ pub fn conflict_offer(
             .iter()
             .filter_map(|region| {
                 let range = region_range(buffer, region);
-                overlaps(&range, request).then(|| region_actions(uri, rel, version, range, region))
+                overlaps(&range, request).then(|| region_actions(rel, region))
             })
             .flatten()
             .collect(),
@@ -208,6 +300,140 @@ pub fn conflict_diagnostics(
     }
 }
 
+/// The conflict of each file with the file on disk, as the conductor last
+/// said (LSP-1): its `DiskConflict` events, or what it listed when the file was
+/// opened. The conflict diagnostics are published from this, so a conflict
+/// and its end show at once, without asking the conductor on every change.
+#[derive(Debug, Default)]
+pub struct ConflictView {
+    by_file: std::collections::HashMap<String, ConflictState>,
+}
+
+impl ConflictView {
+    /// A `DiskConflict` event (or what the conductor listed) for site-relative
+    /// `file`: its state replaces the one before; `Resolved` removes it.
+    pub fn apply(&mut self, file: &str, state: ConflictState) {
+        match state {
+            ConflictState::Resolved => {
+                self.by_file.remove(file);
+            }
+            state => {
+                self.by_file.insert(file.to_string(), state);
+            }
+        }
+    }
+
+    /// The conflict `file` is in, if any.
+    pub fn state(&self, file: &str) -> Option<&ConflictState> {
+        self.by_file.get(file)
+    }
+}
+
+// ── Updates from N (LSP-1) ──────────────────────────────────────────────────
+
+/// An open buffer as the client last said it: the version and the text of one
+/// notification, always together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BufferState {
+    pub version: i32,
+    pub text: String,
+}
+
+/// The open buffers (by URI), as the client's notifications left them: what an
+/// update from N is checked against when it arrives (LSP-1).
+#[derive(Debug, Default)]
+pub struct OpenBuffers {
+    by_uri: std::collections::HashMap<String, BufferState>,
+}
+
+impl OpenBuffers {
+    /// A buffer was opened with `text` at `version`.
+    pub fn opened(&mut self, key: &str, version: i32, text: String) {
+        self.by_uri
+            .insert(key.to_string(), BufferState { version, text });
+    }
+
+    /// A buffer changed: `version` and `text` from the same notification.
+    pub fn changed(&mut self, key: &str, version: i32, text: String) {
+        self.by_uri
+            .insert(key.to_string(), BufferState { version, text });
+    }
+
+    pub fn closed(&mut self, key: &str) {
+        self.by_uri.remove(key);
+    }
+
+    pub fn get(&self, key: &str) -> Option<&BufferState> {
+        self.by_uri.get(key)
+    }
+
+    /// What an update the conductor answered for the buffer at `key` does to
+    /// it: decided against the buffer as it is now, not as it was when the
+    /// update was asked for.
+    pub fn decide(
+        &self,
+        key: &str,
+        last_hash: Option<conductor::TextHash>,
+        edits: &[conductor::BufferEdit],
+    ) -> UpdateDecision {
+        match self.get(key) {
+            Some(buffer) => decide_update(buffer, last_hash, edits),
+            None => UpdateDecision::Nothing,
+        }
+    }
+}
+
+/// What to do with an editor update the conductor answered.
+#[derive(Debug, PartialEq)]
+pub enum UpdateDecision {
+    /// Apply these edits to the buffer, at the version of the text they were
+    /// checked against (the client refuses them if it has moved on since).
+    Apply { version: i32, edits: Vec<TextEdit> },
+    /// The buffer is not the text the update was computed for: ask again.
+    Stale,
+    /// Nothing to apply.
+    Nothing,
+}
+
+/// Decide what an update the conductor answered does to `buffer`: its edits
+/// (in LSP positions, UTF-16) when the buffer is the text they were computed
+/// for, `Stale` when it is not (it has moved on: ask again), and nothing when
+/// there is no editor in the conductor or nothing to change.
+pub fn decide_update(
+    state: &BufferState,
+    last_hash: Option<conductor::TextHash>,
+    edits: &[conductor::BufferEdit],
+) -> UpdateDecision {
+    let buffer = state.text.as_str();
+    let Some(last_hash) = last_hash else {
+        return UpdateDecision::Nothing;
+    };
+    if edits.is_empty() {
+        return UpdateDecision::Nothing;
+    }
+    if conductor::TextHash::of(buffer) != last_hash {
+        return UpdateDecision::Stale;
+    }
+    // Ranges outside the text cannot be from it.
+    if edits.iter().any(|e| {
+        e.range.end > buffer.len()
+            || !buffer.is_char_boundary(e.range.start)
+            || !buffer.is_char_boundary(e.range.end)
+    }) {
+        return UpdateDecision::Stale;
+    }
+    UpdateDecision::Apply {
+        version: state.version,
+        edits: edits
+            .iter()
+            .map(|e| TextEdit {
+                range: lsp_range(buffer, &e.range),
+                new_text: e.text.clone(),
+            })
+            .collect(),
+    }
+}
+
 /// Where a conflict's block is in the buffer: the block its location (in N)
 /// names in the buffer's document, or the nearest one on its path, or the
 /// first line.
@@ -231,67 +457,25 @@ pub fn region_range(buffer: &BufferDoc, region: &ConflictRegion) -> Range {
     }
 }
 
-/// The buffer edit that comes with taking the file's version of a block: its
-/// range in the buffer becomes the file's text of it. Sent as the last
-/// argument of the command, and applied once the conductor has taken it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BlockEdit {
-    pub uri: Url,
-    pub version: i32,
-    pub range: Range,
-    pub text: String,
-}
-
-impl BlockEdit {
-    fn to_json(&self) -> serde_json::Value {
-        json!({
-            "uri": self.uri.to_string(),
-            "version": self.version,
-            "range": serde_json::to_value(self.range).unwrap_or_default(),
-            "text": self.text,
-        })
-    }
-
-    fn from_json(value: &serde_json::Value) -> Option<BlockEdit> {
-        Some(BlockEdit {
-            uri: Url::parse(value.get("uri")?.as_str()?).ok()?,
-            version: i32::try_from(value.get("version")?.as_i64()?).ok()?,
-            range: serde_json::from_value(value.get("range")?.clone()).ok()?,
-            text: value.get("text")?.as_str()?.to_string(),
-        })
-    }
-}
-
 /// The two ways out of a block conflict: each resolves that block alone, in
-/// the conductor (`rel` is the site-relative path of the file). Taking the
-/// file's version also carries the edit of the block in the buffer.
-fn region_actions(
-    uri: &Url,
-    rel: &str,
-    version: i32,
-    range: Range,
-    region: &ConflictRegion,
-) -> Vec<CodeActionOrCommand> {
-    let edit = BlockEdit {
-        uri: uri.clone(),
-        version,
-        range,
-        text: region.disk.clone(),
-    };
+/// the conductor (`rel` is the site-relative path of the file). Neither
+/// touches the buffer: taking the file's version changes N, and N's change
+/// reaches the buffer as every change of N does, by the push (LSP-1).
+fn region_actions(rel: &str, region: &ConflictRegion) -> Vec<CodeActionOrCommand> {
     [
-        (TAKE_FILE_BLOCK, SIDE_DISK, Some(edit)),
-        (KEEP_UNSAVED_BLOCK, SIDE_UNSAVED, None),
+        (TAKE_FILE_BLOCK, SIDE_DISK),
+        (KEEP_UNSAVED_BLOCK, SIDE_UNSAVED),
     ]
     .into_iter()
-    .map(|(title, side, edit)| {
-        let mut arguments = vec![json!(rel), json!(region.id.to_string()), json!(side)];
-        if let Some(edit) = edit {
-            arguments.push(edit.to_json());
-        }
+    .map(|(title, side)| {
         CodeActionOrCommand::CodeAction(CodeAction {
             title: title.to_string(),
             kind: Some(CodeActionKind::QUICKFIX),
-            command: Some(command(title, RESOLVE_CONFLICT, arguments)),
+            command: Some(command(
+                title,
+                RESOLVE_CONFLICT,
+                vec![json!(rel), json!(region.id.to_string()), json!(side)],
+            )),
             ..Default::default()
         })
     })
@@ -299,12 +483,10 @@ fn region_actions(
 }
 
 /// A block resolution read from the arguments of a [`RESOLVE_CONFLICT`]
-/// command: the site-relative file, the command for the conductor, and the
-/// buffer edit to apply once it has been taken (taking the file's version).
+/// command: the site-relative file and the command for the conductor.
 pub struct Resolution {
     pub rel: String,
     pub command: conductor::Command,
-    pub edit: Option<BlockEdit>,
 }
 
 /// The resolution the arguments of a [`RESOLVE_CONFLICT`] command spell.
@@ -318,42 +500,20 @@ pub fn parse_resolution(arguments: &[serde_json::Value]) -> Option<Resolution> {
         SIDE_UNSAVED => ConflictSide::Unsaved,
         _ => return None,
     };
-    let edit = arguments.get(3).and_then(BlockEdit::from_json);
     Some(Resolution {
         rel,
         command: conductor::Command::ResolveConflict { path, id, take },
-        edit,
     })
 }
 
-/// Queue `resolution` for the conductor; when it has answered, `then` gets
-/// the buffer edit to apply: the block's file version, only once the
-/// conductor has taken it (so N holds that text when the edit reaches it as a
-/// change, and it lowers to nothing). `None` when there is nothing to apply.
+/// Queue `resolution` for the conductor; `then` runs once it has answered.
 pub fn resolve_conflict(
     sender: &Sender,
     key: &str,
     resolution: Resolution,
-    then: impl FnOnce(Option<WorkspaceEdit>) + Send + 'static,
+    then: impl FnOnce() + Send + 'static,
 ) {
-    let edit = resolution.edit;
-    sender.push(
-        key,
-        resolution.command,
-        Box::new(move |reply| {
-            let taken = matches!(reply, Ok(conductor::Response::Ok));
-            then(edit.filter(|_| taken).map(|edit| {
-                versioned_edit(
-                    &edit.uri,
-                    edit.version,
-                    vec![TextEdit {
-                        range: edit.range,
-                        new_text: edit.text,
-                    }],
-                )
-            }))
-        }),
-    );
+    sender.push(key, resolution.command, Box::new(move |_| then()));
 }
 
 // ── What the conductor answered ─────────────────────────────────────────────
@@ -1289,10 +1449,11 @@ mod tests {
         }
     }
 
-    /// Taking the file's version of a block: the conductor is told first, and
-    /// once it has answered, the block in the buffer becomes the file's text.
+    /// Taking the file's version of a block only tells the conductor: the
+    /// buffer is updated by the push that follows the change in N (LSP-1),
+    /// the one path for every change of N. The command carries no edit.
     #[test]
-    fn taking_the_files_version_also_replaces_the_block_in_the_buffer() {
+    fn taking_the_files_version_only_resolves_and_the_push_updates_the_buffer() {
         let file = "# Title\n\n----\n\nAlpha.\n\nBeta disk.\n";
         let text = "# Title\n\n----\n\nAlpha.\n\nAdded above.\n\nBeta mine.\n";
         let doc = read(text);
@@ -1321,56 +1482,38 @@ mod tests {
             file,
         );
         let take = command_of(&actions[0]);
+        assert_eq!(
+            take.arguments.as_deref().unwrap_or_default(),
+            [
+                json!("content/post/a.md"),
+                json!("00000000000000ab"),
+                json!(SIDE_DISK)
+            ],
+            "the file, the conflict and the side: no buffer edit"
+        );
         let resolution =
             parse_resolution(take.arguments.as_deref().unwrap_or_default()).expect("a resolution");
-
+        assert!(
+            matches!(
+                resolution.command,
+                conductor::Command::ResolveConflict {
+                    take: ConflictSide::Disk,
+                    ..
+                }
+            ),
+            "{:?}",
+            resolution.command
+        );
+        // Sending it tells the conductor, and only that.
         let log = Arc::new(Mutex::new(Vec::new()));
         let sender = Sender::start(Logged(log.clone()));
         let (tx, rx) = mpsc::channel();
-        let seen = log.clone();
-        resolve_conflict(&sender, "a", resolution, move |edit| {
-            // The conductor had been told when the edit comes.
-            tx.send((seen.lock().unwrap().clone(), edit)).unwrap();
-        });
-        let (sent, edit) = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+        resolve_conflict(&sender, "a", resolution, move || tx.send(()).unwrap());
+        rx.recv_timeout(std::time::Duration::from_secs(5))
             .expect("the resolution finishes");
+        let sent = log.lock().unwrap().clone();
         assert_eq!(sent.len(), 1, "{sent:?}");
-        assert!(
-            sent[0].starts_with("ResolveConflict") && sent[0].contains("Disk"),
-            "{sent:?}"
-        );
-        let edit = edit.expect("a buffer edit");
-        let changes = edit.document_changes.expect("versioned");
-        let DocumentChanges::Edits(edits) = changes else {
-            panic!("text edits");
-        };
-        assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].text_document.version, Some(3));
-        let edits: Vec<TextEdit> = edits[0]
-            .edits
-            .iter()
-            .map(|e| match e {
-                OneOf::Left(e) => e.clone(),
-                OneOf::Right(e) => e.text_edit.clone(),
-            })
-            .collect();
-        assert_eq!(
-            edits,
-            [TextEdit {
-                range: Range {
-                    start: Position {
-                        line: 8,
-                        character: 0
-                    },
-                    end: Position {
-                        line: 8,
-                        character: 10
-                    },
-                },
-                new_text: "Beta disk.".to_string(),
-            }]
-        );
+        assert!(sent[0].starts_with("ResolveConflict"), "{sent:?}");
     }
 
     /// Keeping the unsaved version only tells the conductor.
@@ -1408,14 +1551,13 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let sender = Sender::start(Logged(log.clone()));
         let (tx, rx) = mpsc::channel();
-        resolve_conflict(&sender, "a", resolution, move |edit| {
-            tx.send(edit).unwrap();
+        resolve_conflict(&sender, "a", resolution, move || {
+            tx.send(()).unwrap();
         });
-        let edit = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+        rx.recv_timeout(std::time::Duration::from_secs(5))
             .expect("the resolution finishes");
-        assert!(edit.is_none());
         let sent = log.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "only the conductor is told: {sent:?}");
         assert!(sent[0].contains("Unsaved"), "{sent:?}");
     }
 
@@ -1472,5 +1614,218 @@ mod tests {
         let src = "# Title\n\n----\n\n* a\n* b\n";
         let canonical = apply(src, &formatting_edits(src, &grammar()));
         assert!(formatting_edits(&canonical, &grammar()).is_empty());
+    }
+
+    // ── updates from N (LSP-1) ──────────────────────────────────────────────
+
+    /// An update job that logs "update" when the conductor is asked.
+    fn update_job(rig: &Rig) -> UpdateJob {
+        let replies = rig.replies.clone();
+        Arc::new(move || {
+            let replies = replies.clone();
+            (
+                conductor::Command::GetEditorUpdate {
+                    path: conductor::editorial_types::ContentPath::parse("content/post/a.md")
+                        .expect("a content path"),
+                },
+                Box::new(move |_| replies.lock().unwrap().push("update".to_string())) as Done,
+            )
+        })
+    }
+
+    fn is_update(line: &str) -> bool {
+        line.starts_with("GetEditorUpdate")
+    }
+
+    /// While the editor's text is on its way (and more is typed meanwhile),
+    /// the update is not asked for: it would be computed for a text the
+    /// buffer has left. It is asked for once the last text has been taken.
+    #[test]
+    fn an_update_waits_while_the_outbox_is_busy() {
+        let rig = rig();
+        rig.sender.push_latest("a", changed("1"), rig.done("1"));
+        rig.first_send_in_flight();
+        rig.sender.request_update("a", &update_job(&rig));
+        rig.sender.push_latest("a", changed("2"), rig.done("2"));
+        let log = rig.finish();
+        assert_eq!(log.len(), 3, "{log:?}");
+        assert_eq!(log[..2], ["changed 1", "changed 2"], "{log:?}");
+        assert!(is_update(&log[2]), "asked after the last text: {log:?}");
+    }
+
+    /// GUARD: with nothing on its way, the update is asked for at once.
+    #[test]
+    fn an_update_is_asked_at_once_when_the_outbox_is_idle() {
+        let rig = rig();
+        rig.sender.request_update("a", &update_job(&rig));
+        rig.release.send(()).unwrap();
+        rig.sender.wait_idle();
+        let log = rig.log.lock().unwrap().clone();
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(is_update(&log[0]), "{log:?}");
+    }
+
+    /// A refused update waits for the next idle (a text taken), and is asked
+    /// for once then.
+    #[test]
+    fn a_refused_update_is_asked_for_again_when_idle() {
+        let rig = rig();
+        rig.sender.update_later("a", &update_job(&rig));
+        rig.sender.push_latest("a", changed("1"), rig.done("1"));
+        let log = rig.finish();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!(log[0], "changed 1", "not before the next idle: {log:?}");
+        assert!(is_update(&log[1]), "{log:?}");
+        // Asked once: the next idle asks nothing.
+        rig.sender.push_latest("a", changed("2"), rig.done("2"));
+        rig.sender.wait_idle();
+        assert_eq!(rig.log.lock().unwrap().len(), 3);
+    }
+
+    fn wire_edit(range: std::ops::Range<usize>, text: &str) -> conductor::BufferEdit {
+        conductor::BufferEdit {
+            range,
+            text: text.to_string(),
+        }
+    }
+
+    fn state(version: i32, text: &str) -> BufferState {
+        BufferState {
+            version,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_update_applies_only_to_the_text_it_was_computed_for() {
+        let computed_for = state(3, "# Title\n\n----\n\nAlpha.\n");
+        let edit = wire_edit(15..20, "Beta");
+        let hash = Some(conductor::TextHash::of(&computed_for.text));
+        assert!(matches!(
+            decide_update(&computed_for, hash, std::slice::from_ref(&edit)),
+            UpdateDecision::Apply { version: 3, .. }
+        ));
+        // The buffer has moved on: not applied, asked again.
+        assert_eq!(
+            decide_update(
+                &state(4, "# Title\n\n----\n\nAlpha typed.\n"),
+                hash,
+                std::slice::from_ref(&edit)
+            ),
+            UpdateDecision::Stale
+        );
+        // No editor (no hash), or nothing to change: nothing to apply.
+        assert_eq!(
+            decide_update(&computed_for, None, &[edit]),
+            UpdateDecision::Nothing
+        );
+        assert_eq!(
+            decide_update(&computed_for, hash, &[]),
+            UpdateDecision::Nothing
+        );
+    }
+
+    /// The user typed after the update was asked for: the buffer as it is now
+    /// (the latest notification, version and text together) is what the
+    /// update is checked against, so it is not applied.
+    #[test]
+    fn an_update_is_not_applied_when_the_user_typed_since_it_was_asked_for() {
+        let asked_for = "# Title\n\n----\n\nAlpha.\n";
+        let typed = "# Title\n\n----\n\nAlpha typed.\n";
+        let edit = wire_edit(15..20, "Beta");
+        let hash = Some(conductor::TextHash::of(asked_for));
+        let mut buffers = OpenBuffers::default();
+        buffers.opened("a", 1, asked_for.to_string());
+        buffers.changed("a", 2, typed.to_string());
+        assert_eq!(
+            buffers.decide("a", hash, std::slice::from_ref(&edit)),
+            UpdateDecision::Stale
+        );
+        // Back to the text it was computed for (version 3): applied at 3.
+        buffers.changed("a", 3, asked_for.to_string());
+        assert!(matches!(
+            buffers.decide("a", hash, std::slice::from_ref(&edit)),
+            UpdateDecision::Apply { version: 3, .. }
+        ));
+        // A closed buffer takes nothing.
+        buffers.closed("a");
+        assert_eq!(buffers.decide("a", hash, &[edit]), UpdateDecision::Nothing);
+    }
+
+    #[test]
+    fn update_positions_are_utf16() {
+        // "é" is one UTF-16 unit (two bytes), "😀" two units (four bytes).
+        let buffer = "# Title\n\n----\n\né😀 Alpha.\n";
+        let at = buffer.find("Alpha").unwrap();
+        let edit = wire_edit(at..at + "Alpha".len(), "Beta");
+        let UpdateDecision::Apply { edits, .. } = decide_update(
+            &state(1, buffer),
+            Some(conductor::TextHash::of(buffer)),
+            &[edit],
+        ) else {
+            panic!("an update to apply");
+        };
+        assert_eq!(
+            edits,
+            [TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 4,
+                        character: 4
+                    },
+                    end: Position {
+                        line: 4,
+                        character: 9
+                    },
+                },
+                new_text: "Beta".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_disk_conflict_event_replaces_the_conflict_diagnostics() {
+        let file = "# Title\n\n----\n\nAlpha.\n\nBeta disk.\n";
+        let text = "# Title\n\n----\n\nAlpha.\n\nBeta mine.\n";
+        let doc = read(text);
+        let buffer = BufferDoc {
+            text,
+            doc: Some(&doc),
+        };
+        let mut view = ConflictView::default();
+        view.apply("content/post/a.md", ConflictState::WholeFile);
+        assert_eq!(
+            conflict_diagnostics(view.state("content/post/a.md"), &buffer),
+            vec![conflict_diagnostic()]
+        );
+        view.apply(
+            "content/post/a.md",
+            ConflictState::Blocks(vec![region(file, 1)]),
+        );
+        let diagnostics = conflict_diagnostics(view.state("content/post/a.md"), &buffer);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics[0].range.start,
+            Position {
+                line: 6,
+                character: 0
+            },
+            "the block's diagnostic replaces the whole-file one"
+        );
+        // Another file is not touched.
+        assert_eq!(view.state("content/post/b.md"), None);
+    }
+
+    #[test]
+    fn resolved_clears_them_at_once() {
+        let mut view = ConflictView::default();
+        view.apply("content/post/a.md", ConflictState::WholeFile);
+        view.apply("content/post/a.md", ConflictState::Resolved);
+        assert_eq!(view.state("content/post/a.md"), None);
+        let buffer = BufferDoc {
+            text: "mine\n",
+            doc: None,
+        };
+        assert!(conflict_diagnostics(view.state("content/post/a.md"), &buffer).is_empty());
     }
 }

@@ -351,6 +351,8 @@ fn relay_conductor_events(pub_url: &str, channels: &BrowserChannels, trigger: &P
                 Err(conductor::SubscriberError::Decode(e)) => {
                     eprintln!("Conductor subscription: skipping undecodable event: {e}");
                 }
+                // No receive timeout is set here; nothing to do if one were.
+                Err(conductor::SubscriberError::TimedOut) => {}
                 Err(conductor::SubscriberError::Transport(e)) => {
                     eprintln!(
                         "Conductor subscription transport error ({e}); reconnecting in {}ms",
