@@ -307,6 +307,9 @@ pub enum Command {
         id: ConflictId,
         take: ConflictSide,
     },
+    /// What the open editor of a document should do to its buffer to read as
+    /// N again: answered with [`Response::EditorUpdate`].
+    GetEditorUpdate { path: editorial_types::ContentPath },
     /// Editor saved a document (from LSP did_save). When the file holds the
     /// editor's latest text this is a flush of N (held regions are lowered as
     /// they stand; N's text is written if it holds others' changes).
@@ -493,6 +496,47 @@ pub enum Response {
         failed_pages: Vec<String>,
         dirty_paths: usize,
     },
+    /// Answer to [`Command::GetEditorUpdate`]: the edits that bring the
+    /// editor's last text up to N, block by block, leaving the regions N holds
+    /// back or did not take alone; and the hash of the text they apply to.
+    /// No open editor: no hash and no edits.
+    EditorUpdate {
+        last_hash: Option<TextHash>,
+        edits: Vec<BufferEdit>,
+    },
+}
+
+/// The FNV-1a hash of a text: which text a [`Response::EditorUpdate`] was
+/// computed for, so that it is only applied to that text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TextHash(pub u64);
+
+impl TextHash {
+    pub fn of(text: &str) -> TextHash {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in text.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        TextHash(hash)
+    }
+}
+
+/// Replace the bytes `range` of a text with `text` (the wire form of
+/// `content::sync::BufferEdit`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferEdit {
+    pub range: std::ops::Range<usize>,
+    pub text: String,
+}
+
+impl From<content::sync::BufferEdit> for BufferEdit {
+    fn from(edit: content::sync::BufferEdit) -> BufferEdit {
+        BufferEdit {
+            range: edit.range,
+            text: edit.text,
+        }
+    }
 }
 
 /// Events broadcast from conductor to all subscribers via nng PUB/SUB.
@@ -542,6 +586,11 @@ pub enum ConductorEvent {
     /// changed, or it ended (`Resolved`). The unsaved edits are kept until it
     /// is resolved. `file` is site-relative.
     DiskConflict { file: String, state: ConflictState },
+    /// A document changed in N other than through its open editor's own
+    /// typing (a browser, MCP or REPL edit, an accepted suggestion, a reload,
+    /// a disk merge, a resolved conflict): an editor that has it open can ask
+    /// for its update ([`Command::GetEditorUpdate`]). `file` is site-relative.
+    DocumentModelChanged { file: String },
     /// Documents were written to disk by a save: what readers see (the
     /// published output) may have changed. `files` are site-relative paths.
     /// Not sent for a refused save or for an edit that was not saved.

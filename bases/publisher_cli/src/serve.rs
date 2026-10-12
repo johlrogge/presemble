@@ -257,6 +257,8 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
     use conductor::ConductorEvent;
     Some(match ev {
         ConductorEvent::DocumentsSaved { .. } => return None,
+        // For open editors: the browser follows N through `PagesRebuilt`.
+        ConductorEvent::DocumentModelChanged { .. } => return None,
         ConductorEvent::PagesRebuilt { pages, anchor } => {
             EditorialMessage::Reload { pages, anchor }
         }

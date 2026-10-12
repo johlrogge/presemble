@@ -1002,7 +1002,7 @@ impl Conductor {
                     .map(|n| step(*n, editorial_types::NedMutation::Delete)),
             );
             let (_, applied) = self
-                .execute_plan(steps.into_iter().collect())
+                .run_plan(steps.into_iter().collect())
                 .map_err(|_| "the conflict has changed; look at the current ones".to_string())?;
             events.extend(applied);
         }
@@ -1165,6 +1165,49 @@ impl Conductor {
         self.finish_sync(path, state, result)
     }
 
+    /// What the open editor of `path` should do to its buffer to read as N
+    /// ([`Command::GetEditorUpdate`], LSP-1): the edits that rewrite the
+    /// blocks of its last text that differ from N's, except where they would
+    /// touch a region N holds back or did not take (those stay the editor's
+    /// until it resolves them), with the hash of the text they apply to. No
+    /// open editor: nothing.
+    pub(super) fn editor_update(&self, path: &editorial_types::ContentPath) -> CommandResult {
+        let Some(state) = self
+            .editors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .cloned()
+        else {
+            return CommandResult::with_response(Response::EditorUpdate {
+                last_hash: None,
+                edits: Vec::new(),
+            });
+        };
+        let kept: Vec<Range<usize>> = state
+            .held
+            .iter()
+            .map(|h| h.range.clone())
+            .chain(state.drifts.iter().map(|d| d.drift.range.clone()))
+            .collect();
+        // An insertion at either end of a kept region counts as touching it.
+        let touches = |edit: &BufferEdit, region: &Range<usize>| {
+            edit.range.start <= region.end && region.start <= edit.range.end
+        };
+        let edits = match self.canonical_text(path) {
+            Some(model) => sync::changed_block_edits(&state.last, &model)
+                .into_iter()
+                .filter(|edit| !kept.iter().any(|region| touches(edit, region)))
+                .map(crate::protocol::BufferEdit::from)
+                .collect(),
+            None => Vec::new(),
+        };
+        CommandResult::with_response(Response::EditorUpdate {
+            last_hash: Some(crate::protocol::TextHash::of(&state.last)),
+            edits,
+        })
+    }
+
     pub(super) fn keep_mine(
         &self,
         path: editorial_types::ContentPath,
@@ -1213,7 +1256,7 @@ impl Conductor {
                     rest.iter()
                         .map(|n| step(*n, editorial_types::NedMutation::Delete)),
                 );
-                match self.execute_plan(steps.into_iter().collect()) {
+                match self.run_plan(steps.into_iter().collect()) {
                     Ok((_, e)) => events.extend(e),
                     Err(_) => return refused(),
                 }
@@ -1266,7 +1309,9 @@ impl Conductor {
         text: &str,
     ) -> Result<Vec<ConductorEvent>, String> {
         let pages = self.rebuild_page(abs, text)?;
-        self.mark_unsaved(&[PathBuf::from(path.as_str())]);
+        let rel = [PathBuf::from(path.as_str())];
+        self.mark_unsaved(&rel);
+        self.model_changed(&rel);
         Ok(if pages.is_empty() {
             vec![]
         } else {
@@ -1287,7 +1332,15 @@ impl Conductor {
         state: &mut EditorState,
         lower_held: bool,
     ) -> Result<Vec<ConductorEvent>, String> {
-        self.sync_channel(Channel::Editor, path, abs, state, lower_held)
+        // What the editor's own text changes in N is not announced back to
+        // it (LSP-1); a change N had already from elsewhere still is.
+        let rel = Path::new(path.as_str());
+        let pending = self.model_change_pending(rel);
+        let result = self.sync_channel(Channel::Editor, path, abs, state, lower_held);
+        if !pending {
+            self.model_change_was_the_editors(rel);
+        }
+        result
     }
 
     /// Lower the difference between `state.last` and `state.base` into N, for
@@ -1411,7 +1464,7 @@ impl Conductor {
             let all_at_once = channel == Channel::Editor && {
                 let combined: edit::Plan =
                     steps.iter().flat_map(|(_, s)| s.iter().cloned()).collect();
-                match self.execute_plan(combined) {
+                match self.run_plan(combined) {
                     Ok((_, e)) => {
                         events.extend(e);
                         true
@@ -1421,7 +1474,7 @@ impl Conductor {
             };
             if !all_at_once {
                 for (i, s) in steps {
-                    match self.execute_plan(s.into_iter().collect()) {
+                    match self.run_plan(s.into_iter().collect()) {
                         Ok((_, e)) => events.extend(e),
                         Err(_) => failed.push(i),
                     }
@@ -1604,7 +1657,7 @@ impl Conductor {
             return Vec::new();
         }
         let combined: edit::Plan = plans.iter().map(|(s, _)| s.clone()).collect();
-        match self.execute_plan(combined) {
+        match self.run_plan(combined) {
             Ok((_, events)) => events,
             Err(_) => {
                 for (_, site) in plans {
@@ -4365,5 +4418,338 @@ mod tests {
         w.conductor
             .handle_command(Command::EditorClosed { path: path() });
         assert_eq!(on_disk(&w), CONTENT);
+    }
+
+    // ── telling editors when N changes (LSP-1) ─────────────────────────────
+
+    /// The files a result announces as changed in N.
+    fn model_changes(result: &CommandResult) -> Vec<String> {
+        result
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                ConductorEvent::DocumentModelChanged { file } => Some(file.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn apply_program(w: &World, program: &str) -> CommandResult {
+        let result = w.conductor.handle_command(Command::ApplyNedProgram {
+            program: program.to_string(),
+        });
+        assert!(
+            matches!(result.response, Response::Applied { .. }),
+            "{:?}",
+            result.response
+        );
+        result
+    }
+
+    /// The editor's update: the hash of the text it applies to, and the edits.
+    fn editor_update(
+        w: &World,
+    ) -> (
+        Option<crate::protocol::TextHash>,
+        Vec<content::sync::BufferEdit>,
+    ) {
+        match w
+            .conductor
+            .handle_command(Command::GetEditorUpdate { path: path() })
+            .response
+        {
+            Response::EditorUpdate { last_hash, edits } => (
+                last_hash,
+                edits
+                    .into_iter()
+                    .map(|e| content::sync::BufferEdit {
+                        range: e.range,
+                        text: e.text,
+                    })
+                    .collect(),
+            ),
+            other => panic!("expected EditorUpdate, got {other:?}"),
+        }
+    }
+
+    /// Whether `edit` touches `region` (an insertion at either end counts).
+    fn touches(edit: &content::sync::BufferEdit, region: &Range<usize>) -> bool {
+        edit.range.start <= region.end && region.start <= edit.range.end
+    }
+
+    fn browser_suggests_alpha(w: &World, markdown: &str) -> editorial_types::SuggestionId {
+        let result = w.conductor.handle_command(Command::BlockEdit(editorial_types::BlockEditRequest {
+            file: path(),
+            selection: r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "paragraph" 0)"#.to_string(),
+            base: BlockText::Markdown("Alpha para.".to_string()),
+            proposed: BlockText::Markdown(markdown.to_string()),
+            intent: BlockEditIntent::Suggest,
+            reason: None,
+        }));
+        match result.response {
+            Response::BlockEdited(editorial_types::BlockEditResponse::Done(
+                editorial_types::BlockEditOutcome::SuggestionCreated { id },
+            )) => id,
+            other => panic!("expected SuggestionCreated, got {other:?}"),
+        }
+    }
+
+    const SET_TITLE: &str = r#"(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title"))) "Changed Post")"#;
+
+    #[test]
+    fn a_ned_plan_announces_the_model_change() {
+        let w = world();
+        open(&w, CONTENT);
+        let result = apply_program(&w, SET_TITLE);
+        assert_eq!(model_changes(&result), [FILE]);
+    }
+
+    #[test]
+    fn an_accepted_suggestion_announces_it() {
+        let w = world();
+        let id = browser_suggests_alpha(&w, "Alpha suggested.");
+        let accepted = w
+            .conductor
+            .handle_command(Command::AcceptNedSuggestion { id });
+        assert_eq!(body_markdown(&w)[0], "Alpha suggested.");
+        assert_eq!(model_changes(&accepted), [FILE]);
+    }
+
+    #[test]
+    fn a_reload_announces_it() {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        let reloaded = w
+            .conductor
+            .handle_command(Command::ReloadDocument { path: path() });
+        assert_eq!(model_changes(&reloaded), [FILE]);
+    }
+
+    #[test]
+    fn a_disk_merge_announces_it() {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        let merged = disk_changes(&w, &CONTENT.replace("Gamma para.", "Gamma disk."));
+        assert_eq!(body_markdown(&w)[4], "Gamma disk.");
+        assert_eq!(model_changes(&merged), [FILE]);
+
+        // A clean document takes a disk change as it is: announced too.
+        let w = world();
+        let taken = disk_changes(&w, &CONTENT.replace("Gamma para.", "Gamma disk."));
+        assert_eq!(model_changes(&taken), [FILE]);
+    }
+
+    /// The editor has a browser edit in its buffer (unsaved in N); the file
+    /// then changes another block: merged, announced, and the editor's update
+    /// is exactly that block.
+    #[test]
+    fn a_disk_merge_into_unsaved_edits_announces_it() {
+        let w = world();
+        open(&w, CONTENT);
+        browser_sets_alpha(&w, "Alpha browser.");
+        let synced_text = CONTENT.replace("Alpha para.", "Alpha browser.");
+        change(&w, &synced_text);
+        assert!(dirty(&w));
+        assert_eq!(editor_update(&w).1, Vec::new(), "the editor has caught up");
+
+        let merged = disk_changes(&w, &CONTENT.replace("Gamma para.", "Gamma disk."));
+        assert!(conflicts(&w).is_empty());
+        assert_eq!(body_markdown(&w)[0], "Alpha browser.");
+        assert_eq!(body_markdown(&w)[4], "Gamma disk.");
+        assert_eq!(model_changes(&merged), [FILE]);
+
+        let (hash, edits) = editor_update(&w);
+        assert_eq!(hash, Some(crate::protocol::TextHash::of(&synced_text)));
+        let gamma = {
+            let at = synced_text.find("Gamma para.").unwrap();
+            at..at + "Gamma para.".len()
+        };
+        assert!(!edits.is_empty());
+        assert!(
+            edits
+                .iter()
+                .all(|e| e.range.start >= gamma.start && e.range.end <= gamma.end),
+            "exactly the merged block: {edits:?}"
+        );
+        assert_eq!(
+            sync::apply_edits(&synced_text, &edits),
+            synced_text.replace("Gamma para.", "Gamma disk.")
+        );
+    }
+
+    #[test]
+    fn keep_mine_announces_the_model_change() {
+        let (w, text, drifts) = drifted_world();
+        let kept = w.conductor.handle_command(Command::KeepMine {
+            path: path(),
+            drift_id: drifts[0].id,
+        });
+        assert_eq!(body_markdown(&w)[0], "Alpha mine.");
+        assert_eq!(model_changes(&kept), [FILE]);
+        // N now reads as the editor's text: nothing to push.
+        assert_eq!(
+            editor_update(&w),
+            (Some(crate::protocol::TextHash::of(&text)), Vec::new())
+        );
+    }
+
+    #[test]
+    fn creating_content_announces_it() {
+        let w = world();
+        let created = w.conductor.handle_command(Command::CreateContent {
+            stem: "post".to_string(),
+            slug: "second".to_string(),
+        });
+        assert!(
+            matches!(created.response, Response::ContentCreated(_)),
+            "{:?}",
+            created.response
+        );
+        assert_eq!(model_changes(&created), ["content/post/second.md"]);
+    }
+
+    #[test]
+    fn taking_the_files_version_announces_it() {
+        let (w, _) = two_conflicts();
+        let alpha = region_of(&w, "Alpha disk.");
+        let taken = resolve(&w, alpha.id, crate::protocol::ConflictSide::Disk);
+        assert_eq!(model_changes(&taken), [FILE]);
+    }
+
+    /// GUARD: the editor's own typing is not announced back to it.
+    #[test]
+    fn an_editors_own_change_announces_nothing() {
+        let w = world();
+        let opened = w.conductor.handle_command(Command::EditorOpened {
+            path: path(),
+            text: CONTENT.to_string(),
+        });
+        assert!(model_changes(&opened).is_empty(), "{:?}", opened.events);
+        let typed = change(&w, &CONTENT.replace("Beta para.", "Beta typed."));
+        assert_eq!(body_markdown(&w)[1], "Beta typed.");
+        assert!(model_changes(&typed).is_empty(), "{:?}", typed.events);
+        // A structural change the editor makes (N is read again) is its own too.
+        let restructured = change(&w, &CONTENT.replace("----\n\n", ""));
+        assert!(
+            model_changes(&restructured).is_empty(),
+            "{:?}",
+            restructured.events
+        );
+    }
+
+    /// GUARD: a save writes the file; N does not change.
+    #[test]
+    fn a_save_announces_nothing() {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        let saved = w.conductor.handle_command(Command::SaveBuffer {
+            path: site_path(),
+            consent: editorial_types::ConflictConsent::None,
+        });
+        assert!(model_changes(&saved).is_empty(), "{:?}", saved.events);
+
+        // The editor writing its own text.
+        let w = world();
+        open(&w, CONTENT);
+        let text = CONTENT.replace("Beta para.", "Beta typed.");
+        change(&w, &text);
+        editor_writes(&w, &text);
+        let written = editor_saved(&w);
+        assert!(model_changes(&written).is_empty(), "{:?}", written.events);
+    }
+
+    /// GUARD: a program that changes nothing announces nothing.
+    #[test]
+    fn a_no_op_plan_announces_nothing() {
+        let w = world();
+        let result = apply_program(
+            &w,
+            r#"(ned/slot (ned/doc-by-path "content/post/first.md") "title")"#,
+        );
+        assert!(model_changes(&result).is_empty(), "{:?}", result.events);
+    }
+
+    #[test]
+    fn the_update_rewrites_only_the_changed_blocks_of_the_editors_text() {
+        let w = world();
+        open(&w, CONTENT);
+        browser_sets_alpha(&w, "Alpha browser.");
+        let (hash, edits) = editor_update(&w);
+        assert_eq!(hash, Some(crate::protocol::TextHash::of(CONTENT)));
+        let alpha = {
+            let at = CONTENT.find("Alpha para.").unwrap();
+            at..at + "Alpha para.".len()
+        };
+        assert!(!edits.is_empty());
+        assert!(
+            edits
+                .iter()
+                .all(|e| e.range.start >= alpha.start && e.range.end <= alpha.end),
+            "only the changed block: {edits:?}"
+        );
+        assert_eq!(
+            sync::apply_edits(CONTENT, &edits),
+            CONTENT.replace("Alpha para.", "Alpha browser.")
+        );
+    }
+
+    /// The editor holds an unclosed fence after "Beta para.": a change in N
+    /// to the blocks the fence swallows is not pushed into it; one above is.
+    #[test]
+    fn the_update_leaves_held_regions_alone() {
+        let w = world();
+        open(&w, CONTENT);
+        let held_text = CONTENT.replace("Beta para.\n\n", "Beta para.\n\n```rust\nlet x = 1;\n\n");
+        let (_, held) = synced(&change(&w, &held_text));
+        assert_eq!(held.len(), 1, "{held:?}");
+        browser_sets_alpha(&w, "Alpha browser.");
+        other_channel_sets(&w, body_blocks(&w)[4], "Gamma browser.");
+        let (hash, edits) = editor_update(&w);
+        assert_eq!(hash, Some(crate::protocol::TextHash::of(&held_text)));
+        assert!(
+            edits.iter().all(|e| !touches(e, &held[0].range)),
+            "{edits:?} touch {:?}",
+            held[0].range
+        );
+        let updated = sync::apply_edits(&held_text, &edits);
+        assert!(updated.contains("Alpha browser."), "{updated}");
+        assert!(updated.contains("```rust\nlet x = 1;"), "{updated}");
+        assert!(
+            updated.contains("Gamma para."),
+            "the held text stays: {updated}"
+        );
+    }
+
+    /// The editor's version of "Alpha" drifts from N's: N's is not pushed over
+    /// it, while another block N changed is.
+    #[test]
+    fn the_update_leaves_drifted_regions_alone() {
+        let (w, text, drifts) = drifted_world();
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        other_channel_sets(&w, body_blocks(&w)[4], "Gamma browser.");
+        let (hash, edits) = editor_update(&w);
+        assert_eq!(hash, Some(crate::protocol::TextHash::of(&text)));
+        assert!(
+            edits.iter().all(|e| !touches(e, &drifts[0].range)),
+            "{edits:?} touch {:?}",
+            drifts[0].range
+        );
+        let updated = sync::apply_edits(&text, &edits);
+        assert!(updated.contains("Alpha mine."), "{updated}");
+        assert!(updated.contains("Gamma browser."), "{updated}");
+    }
+
+    #[test]
+    fn an_update_for_a_closed_editor_is_empty() {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        assert_eq!(editor_update(&w), (None, Vec::new()));
+
+        let w = world();
+        open(&w, CONTENT);
+        w.conductor
+            .handle_command(Command::EditorClosed { path: path() });
+        browser_sets_alpha(&w, "Alpha browser.");
+        assert_eq!(editor_update(&w), (None, Vec::new()));
     }
 }

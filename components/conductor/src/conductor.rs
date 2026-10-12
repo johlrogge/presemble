@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -287,6 +287,10 @@ pub struct Conductor {
     // The documents whose conflict with their file changed since their
     // editorial page was last rendered (the page shows the conflict, F2.4).
     conflict_unrendered: RwLock<HashSet<PathBuf>>,
+    // The documents N changed for since the last announcement, other than
+    // through their open editor's own text (LSP-1): announced as
+    // `DocumentModelChanged` once the command (or the plan) is done.
+    model_unannounced: RwLock<BTreeSet<PathBuf>>,
     // What each content file looked like when we last read or wrote it, for the
     // save-time check that catches a change the watcher has not reported yet
     // (ADR-065). Not the self-write tracker: that one forgets after a second.
@@ -516,6 +520,7 @@ impl Conductor {
             cached_node_stem_index: RwLock::new(HashMap::new()),
             dirty_docs: RwLock::new(crate::dirty::DirtyDocs::new()),
             conflict_unrendered: RwLock::new(HashSet::new()),
+            model_unannounced: RwLock::new(BTreeSet::new()),
             disk_stamps: RwLock::new(crate::dirty::DiskStamps::new()),
             disk_bases: RwLock::new(crate::dirty::DiskBases::new()),
             #[cfg(test)]
@@ -741,6 +746,48 @@ impl Conductor {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .record(rel, stamp);
+    }
+
+    /// The documents at site-relative `files` changed in N (LSP-1): they are
+    /// announced as `DocumentModelChanged` when the command is done, unless
+    /// the change was their open editor's own text.
+    fn model_changed(&self, files: &[PathBuf]) {
+        self.model_unannounced
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(files.iter().cloned());
+    }
+
+    /// Whether N changed for the document at `rel` and that is not announced
+    /// yet.
+    fn model_change_pending(&self, rel: &Path) -> bool {
+        self.model_unannounced
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(rel)
+    }
+
+    /// The change to `rel` was its editor's own text: not announced to it.
+    fn model_change_was_the_editors(&self, rel: &Path) {
+        self.model_unannounced
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(rel);
+    }
+
+    /// The announcements of what changed in N since the last ones.
+    fn take_model_changes(&self) -> Vec<ConductorEvent> {
+        std::mem::take(
+            &mut *self
+                .model_unannounced
+                .write()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+        .into_iter()
+        .map(|file| ConductorEvent::DocumentModelChanged {
+            file: file.to_string_lossy().to_string(),
+        })
+        .collect()
     }
 
     /// Mark the documents at site-relative `paths` unsaved. One that goes from
@@ -3418,6 +3465,7 @@ impl Conductor {
         blocks_changed: bool,
     ) -> (Vec<String>, Vec<String>) {
         self.mark_unsaved(paths);
+        self.model_changed(paths);
         let mut dependents = Vec::new();
         let mut refresh_failed = Vec::new();
         if blocks_changed {
@@ -3927,8 +3975,21 @@ impl Conductor {
     /// (`PagesRebuilt`, `BuildFailed`); the caller owns publishing them. The
     /// daemon's command loop is the one place that calls this for the nREPL,
     /// so every writer runs on one thread. An empty plan changes nothing and
-    /// has no events.
+    /// has no events. The documents it changed are announced
+    /// (`DocumentModelChanged`) with its events.
     pub fn execute_plan(
+        &self,
+        plan: edit::Plan,
+    ) -> Result<(ProgramOutcome, Vec<ConductorEvent>), ProgramError> {
+        let (outcome, mut events) = self.run_plan(plan)?;
+        events.extend(self.take_model_changes());
+        Ok((outcome, events))
+    }
+
+    /// Run a plan as [`Conductor::execute_plan`] does, leaving what it
+    /// changed to be announced by the command that ran it (the editor sync
+    /// runs plans for an editor's own text, which is not announced to it).
+    fn run_plan(
         &self,
         plan: edit::Plan,
     ) -> Result<(ProgramOutcome, Vec<ConductorEvent>), ProgramError> {
@@ -4182,6 +4243,8 @@ impl Conductor {
                 anchor: None,
             });
         }
+        // What changed in N, for the editors that have it open (LSP-1).
+        result.events.extend(self.take_model_changes());
         result
     }
 
@@ -4235,6 +4298,7 @@ impl Conductor {
             Command::EditorChanged { path, text } => self.editor_changed(path, text),
             Command::EditorClosed { path } => self.editor_closed(&path),
             Command::KeepMine { path, drift_id } => self.keep_mine(path, drift_id),
+            Command::GetEditorUpdate { path } => self.editor_update(&path),
             Command::ResolveConflict { path, id, take } => self.resolve_conflict(&path, id, take),
             Command::DocumentSaved { path } => {
                 if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
@@ -4316,6 +4380,13 @@ impl Conductor {
                     }
                 }
                 self.populate_node_store(&disk_wins);
+                // The documents the disk won for took the file as it is now.
+                let taken: Vec<PathBuf> = disk_wins
+                    .iter()
+                    .filter(|rel| self.doc_root_for_path(rel).is_some())
+                    .cloned()
+                    .collect();
+                self.model_changed(&taken);
 
                 // 5. Detect stylesheet changes (for reload signalling)
                 let has_stylesheet_change = {
@@ -4361,7 +4432,8 @@ impl Conductor {
                     .unwrap_or_else(|e| e.into_inner())
                     .contains(&rel);
                 let ended = self.clear_unsaved(&rel);
-                self.populate_node_store(&[rel]);
+                self.populate_node_store(std::slice::from_ref(&rel));
+                self.model_changed(&[rel]);
                 // An editor of it is given what N has now.
                 self.editor_follows_reload(&path);
 
@@ -4421,7 +4493,8 @@ impl Conductor {
                             .strip_prefix(&self.site_dir)
                             .unwrap_or(&path)
                             .to_path_buf();
-                        self.populate_node_store(&[created]);
+                        self.populate_node_store(std::slice::from_ref(&created));
+                        self.model_changed(&[created]);
 
                         let mut rebuilt_pages: Vec<String> = vec![];
 
