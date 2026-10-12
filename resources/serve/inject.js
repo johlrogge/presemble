@@ -250,7 +250,11 @@ _requestReload({resync:true});
 return;
 }
 if(m.type==='conflict'){
-_noteConflict(m.file);
+_noteConflict(m.file,m.state);
+return;
+}
+if(m.type==='conflict-resolved'){
+_conflictEnded(m.file);
 return;
 }
 if(m.type==='suggestion-list-changed'){
@@ -262,15 +266,20 @@ if(m.anchor){sessionStorage.setItem('presemble-anchor',JSON.stringify(m.anchor))
 _requestReload(m);
 }
 // ── Disk conflicts (ADR-065) ──────────────────────────────────────────────
-// A file that changed on disk while it has unsaved edits here. The notice is
-// persistent and has no buttons: the toolbar Save (with its confirmation) is
-// the one way to keep the edits; `presemble reload` keeps the file.
+// A file that changed on disk while it has unsaved edits here. A whole-file
+// conflict gets the notice: it is persistent and has no buttons, the toolbar
+// Save (with its confirmation) is the one way to keep the edits and
+// `presemble reload` keeps the file. A conflict on blocks is shown on its
+// blocks instead (below), each with its two ways out.
 var _conflictFiles=[];
+// Files whose conflict is on blocks, as the socket last said.
+var _conflictOnBlocks={};
 function _showConflictNotice(){
 document.querySelectorAll('.presemble-conflict-notice').forEach(function(n){n.remove();});
 var onPage={};
 document.querySelectorAll('[data-presemble-file]').forEach(function(el){onPage[el.getAttribute('data-presemble-file')]=true;});
-var here=_conflictFiles.filter(function(f){return onPage[f];});
+var shownOnBlocks=_conflictBlockFiles();
+var here=_conflictFiles.filter(function(f){return onPage[f]&&!shownOnBlocks[f]&&!_conflictOnBlocks[f];});
 if(!here.length){return;}
 var box=document.createElement('div');
 box.className='presemble-conflict-notice';
@@ -291,9 +300,168 @@ _showConflictNotice();
 })
 .catch(function(err){console.warn('presemble: conflicts poll failed',err);});
 }
-function _noteConflict(file){
+function _noteConflict(file,state){
 if(_conflictFiles.indexOf(file)<0){_conflictFiles.push(file);}
+delete _conflictGone[file];
+if(state==='blocks'){_conflictOnBlocks[file]=true;}else{delete _conflictOnBlocks[file];}
+// The conductor renders the page again with the blocks marked; its reload
+// message brings them.
 _showConflictNotice();
+}
+// The conflict of `file` has ended: its markers and its notice go now (the
+// page may be reloaded later, or not at all while an editor is open).
+function _conflictEnded(file){
+_conflictFiles=_conflictFiles.filter(function(f){return f!==file;});
+delete _conflictOnBlocks[file];
+_conflictGone[file]=true;
+document.querySelectorAll('[data-presemble-conflict]').forEach(function(el){
+var rest=_conflictParse(el.getAttribute('data-presemble-conflict')).filter(function(c){return c.file!==file;});
+if(rest.length){el.setAttribute('data-presemble-conflict',JSON.stringify(rest));}
+else{el.removeAttribute('data-presemble-conflict');}
+});
+_conflictRender();
+_showConflictNotice();
+}
+// ── Disk conflicts on their blocks (ADR-065 amendment F2) ─────────────────
+// The server marks a block whose file changed differently from its unsaved
+// edits with `data-presemble-conflict` (a JSON array of
+// {id,file,disk,message}), and lists the ones no element can carry in the page
+// script (`conflicts`). Each gets the file's version and two buttons. Like the
+// diagnostics, the markers live in their own overlay layer, never inside the
+// content; text reaches the DOM only as text nodes.
+var _conflictGone={};
+var _conflictBound=false;
+function _conflictParse(text){
+var list;
+try{list=JSON.parse(text);}catch(err){return [];}
+if(!Array.isArray(list)){return [];}
+return list.filter(function(c){return c&&typeof c.id==='string'&&typeof c.file==='string'&&typeof c.message==='string'&&!_conflictGone[c.file];});
+}
+function _conflictsUnplaced(){
+var script=document.getElementById('presemble-diagnostics');
+if(!script){return [];}
+var data;
+try{data=JSON.parse(script.textContent);}catch(err){return [];}
+return data&&Array.isArray(data.conflicts)?_conflictParse(JSON.stringify(data.conflicts)):[];
+}
+// The files this page shows conflicted blocks of.
+function _conflictBlockFiles(){
+var files={};
+document.querySelectorAll('[data-presemble-conflict]').forEach(function(el){
+_conflictParse(el.getAttribute('data-presemble-conflict')).forEach(function(c){files[c.file]=true;});
+});
+_conflictsUnplaced().forEach(function(c){files[c.file]=true;});
+return files;
+}
+function _resolveConflict(c,take,status,buttons){
+buttons.forEach(function(b){b.disabled=true;});
+status.classList.remove('presemble-conflict-failed');
+status.textContent='Resolving…';
+fetchJson('/_presemble/resolve-conflict',{
+method:'POST',
+headers:{'Content-Type':'application/json'},
+body:JSON.stringify({file:c.file,id:c.id,take:take})
+})
+.then(function(data){
+if(!data||data.ok!==true){throw new Error((data&&data.error)||'the conflict was not resolved');}
+status.textContent='Resolved. The page will update.';
+})
+.catch(function(err){
+buttons.forEach(function(b){b.disabled=false;});
+status.classList.add('presemble-conflict-failed');
+status.textContent='Could not resolve this conflict: '+err.message;
+});
+}
+function _conflictBox(c){
+var box=document.createElement('div');
+box.className='presemble-conflict-box';
+box.addEventListener('click',function(ev){ev.stopPropagation();});
+var msg=document.createElement('p');
+msg.textContent=c.message;
+box.appendChild(msg);
+if(typeof c.disk==='string'){
+var label=document.createElement('p');
+label.textContent="The file's version:";
+box.appendChild(label);
+var disk=document.createElement('pre');
+disk.className='presemble-conflict-disk';
+disk.textContent=c.disk;
+box.appendChild(disk);
+}
+var status=document.createElement('p');
+status.className='presemble-conflict-status';
+status.setAttribute('role','status');
+var take=document.createElement('button');
+take.type='button';
+take.textContent="Take the file's version of this block";
+var keep=document.createElement('button');
+keep.type='button';
+keep.textContent='Keep the unsaved version';
+var buttons=[take,keep];
+take.addEventListener('click',function(){_resolveConflict(c,'disk',status,buttons);});
+keep.addEventListener('click',function(){_resolveConflict(c,'unsaved',status,buttons);});
+var row=document.createElement('div');
+row.className='presemble-conflict-actions';
+row.appendChild(take);
+row.appendChild(keep);
+box.appendChild(row);
+box.appendChild(status);
+return box;
+}
+function _conflictPlace(){
+var layer=document.querySelector('.presemble-conflict-layer');
+if(!layer){return;}
+layer.querySelectorAll('.presemble-conflict-badge').forEach(function(b){
+var el=b._conflictTarget;
+if(!el||!el.isConnected){b.remove();return;}
+var r=el.getBoundingClientRect();
+b.style.top=(r.top+window.scrollY-10)+'px';
+b.style.left=(r.left+window.scrollX-6)+'px';
+});
+}
+function _conflictRender(){
+document.querySelectorAll('.presemble-conflict-layer,.presemble-conflict-panel').forEach(function(n){n.remove();});
+document.querySelectorAll('.presemble-conflict-block').forEach(function(el){el.classList.remove('presemble-conflict-block');});
+var layer=document.createElement('div');
+layer.className='presemble-conflict-layer';
+document.querySelectorAll('[data-presemble-conflict]').forEach(function(el){
+var list=_conflictParse(el.getAttribute('data-presemble-conflict'));
+if(!list.length){return;}
+el.classList.add('presemble-conflict-block');
+var badge=document.createElement('div');
+badge.className='presemble-conflict-badge';
+badge._conflictTarget=el;
+var open=document.createElement('button');
+open.type='button';
+open.className='presemble-conflict-badge-button';
+open.textContent='Conflict';
+open.setAttribute('aria-label','This block conflicts with the file on disk');
+open.addEventListener('click',function(ev){ev.stopPropagation();badge.classList.toggle('presemble-conflict-open');});
+badge.appendChild(open);
+var pop=document.createElement('div');
+pop.className='presemble-conflict-popover';
+list.forEach(function(c){pop.appendChild(_conflictBox(c));});
+badge.appendChild(pop);
+layer.appendChild(badge);
+});
+if(layer.childNodes.length){document.body.appendChild(layer);_conflictPlace();}
+var unplaced=_conflictsUnplaced();
+if(unplaced.length){
+var panel=document.createElement('div');
+panel.className='presemble-conflict-panel';
+panel.setAttribute('role','alert');
+var head=document.createElement('p');
+head.textContent=unplaced.length===1?'A block changed on disk that is no longer on this page:':'Blocks changed on disk that are no longer on this page:';
+panel.appendChild(head);
+unplaced.forEach(function(c){panel.appendChild(_conflictBox(c));});
+document.body.appendChild(panel);
+}
+if(!_conflictBound){
+_conflictBound=true;
+window.addEventListener('resize',_conflictPlace);
+window.addEventListener('load',_conflictPlace);
+document.addEventListener('click',function(){document.querySelectorAll('.presemble-conflict-open').forEach(function(b){b.classList.remove('presemble-conflict-open');});});
+}
 }
 // ── Diagnostics (FU-7b) ───────────────────────────────────────────────────
 // The server tags the element a diagnostic belongs to with
@@ -392,8 +560,8 @@ window.addEventListener('load',_diagPlaceBadges);
 document.addEventListener('click',function(){document.querySelectorAll('.presemble-diag-open').forEach(function(b){b.classList.remove('presemble-diag-open');});});
 }
 }
-if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',_diagRender);}
-else{_diagRender();}
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',function(){_diagRender();_conflictRender();});}
+else{_diagRender();_conflictRender();}
 _fetchConflicts();
 _wsConnect();
 (function(){

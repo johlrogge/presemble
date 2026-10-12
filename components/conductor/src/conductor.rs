@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -104,15 +104,6 @@ fn saved_event<'a>(files: impl IntoIterator<Item = &'a PathBuf>) -> ConductorEve
         .collect();
     files.sort();
     ConductorEvent::DocumentsSaved { files }
-}
-
-/// The event that tells subscribers the conflict of the document at
-/// site-relative `rel` with its file has ended.
-fn conflict_resolved(rel: &Path) -> ConductorEvent {
-    ConductorEvent::DiskConflict {
-        file: rel.to_string_lossy().to_string(),
-        state: crate::protocol::ConflictState::Resolved,
-    }
 }
 
 impl CommandResult {
@@ -293,6 +284,9 @@ pub struct Conductor {
     cached_node_stem_index: RwLock<node_store_bridge::store_pipeline::NodeStemIndex>,
     // NED edit path: tracks which content files have unsaved NodeStore mutations (Phase B)
     dirty_docs: RwLock<crate::dirty::DirtyDocs>,
+    // The documents whose conflict with their file changed since their
+    // editorial page was last rendered (the page shows the conflict, F2.4).
+    conflict_unrendered: RwLock<HashSet<PathBuf>>,
     // What each content file looked like when we last read or wrote it, for the
     // save-time check that catches a change the watcher has not reported yet
     // (ADR-065). Not the self-write tracker: that one forgets after a second.
@@ -521,6 +515,7 @@ impl Conductor {
             cached_node_url_index: RwLock::new(HashMap::new()),
             cached_node_stem_index: RwLock::new(HashMap::new()),
             dirty_docs: RwLock::new(crate::dirty::DirtyDocs::new()),
+            conflict_unrendered: RwLock::new(HashSet::new()),
             disk_stamps: RwLock::new(crate::dirty::DiskStamps::new()),
             disk_bases: RwLock::new(crate::dirty::DiskBases::new()),
             #[cfg(test)]
@@ -810,7 +805,7 @@ impl Conductor {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear(rel);
-        was_conflicted.then(|| conflict_resolved(rel))
+        was_conflicted.then(|| self.conflict_ended(rel))
     }
 
     /// Write a document's text and remember the resulting file as the base of
@@ -898,7 +893,7 @@ impl Conductor {
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear_conflict(rel);
-            events.extend(ended.then(|| conflict_resolved(rel)));
+            events.extend(ended.then(|| self.conflict_ended(rel)));
         } else {
             events.extend(self.record_disk_conflict(rel, regions));
         }
@@ -960,9 +955,13 @@ impl Conductor {
         let disk_mtime = std::fs::metadata(self.site_dir.join(rel))
             .and_then(|m| m.modified())
             .unwrap_or_else(|_| std::time::SystemTime::now());
-        self.dirty_docs
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
+        let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
+        // The page shows where each block is, so a region that only moved
+        // (same id) still makes it out of date.
+        if dirty.conflict_regions(rel) != Some(regions.as_slice()) {
+            self.conflict_changed(rel);
+        }
+        dirty
             .mark_conflict(rel.to_path_buf(), disk_mtime, regions.clone())
             .then(|| ConductorEvent::DiskConflict {
                 file: rel.to_string_lossy().to_string(),
@@ -4154,7 +4153,71 @@ impl Conductor {
     }
 
     /// Handle a command and return a response plus any events to broadcast.
+    ///
+    /// The editorial page of a document shows its conflict with its file on
+    /// its blocks (F2.4). Whatever command changed that conflict (it began,
+    /// its blocks changed, it ended), the page is rendered again unless the
+    /// command already rendered it after the change (a file change renders
+    /// every page once the conflicts are recorded), and announced as rebuilt.
+    /// What decides is the order of the change and the render, not whether
+    /// the page was rendered at all: a plan run while resolving a conflict
+    /// renders the page before the conflict is recorded as ended.
     pub fn handle_command(&self, cmd: Command) -> CommandResult {
+        let mut result = self.dispatch_command(cmd);
+        let mut files: Vec<PathBuf> = self
+            .conflict_unrendered
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .collect();
+        files.sort();
+        let pages: Vec<String> = files
+            .iter()
+            .filter_map(|file| self.render_page_of(file))
+            .flatten()
+            .collect();
+        if !pages.is_empty() {
+            result.events.push(ConductorEvent::PagesRebuilt {
+                pages,
+                anchor: None,
+            });
+        }
+        result
+    }
+
+    /// The conflict of the document at site-relative `rel` with its file has
+    /// ended: the event that tells subscribers so. Its page is out of date.
+    fn conflict_ended(&self, rel: &Path) -> ConductorEvent {
+        self.conflict_changed(rel);
+        ConductorEvent::DiskConflict {
+            file: rel.to_string_lossy().to_string(),
+            state: crate::protocol::ConflictState::Resolved,
+        }
+    }
+
+    /// The conflict of the document at site-relative `rel` with its file
+    /// changed: its editorial page is out of date until it is rendered again.
+    fn conflict_changed(&self, rel: &Path) {
+        self.conflict_unrendered
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(rel.to_path_buf());
+    }
+
+    /// Render the editorial page of the document at site-relative `rel`
+    /// again; the URLs written. `None` when it is not in N or does not render.
+    fn render_page_of(&self, rel: &Path) -> Option<Vec<String>> {
+        let root = self.doc_root_for_path(rel)?;
+        match self.render_page_output(root) {
+            Ok(pages) => Some(pages),
+            Err(e) => {
+                eprintln!("conductor: rendering {} failed: {e}", rel.display());
+                None
+            }
+        }
+    }
+
+    fn dispatch_command(&self, cmd: Command) -> CommandResult {
         match cmd {
             Command::Ping => CommandResult::with_response(Response::Pong),
             Command::GetGrammar { stem } => {
@@ -4629,7 +4692,7 @@ impl Conductor {
                         .clear(rel_path);
                     // A conflict saved over with consent has ended.
                     if matches!(state, crate::dirty::Unsaved::ConflictsWithDisk { .. }) {
-                        ended.push(conflict_resolved(rel_path));
+                        ended.push(self.conflict_ended(rel_path));
                     }
                     saved.push(rel_path.clone());
                 }

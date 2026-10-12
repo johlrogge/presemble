@@ -14,6 +14,7 @@
 //! no lines, so no line is given.
 
 use super::*;
+use crate::protocol::ConflictRegion;
 use content::{
     AddressContainer, ContentElement, Document, Location, NestedStep, Severity,
     ValidationDiagnostic,
@@ -26,6 +27,12 @@ use template::dom::{Element, Form, Node};
 /// The attribute that carries an element's diagnostics: a JSON array of
 /// `{"severity", "message"}`.
 const ATTR_DIAGNOSTICS: &str = "data-presemble-diagnostics";
+
+/// The attribute that marks a block that conflicts with its file on disk: a
+/// JSON array of `{"id", "file", "disk", "message"}`.
+const ATTR_CONFLICT: &str = "data-presemble-conflict";
+
+const CONFLICT_MESSAGE: &str = "This block changed on disk differently from the unsaved edits. Take the file's version of this block, or keep the unsaved version.";
 
 /// Where a diagnostic is shown.
 enum Target {
@@ -64,24 +71,35 @@ fn path_text(path: &[NestedStep]) -> String {
         .join("/")
 }
 
+/// Where a diagnostic is shown: its location, or else its slot.
 fn target(
     d: &ValidationDiagnostic,
     doc: &Document,
     file: &str,
     addresses: &mut HashMap<String, Vec<Option<String>>>,
 ) -> Target {
-    let slot_fallback = d
-        .slot
-        .as_ref()
-        .map(|s| Target::Slot(s.as_str().to_string()));
-    let Some(Location {
+    match &d.location {
+        Some(location) => target_of(location, doc, file, addresses),
+        None => d
+            .slot
+            .as_ref()
+            .map(|s| Target::Slot(s.as_str().to_string()))
+            .unwrap_or(Target::Unplaced),
+    }
+}
+
+/// Where the block at `location` of `doc` is shown.
+fn target_of(
+    location: &Location,
+    doc: &Document,
+    file: &str,
+    addresses: &mut HashMap<String, Vec<Option<String>>>,
+) -> Target {
+    let Location {
         container,
         index,
         path,
-    }) = &d.location
-    else {
-        return slot_fallback.unwrap_or(Target::Unplaced);
-    };
+    } = location;
     let (key, container_address, elements) = match container {
         content::Container::Body => ("body".to_string(), AddressContainer::Body, &doc.body),
         content::Container::Slot(name) => {
@@ -182,41 +200,99 @@ fn resolve(nodes: &[Node], target: &Target) -> Option<Vec<usize>> {
     }
 }
 
-/// What a page's validation found.
+/// What a page's validation found, and the blocks of its document that
+/// conflict with its file on disk (ADR-065 amendment F2).
 pub(super) struct PageDiagnostics {
     doc: Document,
     file: String,
     diagnostics: Vec<ValidationDiagnostic>,
+    conflicts: Vec<ConflictRegion>,
+}
+
+/// What a page can tell about a conflicted block: its id (to resolve it),
+/// the file, the file's version of the block, and what is wrong.
+fn conflict_json(file: &str, region: &ConflictRegion) -> Value {
+    json!({
+        "id": region.id.to_string(),
+        "file": file,
+        "disk": region.disk,
+        "message": CONFLICT_MESSAGE,
+    })
+}
+
+/// Put each item on the element its target names; return the ones no
+/// element can carry. Each placed element gets `attr`: a JSON array of what
+/// `to_json` makes of its items.
+fn place<'a, T>(
+    nodes: &mut [Node],
+    items: impl IntoIterator<Item = (&'a T, Target)>,
+    attr: &str,
+    to_json: impl Fn(&T) -> Value,
+) -> Vec<&'a T> {
+    let mut unplaced = Vec::new();
+    let mut placed: HashMap<Vec<usize>, Vec<&T>> = HashMap::new();
+    for (item, target) in items {
+        match resolve(nodes, &target) {
+            Some(at) => placed.entry(at).or_default().push(item),
+            None => unplaced.push(item),
+        }
+    }
+    for (at, items) in placed {
+        if let Some(element) = element_at_mut(nodes, &at) {
+            let list: Vec<Value> = items.iter().map(|item| to_json(item)).collect();
+            element
+                .attrs
+                .push((attr.to_string(), Form::Str(Value::Array(list).to_string())));
+        }
+    }
+    unplaced
+}
+
+/// What [`PageDiagnostics::attach`] could not put on an element.
+struct Unplaced<'a> {
+    diagnostics: Vec<&'a ValidationDiagnostic>,
+    conflicts: Vec<&'a ConflictRegion>,
 }
 
 impl PageDiagnostics {
-    /// Put every diagnostic on the element it is about; return the ones no
-    /// element can carry.
-    fn attach(&self, nodes: &mut [Node]) -> Vec<&ValidationDiagnostic> {
+    /// Put every diagnostic and every conflicted block on the element it is
+    /// about; return the ones no element can carry.
+    fn attach(&self, nodes: &mut [Node]) -> Unplaced<'_> {
         let mut addresses = HashMap::new();
-        let mut unplaced = Vec::new();
-        let mut placed: HashMap<Vec<usize>, Vec<&ValidationDiagnostic>> = HashMap::new();
-        for d in &self.diagnostics {
-            let target = target(d, &self.doc, &self.file, &mut addresses);
-            match resolve(nodes, &target) {
-                Some(at) => placed.entry(at).or_default().push(d),
-                None => unplaced.push(d),
-            }
+        let diagnostics: Vec<_> = self
+            .diagnostics
+            .iter()
+            .map(|d| (d, target(d, &self.doc, &self.file, &mut addresses)))
+            .collect();
+        let diagnostics = place(nodes, diagnostics, ATTR_DIAGNOSTICS, diagnostic_json);
+        let conflicts: Vec<_> = self
+            .conflicts
+            .iter()
+            .map(|region| {
+                let target = match &region.location {
+                    Some(location) => target_of(
+                        &Location::from(location),
+                        &self.doc,
+                        &self.file,
+                        &mut addresses,
+                    ),
+                    None => Target::Unplaced,
+                };
+                (region, target)
+            })
+            .collect();
+        let conflicts = place(nodes, conflicts, ATTR_CONFLICT, |region| {
+            conflict_json(&self.file, region)
+        });
+        Unplaced {
+            diagnostics,
+            conflicts,
         }
-        for (at, diagnostics) in placed {
-            if let Some(element) = element_at_mut(nodes, &at) {
-                let list: Vec<Value> = diagnostics.iter().map(|d| diagnostic_json(d)).collect();
-                element.attrs.push((
-                    ATTR_DIAGNOSTICS.to_string(),
-                    Form::Str(Value::Array(list).to_string()),
-                ));
-            }
-        }
-        unplaced
     }
 
-    /// The page script: the counts of every diagnostic, and the unplaced ones.
-    fn script(&self, unplaced: &[&ValidationDiagnostic]) -> String {
+    /// The page script: the counts of every diagnostic, the unplaced ones,
+    /// and the conflicted blocks no element carries.
+    fn script(&self, unplaced: &Unplaced) -> String {
         let count = |severity: Severity| {
             self.diagnostics
                 .iter()
@@ -226,7 +302,12 @@ impl PageDiagnostics {
         let page = json!({
             "errors": count(Severity::Error),
             "warnings": count(Severity::Warning),
-            "unplaced": unplaced.iter().map(|d| diagnostic_json(d)).collect::<Vec<_>>(),
+            "unplaced": unplaced.diagnostics.iter().map(|d| diagnostic_json(d)).collect::<Vec<_>>(),
+            "conflicts": unplaced
+                .conflicts
+                .iter()
+                .map(|region| conflict_json(&self.file, region))
+                .collect::<Vec<_>>(),
         });
         // Inside a script element nothing is unescaped: keep `<` out of it.
         let text = page.to_string().replace('<', "\\u003c");
@@ -260,10 +341,25 @@ impl Conductor {
             Some(grammar) => content::validate(&doc, &grammar).diagnostics,
             None => Vec::new(),
         };
+        // The blocks that conflict with the file (a whole-file conflict has
+        // none: the page notice tells of it). The page now shows the
+        // conflict as it stands: it is no longer out of date.
+        self.conflict_unrendered
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(Path::new(&file));
+        let conflicts = self
+            .dirty_docs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .conflict_regions(Path::new(&file))
+            .map(<[ConflictRegion]>::to_vec)
+            .unwrap_or_default();
         Some(PageDiagnostics {
             doc,
             file,
             diagnostics,
+            conflicts,
         })
     }
 
@@ -686,6 +782,296 @@ mod tests {
         assert_eq!(script["errors"], 0);
         assert_eq!(script["warnings"], 0);
         assert!(script["unplaced"].as_array().expect("a list").is_empty());
+    }
+
+    // ── disk conflicts on their blocks (F2.4) ──────────────────────────────
+
+    const X: &str = "content/post/x.md";
+
+    fn x_path() -> editorial_types::ContentPath {
+        editorial_types::ContentPath::parse(X).expect("a content path")
+    }
+
+    /// The editor has `mine` unsaved, and the file then changes to `disk`
+    /// outside Presemble.
+    fn conflicted(conductor: &Conductor, tmp: &tempfile::TempDir, mine: &str, disk: &str) {
+        conductor.handle_command(Command::EditorChanged {
+            path: x_path(),
+            text: mine.to_string(),
+        });
+        std::fs::write(tmp.path().join(X), disk).unwrap();
+        conductor.handle_command(Command::FileChanged {
+            paths: vec![editorial_types::SitePath::parse(X).expect("a site path")],
+        });
+    }
+
+    fn open_editor(conductor: &Conductor, text: &str) {
+        conductor.handle_command(Command::EditorOpened {
+            path: x_path(),
+            text: text.to_string(),
+        });
+    }
+
+    /// The conflicted regions of the page's document.
+    fn regions(conductor: &Conductor) -> Vec<crate::protocol::ConflictRegion> {
+        match conductor.handle_command(Command::GetConflicts).response {
+            Response::Conflicts(files) => files
+                .into_iter()
+                .find(|c| c.file == X)
+                .map(|c| match c.state {
+                    crate::protocol::ConflictState::Blocks(regions) => regions,
+                    _ => Vec::new(),
+                })
+                .unwrap_or_default(),
+            other => panic!("expected Conflicts, got {other:?}"),
+        }
+    }
+
+    /// The conflicts an element carries.
+    fn conflicts_on(tag: &str) -> Vec<Value> {
+        let name = "data-presemble-conflict=\"";
+        let start = tag.find(name).expect("the attribute") + name.len();
+        let end = start + tag[start..].find('"').expect("closed");
+        serde_json::from_str(&unescape(&tag[start..end])).expect("a JSON array")
+    }
+
+    /// The editorial page as served: the file the last build wrote.
+    fn served_editorial(conductor: &Conductor) -> String {
+        let path = site_index::output_path_for_stem_slug(&conductor.output_dir, "post", "x");
+        std::fs::read_to_string(path).expect("the editorial page")
+    }
+
+    const BASE: &str = "# Title\n\n----\n\nAlpha.\n\nBeta.\n";
+
+    #[test]
+    fn editorial_page_marks_a_conflicted_block_with_its_id() {
+        let (tmp, conductor) = conductor_with(BASE);
+        open_editor(&conductor, BASE);
+        conflicted(
+            &conductor,
+            &tmp,
+            &BASE.replace("Alpha.", "Alpha mine."),
+            &BASE.replace("Alpha.", "Alpha disk."),
+        );
+        let regions = regions(&conductor);
+        assert_eq!(regions.len(), 1, "{regions:?}");
+
+        for html in [
+            conductor
+                .render_page("/post/x", &RenderMode::View)
+                .expect("rendered"),
+            served_editorial(&conductor),
+        ] {
+            let tags = tags_with(&html, "data-presemble-conflict");
+            assert_eq!(tags.len(), 1, "{tags:#?}");
+            assert!(tags[0].starts_with("<p "), "{}", tags[0]);
+            assert!(
+                tags[0].contains("&quot;paragraph&quot; 0"),
+                "the first paragraph: {}",
+                tags[0]
+            );
+            let carried = conflicts_on(&tags[0]);
+            assert_eq!(carried.len(), 1, "{carried:#?}");
+            assert_eq!(carried[0]["id"], regions[0].id.to_string());
+            assert_eq!(carried[0]["file"], X);
+            assert_eq!(carried[0]["disk"], "Alpha disk.");
+            assert!(
+                carried[0]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("changed on disk")),
+                "{carried:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_conflict_in_a_list_item_lands_on_its_block() {
+        let base = "# Title\n\n----\n\nIntro.\n\n- one\n\n- two\n";
+        let (tmp, conductor) = conductor_with(base);
+        open_editor(&conductor, base);
+        conflicted(
+            &conductor,
+            &tmp,
+            &base.replace("- two", "- two mine"),
+            &base.replace("- two", "- two disk"),
+        );
+        let html = served_editorial(&conductor);
+        let tags = tags_with(&html, "data-presemble-conflict");
+        assert_eq!(tags.len(), 1, "{tags:#?}");
+        assert!(
+            tags[0].contains("data-presemble-path=\"i1/b0\""),
+            "{}",
+            tags[0]
+        );
+    }
+
+    /// The page as served follows the conflict: resolving its last block
+    /// takes the marker off, and announces the page rebuilt.
+    #[test]
+    fn resolving_a_conflict_rebuilds_its_page_without_the_marker() {
+        let (tmp, conductor) = conductor_with(BASE);
+        open_editor(&conductor, BASE);
+        conflicted(
+            &conductor,
+            &tmp,
+            &BASE.replace("Alpha.", "Alpha mine."),
+            &BASE.replace("Alpha.", "Alpha disk."),
+        );
+        let id = regions(&conductor)[0].id;
+        let result = conductor.handle_command(Command::ResolveConflict {
+            path: x_path(),
+            id,
+            take: crate::protocol::ConflictSide::Unsaved,
+        });
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        assert!(
+            result.events.iter().any(|e| matches!(
+                e,
+                ConductorEvent::PagesRebuilt { pages, .. } if pages.contains(&"/post/x".to_string())
+            )),
+            "{:?}",
+            result.events
+        );
+        assert!(
+            tags_with(&served_editorial(&conductor), "data-presemble-conflict").is_empty(),
+            "no marker left"
+        );
+    }
+
+    /// How many times the result announces `page` rebuilt.
+    fn times_rebuilt(result: &CommandResult, page: &str) -> usize {
+        result
+            .events
+            .iter()
+            .map(|e| match e {
+                ConductorEvent::PagesRebuilt { pages, .. } => {
+                    pages.iter().filter(|p| p.as_str() == page).count()
+                }
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// A file change that brings a conflict renders every page once, after
+    /// the conflict is recorded: the page is not rendered (and announced)
+    /// again for its conflict.
+    #[test]
+    fn a_conflict_change_after_a_file_change_renders_the_page_once() {
+        let (tmp, conductor) = conductor_with(BASE);
+        open_editor(&conductor, BASE);
+        conductor.handle_command(Command::EditorChanged {
+            path: x_path(),
+            text: BASE.replace("Alpha.", "Alpha mine."),
+        });
+        std::fs::write(tmp.path().join(X), BASE.replace("Alpha.", "Alpha disk.")).unwrap();
+        let result = conductor.handle_command(Command::FileChanged {
+            paths: vec![editorial_types::SitePath::parse(X).expect("a site path")],
+        });
+        assert_eq!(regions(&conductor).len(), 1);
+        assert_eq!(times_rebuilt(&result, "/post/x"), 1, "{:?}", result.events);
+        // ... and that one render has the marker.
+        assert_eq!(
+            tags_with(&served_editorial(&conductor), "data-presemble-conflict").len(),
+            1
+        );
+    }
+
+    /// GUARD: taking the file's version renders the page while the plan runs,
+    /// before the conflict is recorded as ended; the page is rendered again
+    /// (once) so it carries no marker.
+    #[test]
+    fn taking_the_files_version_rebuilds_its_page_without_the_marker() {
+        let (tmp, conductor) = conductor_with(BASE);
+        open_editor(&conductor, BASE);
+        conflicted(
+            &conductor,
+            &tmp,
+            &BASE.replace("Alpha.", "Alpha mine."),
+            &BASE.replace("Alpha.", "Alpha disk."),
+        );
+        let id = regions(&conductor)[0].id;
+        let result = conductor.handle_command(Command::ResolveConflict {
+            path: x_path(),
+            id,
+            take: crate::protocol::ConflictSide::Disk,
+        });
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        let html = served_editorial(&conductor);
+        assert!(html.contains("Alpha disk."), "the file's version is shown");
+        assert!(
+            tags_with(&html, "data-presemble-conflict").is_empty(),
+            "no marker left"
+        );
+        assert!(
+            times_rebuilt(&result, "/post/x") >= 1,
+            "{:?}",
+            result.events
+        );
+    }
+
+    /// A conflict whose block N no longer has (the unsaved edit removed it)
+    /// has no element to carry it: the page script lists it, so the page can
+    /// still offer its resolution.
+    #[test]
+    fn a_conflict_without_a_block_is_listed_in_the_page_script() {
+        let (tmp, conductor) = conductor_with(BASE);
+        open_editor(&conductor, BASE);
+        conflicted(
+            &conductor,
+            &tmp,
+            &BASE.replace("Alpha.\n\n", ""),
+            &BASE.replace("Alpha.", "Alpha disk."),
+        );
+        let regions = regions(&conductor);
+        assert_eq!(regions.len(), 1, "{regions:?}");
+        let html = served_editorial(&conductor);
+        assert!(tags_with(&html, "data-presemble-conflict").is_empty());
+        let script = page_script(&html);
+        let listed = script["conflicts"].as_array().expect("a list");
+        assert_eq!(listed.len(), 1, "{script}");
+        assert_eq!(listed[0]["id"], regions[0].id.to_string());
+        assert_eq!(listed[0]["disk"], "Alpha disk.");
+    }
+
+    /// GUARD: a page with no conflict carries no marker, and its page script
+    /// lists no unplaced conflict.
+    #[test]
+    fn a_page_without_a_conflict_carries_no_conflict_data() {
+        let (_tmp, conductor) = conductor_with(BASE);
+        let html = served_editorial(&conductor);
+        assert!(tags_with(&html, "data-presemble-conflict").is_empty());
+        let script = page_script(&html);
+        assert!(
+            script["conflicts"].as_array().expect("a list").is_empty(),
+            "{script}"
+        );
+    }
+
+    /// GUARD: published output carries no conflict data, even while one is
+    /// recorded.
+    #[test]
+    fn published_output_carries_no_conflict_data() {
+        let (tmp, conductor) = conductor_with(BASE);
+        open_editor(&conductor, BASE);
+        conflicted(
+            &conductor,
+            &tmp,
+            &BASE.replace("Alpha.", "Alpha mine."),
+            &BASE.replace("Alpha.", "Alpha disk."),
+        );
+        assert_eq!(regions(&conductor).len(), 1);
+        conductor.build_all_pages(template::OutputMode::Published);
+        let path = site_index::output_path_for_stem_slug(&conductor.output_dir, "post", "x");
+        let html = std::fs::read_to_string(path).expect("the page");
+        assert!(!html.contains("presemble-conflict"), "{html}");
     }
 
     /// GUARD: published output carries neither diagnostics nor paths.

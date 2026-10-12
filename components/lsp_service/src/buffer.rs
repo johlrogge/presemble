@@ -510,7 +510,7 @@ pub fn sync_actions(uri: &Url, synced: &Synced, request: &Range) -> Vec<CodeActi
 
 /// The conflict id spelled in a command argument (`ConflictId`'s `Display`).
 pub fn parse_conflict_id(spelled: &str) -> Option<ConflictId> {
-    u64::from_str_radix(spelled, 16).ok().map(ConflictId)
+    spelled.parse().ok()
 }
 
 /// The drift id spelled in a command argument (`DriftId`'s `Display`).

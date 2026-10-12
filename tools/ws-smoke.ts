@@ -59,13 +59,23 @@ interface Scroll {
   readonly anchor: Anchor;
 }
 
-/** A file changed on disk while it has unsaved edits (ADR-065). Editorial only. */
+/**
+ * A file changed on disk while it has unsaved edits (ADR-065): as a whole, or
+ * on some blocks (amendment F2). Editorial only.
+ */
 interface Conflict {
   readonly type: "conflict";
   readonly file: string;
+  readonly state: "whole-file" | "blocks";
 }
 
-type WsMessage = Reload | SuggestionListChanged | Resync | Scroll | Conflict;
+/** A file's conflict with its unsaved edits has ended. Editorial only. */
+interface ConflictResolved {
+  readonly type: "conflict-resolved";
+  readonly file: string;
+}
+
+type WsMessage = Reload | SuggestionListChanged | Resync | Scroll | Conflict | ConflictResolved;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -101,9 +111,15 @@ function parseWsMessage(raw: string): WsMessage | null {
     case "resync":
       return { type: "resync" };
     case "conflict": {
+      const { file, state } = parsed;
+      if (typeof file !== "string") return null;
+      if (state !== "whole-file" && state !== "blocks") return null;
+      return { type: "conflict", file, state };
+    }
+    case "conflict-resolved": {
       const { file } = parsed;
       if (typeof file !== "string") return null;
-      return { type: "conflict", file };
+      return { type: "conflict-resolved", file };
     }
     case "scroll": {
       const { anchor } = parsed;
@@ -295,6 +311,7 @@ function isEditorialOnly(m: WsMessage): boolean {
     case "scroll":
     case "suggestion-list-changed":
     case "conflict":
+    case "conflict-resolved":
       return true;
     case "reload":
       return m.anchor !== null || m.primary !== null;
@@ -305,6 +322,36 @@ function isEditorialOnly(m: WsMessage): boolean {
 
 function conflictFor(file: string): (m: WsMessage) => m is Conflict {
   return (m: WsMessage): m is Conflict => m.type === "conflict" && m.file === file;
+}
+
+function conflictResolvedFor(file: string): (m: WsMessage) => m is ConflictResolved {
+  return (m: WsMessage): m is ConflictResolved =>
+    m.type === "conflict-resolved" && m.file === file;
+}
+
+/**
+ * The id of the first conflict the editorial page marks a block of `file`
+ * with (`data-presemble-conflict`, a JSON array of {id, file, ...}).
+ */
+function conflictIdOnPage(html: string, file: string): string | null {
+  for (const match of html.matchAll(/data-presemble-conflict="([^"]*)"/g)) {
+    const json = match[1]
+      .replaceAll("&quot;", '"')
+      .replaceAll("&lt;", "<")
+      .replaceAll("&gt;", ">")
+      .replaceAll("&amp;", "&");
+    let list: unknown;
+    try {
+      list = JSON.parse(json);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(list)) continue;
+    for (const c of list) {
+      if (isRecord(c) && c.file === file && typeof c.id === "string") return c.id;
+    }
+  }
+  return null;
 }
 
 function suggestionListChangedFor(file: string): (m: WsMessage) => m is SuggestionListChanged {
@@ -617,17 +664,22 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
 
     // 3b. A file that changes on disk while it has unsaved edits (step 2 and 3
     //     left FILE dirty) in a block those edits changed too (the title) is a
-    //     conflict: `conflict` on the editorial socket only (the leak check at
-    //     the end covers the public one). A change to another block would be
-    //     merged (ADR-065 amendment F2). Saving needs consent that names the
-    //     file; with it the edits are written.
+    //     conflict on that block: `conflict` with state `blocks` on the
+    //     editorial socket only (the leak check at the end covers the public
+    //     one). A change to another block would be merged (ADR-065 amendment
+    //     F2). Saving needs consent that names the file.
     if (siteDir !== null) {
       const path = `${siteDir}/${FILE}`;
       const onDisk = await Deno.readTextFile(path);
       await Deno.writeTextFile(path, onDisk.replace(/^# .*$/m, "# Changed From Outside"));
-      await editorialInbox.expect(
+      const conflict = await editorialInbox.expect(
         `ws: an external change to a dirty file broadcasts conflict for ${FILE}`,
         conflictFor(FILE),
+      );
+      check(
+        "ws: the conflict is on blocks",
+        conflict.state === "blocks",
+        `state=${JSON.stringify(conflict.state)}`,
       );
       const refused = await http.post("/_presemble/save-all", {});
       check(
@@ -641,14 +693,33 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
         Array.isArray(listed.json) && listed.json.includes(FILE),
         listed.text,
       );
-      const saved = await http.post("/_presemble/save-all", { overwriteConflicts: [FILE] });
-      expectOk("ws: save-all with consent returns ok", saved);
+
+      // 3b'. The editorial page marks the block; resolving it through the
+      //      route ends the conflict, and the end reaches the editors.
+      const page = await http.get(PAGE);
+      const id = conflictIdOnPage(page.text, FILE);
+      if (id === null) {
+        throw new StepFailure("ws: the editorial page marks the conflicted block", "no marker");
+      }
+      pass("ws: the editorial page marks the conflicted block");
+      const resolved = await http.post("/_presemble/resolve-conflict", {
+        file: FILE,
+        id,
+        take: "unsaved",
+      });
+      expectOk("ws: the resolution route resolves the block", resolved);
+      await editorialInbox.expect(
+        `ws: resolving the last block broadcasts conflict-resolved for ${FILE}`,
+        conflictResolvedFor(FILE),
+      );
       const after = await http.get("/_presemble/conflicts");
       check(
-        "ws: saving with consent clears the conflict",
+        "ws: the resolved conflict is no longer listed",
         Array.isArray(after.json) && after.json.length === 0,
         after.text,
       );
+      const saved = await http.post("/_presemble/save-all", {});
+      expectOk("ws: save-all after the resolution returns ok", saved);
     } else {
       const saved = await http.post("/_presemble/save-all", {});
       expectOk("ws: save-all returns ok", saved);

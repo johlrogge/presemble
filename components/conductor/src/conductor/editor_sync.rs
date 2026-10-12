@@ -4209,6 +4209,34 @@ mod tests {
         assert!(!dirty(&w));
     }
 
+    /// A document removed from N (a deleted file reloaded) whose conflict
+    /// ended does not stay in the set of pages to render for their conflict,
+    /// and no page is rendered or announced for it.
+    #[test]
+    fn a_removed_document_leaves_the_conflict_render_set() {
+        let (w, _) = deleted_under_unsaved_edits();
+        let result = w
+            .conductor
+            .handle_command(Command::ReloadDocument { path: path() });
+        assert_eq!(w.conductor.doc_root_for_path(Path::new(FILE)), None);
+        assert!(
+            w.conductor.conflict_unrendered.read().unwrap().is_empty(),
+            "{:?}",
+            w.conductor.conflict_unrendered.read().unwrap()
+        );
+        assert!(
+            !result.events.iter().any(|e| matches!(
+                e,
+                ConductorEvent::PagesRebuilt { pages, .. } if pages.iter().any(|p| p == "/post/first")
+            )),
+            "{:?}",
+            result.events
+        );
+        // The next command does not find it either.
+        w.conductor.handle_command(Command::GetConflicts);
+        assert!(w.conductor.conflict_unrendered.read().unwrap().is_empty());
+    }
+
     #[test]
     fn reloading_a_deleted_file_removes_the_document() {
         let (w, _) = deleted_under_unsaved_edits();

@@ -119,6 +119,15 @@ impl std::fmt::Display for ConflictId {
     }
 }
 
+impl std::str::FromStr for ConflictId {
+    type Err = std::num::ParseIntError;
+
+    /// The id as its `Display` spells it (hexadecimal).
+    fn from_str(spelled: &str) -> Result<ConflictId, Self::Err> {
+        u64::from_str_radix(spelled, 16).map(ConflictId)
+    }
+}
+
 /// The container of a block in a document (the wire form of
 /// `content::Container`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

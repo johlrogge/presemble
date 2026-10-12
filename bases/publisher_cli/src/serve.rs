@@ -41,9 +41,29 @@ enum EditorialMessage {
     /// The browser may have missed messages (lagged receiver); it should
     /// reload in place to pick up whatever it missed.
     Resync,
-    /// A document with unsaved edits changed on disk (ADR-065). Editorial
-    /// only: a draft file name never goes on the public socket.
-    Conflict { file: String },
+    /// A document with unsaved edits changed on disk (ADR-065), as a whole or
+    /// on some blocks. Editorial only: a draft file name never goes on the
+    /// public socket.
+    Conflict { file: String, scope: ConflictScope },
+    /// A document's conflict with its file has ended.
+    ConflictResolved { file: String },
+}
+
+/// What of a document conflicts with its file (the browser marks blocks on
+/// the page, and tells of a whole-file conflict in a notice).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConflictScope {
+    WholeFile,
+    Blocks,
+}
+
+impl ConflictScope {
+    fn wire(self) -> &'static str {
+        match self {
+            ConflictScope::WholeFile => "whole-file",
+            ConflictScope::Blocks => "blocks",
+        }
+    }
 }
 
 /// Serialisable projection of a [`editorial_types::StructuralAnchor`] for the
@@ -197,12 +217,15 @@ impl EditorialMessage {
                 format!(r#"{{"type":"suggestion-list-changed"{}}}"#, file_json)
             }
             EditorialMessage::Resync => r#"{"type":"resync"}"#.to_string(),
-            EditorialMessage::Conflict { file } => {
-                format!(
-                    r#"{{"type":"conflict","file":"{}"}}"#,
-                    file.replace('\\', "\\\\").replace('"', "\\\"")
-                )
-            }
+            EditorialMessage::Conflict { file, scope } => format!(
+                r#"{{"type":"conflict","file":{},"state":"{}"}}"#,
+                serde_json::Value::from(file.as_str()),
+                scope.wire()
+            ),
+            EditorialMessage::ConflictResolved { file } => format!(
+                r#"{{"type":"conflict-resolved","file":{}}}"#,
+                serde_json::Value::from(file.as_str())
+            ),
         }
     }
 }
@@ -268,13 +291,17 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
                 file: Some(file.to_string()),
             }
         }
-        // The end of a conflict has no message for the browser yet: its
-        // notice adds files, it never removes one.
-        ConductorEvent::DiskConflict {
-            state: conductor::ConflictState::Resolved,
-            ..
-        } => return None,
-        ConductorEvent::DiskConflict { file, .. } => EditorialMessage::Conflict { file },
+        ConductorEvent::DiskConflict { file, state } => match state {
+            conductor::ConflictState::WholeFile => EditorialMessage::Conflict {
+                file,
+                scope: ConflictScope::WholeFile,
+            },
+            conductor::ConflictState::Blocks(_) => EditorialMessage::Conflict {
+                file,
+                scope: ConflictScope::Blocks,
+            },
+            conductor::ConflictState::Resolved => EditorialMessage::ConflictResolved { file },
+        },
     })
 }
 
@@ -875,6 +902,10 @@ fn app_router(state: AppState) -> Router {
         .route("/_presemble/create-content", post(create_content_handler))
         .route("/_presemble/dirty-buffers", get(dirty_buffers_handler))
         .route("/_presemble/conflicts", get(conflicts_handler))
+        .route(
+            "/_presemble/resolve-conflict",
+            post(resolve_conflict_handler),
+        )
         .route("/_presemble/block-edit", post(block_edit_handler))
         .route(
             "/_presemble/ned-suggestions",
@@ -1247,6 +1278,59 @@ async fn save_all_handler(
             .conductor
             .send(&conductor::Command::SaveAllBuffers { consent }),
     )
+}
+
+/// A block resolution from the editorial page: the conflict `id` of `file`
+/// (site-relative), and which version wins (`"disk"` or `"unsaved"`).
+#[derive(serde::Deserialize)]
+struct ResolveConflictRequest {
+    file: String,
+    id: String,
+    take: String,
+}
+
+/// `POST /_presemble/resolve-conflict`: resolve one block conflict
+/// (`Command::ResolveConflict`). As every editorial route answers: `ok:
+/// true` when resolved, `ok: false` with the reason when refused (the
+/// conflict changed, the whole file conflicts, or the request is malformed);
+/// 500 only for an internal failure.
+async fn resolve_conflict_handler(
+    _session: Session,
+    State(state): State<AppState>,
+    axum::Json(request): axum::Json<ResolveConflictRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let refused = |message: String| axum::Json(EditResponse::err(message)).into_response();
+    let Ok(path) = editorial_types::ContentPath::parse(&request.file) else {
+        return refused(format!("not a content file: {}", request.file));
+    };
+    let Ok(id) = request.id.parse::<conductor::ConflictId>() else {
+        return refused(format!("not a conflict id: {}", request.id));
+    };
+    let take = match request.take.as_str() {
+        "disk" => conductor::ConflictSide::Disk,
+        "unsaved" => conductor::ConflictSide::Unsaved,
+        other => return refused(format!("take is \"disk\" or \"unsaved\", not {other:?}")),
+    };
+    match state
+        .conductor
+        .send(&conductor::Command::ResolveConflict { path, id, take })
+    {
+        Ok(conductor::Response::Ok) => axum::Json(EditResponse::ok_simple()).into_response(),
+        Ok(conductor::Response::Error(e)) => refused(e),
+        Ok(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(EditResponse::err(
+                "unexpected conductor response".to_string(),
+            )),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(EditResponse::err(e)),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /_presemble/conflicts`: the documents whose file changed on disk while
@@ -4399,25 +4483,244 @@ mod tests {
             file: "content/post/a.md".to_string(),
             state: conductor::ConflictState::WholeFile,
         });
-        match &msg {
-            EditorialMessage::Conflict { file } => assert_eq!(file, "content/post/a.md"),
-            other => panic!("expected Conflict, got {other:?}"),
-        }
         assert_eq!(
             msg.to_json(),
-            r#"{"type":"conflict","file":"content/post/a.md"}"#
+            r#"{"type":"conflict","file":"content/post/a.md","state":"whole-file"}"#
         );
     }
 
-    /// GUARD: the end of a conflict never reaches the browser as a conflict.
     #[test]
-    fn the_end_of_a_disk_conflict_is_no_conflict_message() {
+    fn a_block_conflict_reaches_the_editors_as_blocks() {
+        let msg = editorial_message_for(conductor::ConductorEvent::DiskConflict {
+            file: "content/post/a.md".to_string(),
+            state: conductor::ConflictState::Blocks(Vec::new()),
+        });
+        assert_eq!(
+            msg.to_json(),
+            r#"{"type":"conflict","file":"content/post/a.md","state":"blocks"}"#
+        );
+    }
+
+    /// The end of a conflict reaches the editors as its own message, never
+    /// as a conflict.
+    #[test]
+    fn the_end_of_a_disk_conflict_reaches_the_editors() {
+        let msg = editorial_message_for(conductor::ConductorEvent::DiskConflict {
+            file: "content/post/a.md".to_string(),
+            state: conductor::ConflictState::Resolved,
+        });
+        assert_eq!(
+            msg.to_json(),
+            r#"{"type":"conflict-resolved","file":"content/post/a.md"}"#
+        );
+    }
+
+    /// GUARD: no state of a conflict reaches the public socket (ADR-054).
+    #[tokio::test]
+    async fn conflicts_reach_only_the_editorial_socket() {
+        let site = served_site(BLOCKS_CONTENT, TITLE_TEMPLATE, false);
+        let mut public = site.channels.public.subscribe();
+        let mut editorial = site.channels.editorial.subscribe();
+        for state in [
+            conductor::ConflictState::WholeFile,
+            conductor::ConflictState::Blocks(Vec::new()),
+            conductor::ConflictState::Resolved,
+        ] {
+            dispatch_conductor_event(
+                conductor::ConductorEvent::DiskConflict {
+                    file: "content/test/doc.md".to_string(),
+                    state,
+                },
+                &site.channels,
+                &site.trigger,
+            );
+        }
+        let mut seen = Vec::new();
+        while let Ok(msg) = editorial.try_recv() {
+            seen.push(msg.to_json());
+        }
+        assert_eq!(seen.len(), 3, "{seen:?}");
         assert!(
-            editorial_message_of(conductor::ConductorEvent::DiskConflict {
-                file: "content/post/a.md".to_string(),
-                state: conductor::ConflictState::Resolved,
+            matches!(
+                public.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "the public socket heard of a conflict"
+        );
+    }
+
+    // ── resolving a block conflict from the browser (F2.4) ────────────────
+
+    const BLOCKS_CONTENT: &str = "# Test Title\n\n----\n\nAlpha.\n\nBeta.\n";
+
+    /// The editor has an unsaved change to the first paragraph, and the file
+    /// changes it differently: a conflict on that block. Its id.
+    fn block_conflict(site: &ServedSite) -> conductor::ConflictId {
+        let path = editorial_types::ContentPath::parse("content/test/doc.md").expect("valid");
+        site.client
+            .send(&conductor::Command::EditorOpened {
+                path: path.clone(),
+                text: BLOCKS_CONTENT.to_string(),
             })
-            .is_none()
+            .unwrap();
+        site.client
+            .send(&conductor::Command::EditorChanged {
+                path,
+                text: BLOCKS_CONTENT.replace("Alpha.", "Alpha mine."),
+            })
+            .unwrap();
+        std::fs::write(
+            site.root.join("content/test/doc.md"),
+            BLOCKS_CONTENT.replace("Alpha.", "Alpha disk."),
+        )
+        .unwrap();
+        site.client
+            .send(&conductor::Command::FileChanged {
+                paths: vec![
+                    editorial_types::SitePath::parse("content/test/doc.md").expect("valid"),
+                ],
+            })
+            .unwrap();
+        match conflict_state(site) {
+            Some(conductor::ConflictState::Blocks(regions)) => regions[0].id,
+            other => panic!("expected a block conflict, got {other:?}"),
+        }
+    }
+
+    fn conflict_state(site: &ServedSite) -> Option<conductor::ConflictState> {
+        match site.client.send(&conductor::Command::GetConflicts) {
+            Ok(conductor::Response::Conflicts(files)) => files
+                .into_iter()
+                .find(|c| c.file == "content/test/doc.md")
+                .map(|c| c.state),
+            other => panic!("expected Conflicts, got {other:?}"),
+        }
+    }
+
+    /// POST a resolution, with or without the session cookie.
+    async fn post_resolution(
+        site: &ServedSite,
+        body: serde_json::Value,
+        cookie: bool,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/_presemble/resolve-conflict")
+            .header("content-type", "application/json");
+        if cookie {
+            req = req.header("cookie", test_session_cookie());
+        }
+        let resp = site
+            .app
+            .clone()
+            .oneshot(
+                req.body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let text = body_string(resp).await;
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn resolution(id: conductor::ConflictId, take: &str) -> serde_json::Value {
+        serde_json::json!({
+            "file": "content/test/doc.md",
+            "id": id.to_string(),
+            "take": take,
+        })
+    }
+
+    #[tokio::test]
+    async fn the_resolve_conflict_route_takes_the_files_version() {
+        let site = served_site(BLOCKS_CONTENT, TITLE_TEMPLATE, false);
+        let id = block_conflict(&site);
+        let (status, val) = post_resolution(&site, resolution(id, "disk"), true).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        assert_eq!(val["ok"], true, "{val}");
+        assert_eq!(conflict_state(&site), None, "the last block is resolved");
+        let text = match site.client.send(&conductor::Command::GetDocumentText {
+            path: editorial_types::SitePath::parse("content/test/doc.md").expect("valid"),
+        }) {
+            Ok(conductor::Response::DocumentText(Some(text))) => text,
+            other => panic!("expected the document text, got {other:?}"),
+        };
+        assert!(text.contains("Alpha disk."), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_resolve_conflict_route_keeps_the_unsaved_version() {
+        let site = served_site(BLOCKS_CONTENT, TITLE_TEMPLATE, false);
+        let id = block_conflict(&site);
+        let (status, val) = post_resolution(&site, resolution(id, "unsaved"), true).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        assert_eq!(conflict_state(&site), None);
+    }
+
+    /// An id that is not current (resolved already, or never was) is refused
+    /// as every editorial route refuses: a 200 with `ok: false` and the
+    /// conductor's reason.
+    #[tokio::test]
+    async fn the_resolve_conflict_route_refuses_an_old_id() {
+        let site = served_site(BLOCKS_CONTENT, TITLE_TEMPLATE, false);
+        let id = block_conflict(&site);
+        let (status, val) = post_resolution(
+            &site,
+            resolution(conductor::ConflictId(id.0 ^ 1), "disk"),
+            true,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        assert_eq!(val["ok"], false, "{val}");
+        assert!(
+            val["error"].as_str().is_some_and(|e| !e.is_empty()),
+            "{val}"
+        );
+        assert!(
+            matches!(
+                conflict_state(&site),
+                Some(conductor::ConflictState::Blocks(_))
+            ),
+            "nothing was resolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_resolve_conflict_route_refuses_a_malformed_request() {
+        let site = served_site(BLOCKS_CONTENT, TITLE_TEMPLATE, false);
+        let id = block_conflict(&site);
+        for body in [
+            resolution(id, "both"),
+            serde_json::json!({ "file": "content/test/doc.md", "id": "zz", "take": "disk" }),
+            serde_json::json!({ "file": "../etc/passwd", "id": id.to_string(), "take": "disk" }),
+        ] {
+            let (status, val) = post_resolution(&site, body.clone(), true).await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}: {val}");
+            assert_eq!(val["ok"], false, "{val}");
+            assert!(
+                val["error"].as_str().is_some_and(|e| !e.is_empty()),
+                "{val}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_resolve_conflict_route_requires_a_session() {
+        let site = served_site(BLOCKS_CONTENT, TITLE_TEMPLATE, false);
+        let id = block_conflict(&site);
+        let (status, _) = post_resolution(&site, resolution(id, "disk"), false).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        assert!(
+            matches!(
+                conflict_state(&site),
+                Some(conductor::ConflictState::Blocks(_))
+            ),
+            "nothing was resolved"
         );
     }
 

@@ -616,6 +616,47 @@ printf '%s\n' "$HW_ORIG" > "$HW_PATH"
 wait_for_page_text "/post/hello-world" "Hello, World: Your First Post" || true
 assert_curl "hello-world is back to its scaffolded text" "/post/hello-world" GET "" "Hello, World: Your First Post"
 
+# 7. A conflict on a block is marked on that block in the editorial page, and
+#    resolved there (ADR-065 amendment F2).
+conflict_id() {   # the first conflict id the page at $1 marks a block with
+    acurl "http://127.0.0.1:$PORT$1" 2>/dev/null \
+        | grep -oE 'data-presemble-conflict="[^"]*' \
+        | grep -oE '&quot;id&quot;:&quot;[0-9a-f]{16}' \
+        | grep -oE '[0-9a-f]{16}$' | head -1 || true
+}
+resolve_body() {   # $1 the conflict id, $2 disk|unsaved
+    printf '{"file":"%s","id":"%s","take":"%s"}' "$HW_FILE" "$1" "$2"
+}
+# The attribute as written on an element (inject.js names it too).
+MARKED='data-presemble-conflict="'
+conflict_edit 'Edited For Blocks' > /dev/null
+sed 's/Hello, World: Your First Post/Shell Block Title/' "$HW_PATH" > "$HW_PATH.tmp" && mv "$HW_PATH.tmp" "$HW_PATH"
+wait_for_page_text "/post/hello-world" "$MARKED" || true
+assert_curl "a conflicted block is marked on the page" "/post/hello-world" GET "" "$MARKED"
+assert_curl "the marker carries the file's version" "/post/hello-world" GET "" "Shell Block Title"
+assert_curl "the page keeps the unsaved edit of the block" "/post/hello-world" GET "" "Edited For Blocks"
+BLOCK_ID=$(conflict_id "/post/hello-world")
+assert_contains "keeping the unsaved version resolves the block" "$(post_json "/_presemble/resolve-conflict" "$(resolve_body "$BLOCK_ID" unsaved)")" '"ok":true'
+assert_curl "the resolved conflict is no longer listed" "/_presemble/conflicts" GET "" "[]"
+assert_curl_not_contains "the page no longer marks the block" "/post/hello-world" "$MARKED"
+assert_contains "an old conflict id is refused" "$(post_json "/_presemble/resolve-conflict" "$(resolve_body "$BLOCK_ID" disk)")" '"ok":false'
+
+sed 's/Shell Block Title/Shell Block Again/' "$HW_PATH" > "$HW_PATH.tmp" && mv "$HW_PATH.tmp" "$HW_PATH"
+wait_for_page_text "/post/hello-world" "$MARKED" || true
+assert_curl "a second change of the block is marked again" "/post/hello-world" GET "" "$MARKED"
+BLOCK_ID=$(conflict_id "/post/hello-world")
+assert_contains "taking the file's version resolves the block" "$(post_json "/_presemble/resolve-conflict" "$(resolve_body "$BLOCK_ID" disk)")" '"ok":true'
+assert_curl "the page shows the file's version of the block" "/post/hello-world" GET "" "Shell Block Again"
+assert_curl_not_contains "the taken block is no longer marked" "/post/hello-world" "$MARKED"
+assert_curl "nothing conflicts any more" "/_presemble/conflicts" GET "" "[]"
+
+# Restore the scaffolded file (merged into N: only the file changed) and save.
+printf '%s\n' "$HW_ORIG" > "$HW_PATH"
+wait_for_page_text "/post/hello-world" "Hello, World: Your First Post" || true
+post_json "/_presemble/save-all" "" > /dev/null
+assert_curl "hello-world is back to its scaffolded text again" "/post/hello-world" GET "" "Hello, World: Your First Post"
+assert_curl_not_contains "hello-world has no unsaved edits" "/_presemble/dirty-buffers" "$HW_FILE"
+
 # ── Test: Diagnostics in the editorial page (FU-7b) ───────────────────────
 # A copy of hello-world with inline HTML in a body paragraph: the editorial page
 # carries the diagnostics (element attribute + page script). The probe is fixed
