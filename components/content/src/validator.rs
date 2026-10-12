@@ -2239,6 +2239,22 @@ mod tests {
         assert_eq!(src[block.start..block.end].trim_end(), "a **bold and more");
     }
 
+    #[test]
+    fn the_unfinished_markup_error_keeps_its_exact_span_after_a_save() {
+        let g = summary_grammar(true);
+        let doc = parse_and_assign(&in_body("a **bold and more"), &g).expect("parses");
+        let saved = crate::serializer::serialize_document(&doc);
+        let again = parse_and_assign(&saved, &g).expect("re-reads");
+        let d: Vec<_> = validate_source(&again, &g, &saved)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.message.contains("looks like unfinished formatting"))
+            .collect();
+        assert_eq!(d.len(), 1, "{d:#?}");
+        let span = d[0].span.expect("a span");
+        assert_eq!(&saved[span.start..span.end], "**", "in {saved:?}");
+    }
+
     /// A complete link expression in running text is the link-expression
     /// pass's to report (it must stand alone), not unfinished markup too.
     #[test]

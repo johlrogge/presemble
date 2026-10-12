@@ -1235,10 +1235,11 @@ headings
             ("42) x", "42\\) x"),
             ("1.", "1\\."),
             ("---", "\\---"),
-            ("***", "\\*\\*\\*"),
-            ("___", "\\_\\_\\_"),
+            // UM-1: the line-start escape is enough; the rest reads back bare.
+            ("***", "\\***"),
+            ("___", "\\___"),
             ("- - -", "\\- - -"),
-            ("```", "\\`\\``"),
+            ("```", "\\```"),
             ("~~~ x", "\\~~~ x"),
             ("<div>", "\\<div>"),
             ("<div> hello", "\\<div> hello"),
@@ -1303,7 +1304,7 @@ headings
             ("a\n===", "a\n\\==="),
             ("a\n---", "a\n\\---"),
             ("a\n-", "a\n\\-"),
-            ("a\n```", "a\n\\`\\``"),
+            ("a\n```", "a\n\\```"),
             ("a\n<div>", "a\n\\<div>"),
             // These cannot interrupt a paragraph, so they stay as written.
             ("a\n2. b", "a\n2. b"),
@@ -1337,7 +1338,7 @@ headings
             ("- x", "> \\- x"),
             ("1. x", "> 1\\. x"),
             ("---", "> \\---"),
-            ("```", "> \\`\\``"),
+            ("```", "> \\```"),
             ("<div> x", "> \\<div> x"),
             ("[a]: /x", "> \\[a]: /x"),
         ];
@@ -2378,7 +2379,9 @@ headings
     fn paragraph_that_reads_as_marked_link_expression_is_escaped() {
         let text = "[p](->> :post) {#news}";
         let out = serialize_element(&para(text));
-        assert_eq!(out, "\\[p](->> :post) \\{#news}");
+        // UM-1: with the marker escaped it reads as no link expression, so
+        // the `[` reads back bare.
+        assert_eq!(out, "[p](->> :post) \\{#news}");
         assert_eq!(reparse_one(&out), para(text));
         assert_eq!(serialize_element(&reparse_one(&out)), out);
         // A marker with an invalid name is escaped too: it is literal text.

@@ -1078,6 +1078,17 @@ items.
   starts with a tag or comment cannot be written: it is refused when an edit
   proposes it (L20), and it cannot come from disk.
 
+### UM-1 amendment (minimal inline escaping)
+
+- **Minimal inline escaping (UM-1).** A literal `*`, `_`, backtick, `[`, `]`
+  or `!` is escaped only where writing it bare would read back differently,
+  checked against the parser, run by run from the last to the first, so
+  openers stay escaped (`\*\*a**`). An unpaired run (`a **bold`, an unclosed
+  backtick or link) is therefore saved as typed. The spelling is still a
+  function of the model alone. An escape is also kept where removing it would
+  change what the paragraph is diagnosed as: the link-expression check is the
+  one check that reads a paragraph's source rather than its nodes.
+
 ## Related
 
 ADR-029, ADR-033, ADR-034, ADR-045, ADR-046, ADR-056, ADR-057, ADR-058,

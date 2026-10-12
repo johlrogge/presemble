@@ -9,7 +9,11 @@
 //!   `(`; a backtick when another backtick follows in the run (in text or as
 //!   a code fence, at any depth); `<` when a letter, `/`, `!` or `?` follows;
 //! - block-level escapes (C10) are applied to the line starts of the finished
-//!   text, in one pass.
+//!   text, in one pass;
+//! - then, UM-1, each run of escapes before `*`, `_`, a backtick, `[`, `]` or
+//!   `!` is dropped, from the last run to the first, when the text reads back
+//!   as the same inlines without it (verified against the parser), so an
+//!   unpaired run (`a **bold`) is written as typed.
 
 use super::model::{Inline, InlineContext, Inlines};
 use super::parse::parse_inlines;
@@ -60,17 +64,117 @@ pub fn serialize_inlines(inlines: &Inlines, ctx: InlineContext) -> String {
     let mut out = String::new();
     let mut ahead = Ahead::new(inlines.as_slice(), place.bracket);
     write_run(inlines.as_slice(), place, &mut ahead, &mut out);
-    match ctx {
+    let finish = |raw: &str, html_line_starts: &[usize]| match ctx {
         // Line starts are escaped by the block writer, which knows pulldown's
         // exact rules (tables, link reference definitions, HTML blocks).
         InlineContext::Paragraph => {
-            crate::serializer::escape_block_lines(&out, &ahead.html_line_starts).join("\n")
+            crate::serializer::escape_block_lines(raw, html_line_starts).join("\n")
         }
         // The first line sits behind `[` or `![`, so it opens no block.
-        InlineContext::LinkText | InlineContext::Alt => escape_line_starts(&out, false),
-        InlineContext::Heading => crate::serializer::escape_closing_hashes(&out),
-        InlineContext::Cell => out,
+        InlineContext::LinkText | InlineContext::Alt => escape_line_starts(raw, false),
+        InlineContext::Heading => crate::serializer::escape_closing_hashes(raw),
+        InlineContext::Cell => raw.to_string(),
+    };
+    let written = finish(&out, &ahead.html_line_starts);
+    if ahead.markup_escapes.is_empty() {
+        return written;
     }
+    unescape_where_it_reads_the_same(
+        inlines,
+        ctx,
+        &out,
+        &ahead.html_line_starts,
+        &ahead.markup_escapes,
+        written,
+        finish,
+    )
+}
+
+/// UM-1, minimal escaping: drop each run of escapes of a markup character
+/// (`*`, `_`, backtick, `[`, `]`, `!`) whose characters read back as the same
+/// inlines when written bare, verified against the parser. Runs are tried from
+/// the last to the first, so an opener stays escaped while its closer goes
+/// bare (`\*\*a**`).
+///
+/// `raw` is the output before line-start escapes, `escapes` the byte offsets
+/// in it of the backslashes that may go; `finish` applies the line-start
+/// escapes; `written` is `finish` of `raw` as it is.
+fn unescape_where_it_reads_the_same(
+    inlines: &Inlines,
+    ctx: InlineContext,
+    raw: &str,
+    html_line_starts: &[usize],
+    escapes: &[MarkupEscape],
+    written: String,
+    finish: impl Fn(&str, &[usize]) -> String,
+) -> String {
+    let meaning = (
+        block_level_meaning(&written, ctx),
+        diagnosed_as_link_expression(&written, ctx),
+    );
+    // Runs: consecutive escapes of the same character in the same text node.
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    for (k, escape) in escapes.iter().enumerate() {
+        let continues = k > 0 && {
+            let before = &escapes[k - 1];
+            before.text == escape.text && before.c == escape.c && before.at + 2 == escape.at
+        };
+        match runs.last_mut() {
+            Some(run) if continues => run.push(escape.at),
+            _ => runs.push(vec![escape.at]),
+        }
+    }
+    // `raw` and the HTML line starts with the backslashes at `removed` gone.
+    let strip = |removed: &[usize]| -> (String, Vec<usize>) {
+        let text: String = raw
+            .char_indices()
+            .filter(|(i, _)| !removed.contains(i))
+            .map(|(_, c)| c)
+            .collect();
+        let starts = html_line_starts
+            .iter()
+            .map(|&at| at - removed.iter().filter(|&&r| r < at).count())
+            .collect();
+        (text, starts)
+    };
+    let mut removed: Vec<usize> = Vec::new();
+    let mut best = written;
+    for run in runs.iter().rev() {
+        let mut trial = removed.clone();
+        trial.extend(run);
+        let (text, starts) = strip(&trial);
+        let candidate = finish(&text, &starts);
+        let same = parse_inlines(&candidate, ctx).is_ok_and(|back| &back == inlines)
+            && (
+                block_level_meaning(&candidate, ctx),
+                diagnosed_as_link_expression(&candidate, ctx),
+            ) == meaning;
+        if same {
+            removed = trial;
+            best = candidate;
+        }
+    }
+    best
+}
+
+/// Whether `written` reads as more than inlines in `ctx`: a link expression
+/// or a slot marker (ADR-058, ADR-060).
+fn block_level_meaning(written: &str, ctx: InlineContext) -> bool {
+    match ctx {
+        InlineContext::Paragraph => {
+            crate::parser::read_link_expression_paragraph(written).is_some()
+                || crate::parser::is_marker_paragraph(written)
+        }
+        InlineContext::Heading => crate::link_expression::split_marker(written).is_some(),
+        _ => false,
+    }
+}
+
+/// Whether the link-expression pass would diagnose `written` as a paragraph
+/// (a link expression in running text, a malformed one): bare markup that
+/// makes a literal paragraph look like one reads back differently.
+fn diagnosed_as_link_expression(written: &str, ctx: InlineContext) -> bool {
+    ctx == InlineContext::Paragraph && crate::link_expression::diagnose_paragraph(written).is_some()
 }
 
 pub(super) fn check_writable(inlines: &Inlines, ctx: InlineContext) -> Result<(), NotWritable> {
@@ -78,16 +182,8 @@ pub(super) fn check_writable(inlines: &Inlines, ctx: InlineContext) -> Result<()
     let written = serialize_inlines(inlines, ctx);
     // A paragraph that reads as a link expression or carries a slot marker is
     // not a paragraph of inlines (ADR-058, ADR-060).
-    let block_level_meaning = match ctx {
-        InlineContext::Paragraph => {
-            crate::parser::read_link_expression_paragraph(&written).is_some()
-                || crate::parser::is_marker_paragraph(&written)
-                || is_sole_link_expression(inlines)
-        }
-        InlineContext::Heading => crate::link_expression::split_marker(&written).is_some(),
-        _ => false,
-    };
-    if block_level_meaning {
+    let sole_link_expression = ctx == InlineContext::Paragraph && is_sole_link_expression(inlines);
+    if sole_link_expression || block_level_meaning(&written, ctx) {
         return Err(err);
     }
     match parse_inlines(&written, ctx) {
@@ -130,6 +226,19 @@ struct Ahead {
     /// starts its line (behind blanks at most): written there, it must stay
     /// markup (see `escape_block_lines`).
     html_line_starts: Vec<usize>,
+    /// The escapes written before a markup character, which UM-1 may drop.
+    markup_escapes: Vec<MarkupEscape>,
+    /// Text nodes written so far: identifies the node an escape is in.
+    texts: usize,
+}
+
+/// A backslash written before `*`, `_`, a backtick, `[`, `]` or `!`.
+struct MarkupEscape {
+    /// Byte offset of the backslash in the output.
+    at: usize,
+    c: char,
+    /// The text node it is in.
+    text: usize,
 }
 
 impl Ahead {
@@ -147,6 +256,8 @@ impl Ahead {
             backticks: count_backticks(items),
             gts: count_gts(items),
             html_line_starts: Vec::new(),
+            markup_escapes: Vec::new(),
+            texts: 0,
         }
     }
 
@@ -426,6 +537,7 @@ struct TextContext {
 }
 
 fn write_text(s: &str, ctx: TextContext, place: Place, ahead: &mut Ahead, out: &mut String) {
+    ahead.texts += 1;
     let marker_at = if ctx.marker { trailing_marker(s) } else { None };
     for (i, c) in s.char_indices() {
         let prev = s[..i].chars().next_back();
@@ -461,6 +573,13 @@ fn write_text(s: &str, ctx: TextContext, place: Place, ahead: &mut Ahead, out: &
             _ => false,
         };
         if escape {
+            if matches!(c, '*' | '_' | '`' | '[' | ']' | '!') {
+                ahead.markup_escapes.push(MarkupEscape {
+                    at: out.len(),
+                    c,
+                    text: ahead.texts,
+                });
+            }
             out.push('\\');
         }
         match entity_for(c) {
@@ -809,7 +928,8 @@ mod tests {
             ("a\\\nb", "a\\\nb"),
             // C7: escapes where meaning would change.
             ("a \\* b", "a * b"),
-            ("\\*a\\*", "\\*a\\*"),
+            // UM-1: the opener stays escaped, the closer goes bare.
+            ("\\*a\\*", "\\*a*"),
             // C8: characters, not entities, except U+00A0 and the invisible ones.
             ("&copy; \u{e9}", "\u{a9} \u{e9}"),
             ("a&nbsp;b", "a&nbsp;b"),
@@ -848,22 +968,25 @@ mod tests {
             "x\n2. y",
             "[x]",
             "`",
+            // UM-1: unpaired, they read back the same bare.
+            "a*b",
+            "_",
+            "_x",
+            "x_",
         ];
         for s in &unchanged {
             assert_eq!(text_para(s), *s, "{s:?} needs no escape");
         }
         let escaped: &[(&str, &str)] = &[
-            ("a*b", "a\\*b"),
+            // A lone `*` would open a list item.
             ("*", "\\*"),
-            ("_", "\\_"),
-            ("_x", "\\_x"),
-            ("x_", "x\\_"),
             ("a`b`", "a\\`b`"),
             ("<b>", "\\<b>"),
             ("&amp;", "\\&amp;"),
             ("&#35;", "\\&#35;"),
             ("x\\", "x\\\\"),
-            ("x\\*", "x\\\\\\*"),
+            // UM-1: the backslash is escaped, the `*` after it reads back bare.
+            ("x\\*", "x\\\\*"),
             ("see {#x}", "see \\{#x}"),
             ("{#x}", "\\{#x}"),
             ("[x](->> :post)", "\\[x](->> :post)"),
@@ -907,6 +1030,56 @@ mod tests {
         assert_eq!(serialize_inlines(&heading, InlineContext::Heading), "C \\#");
     }
 
+    // ── Minimal escaping (UM-1) ──────────────────────────────────────────
+
+    #[test]
+    fn a_lone_strong_run_is_written_as_typed() {
+        assert_eq!(text_para("a **bold"), "a **bold");
+    }
+
+    #[test]
+    fn a_single_unpaired_star_or_underscore_is_written_as_typed() {
+        for s in ["5*3", "a*b", "_x", "x_"] {
+            assert_eq!(text_para(s), s, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn an_unclosed_backtick_is_written_as_typed() {
+        assert_eq!(text_para("see `foo"), "see `foo");
+    }
+
+    #[test]
+    fn an_unclosed_link_target_is_written_as_typed() {
+        assert_eq!(text_para("see [x](http://y"), "see [x](http://y");
+    }
+
+    #[test]
+    fn a_word_initial_image_bang_is_written_as_typed() {
+        assert_eq!(text_para("see ![diagram"), "see ![diagram");
+    }
+
+    #[test]
+    fn escapes_stay_where_they_change_the_meaning() {
+        let cases: &[(&str, &str)] = &[
+            ("**a**", "\\*\\*a**"),
+            ("a*b*c", "a\\*b*c"),
+            ("a `b` c", "a \\`b` c"),
+            ("[x](y)", "\\[x](y)"),
+            ("[x](->> :post)", "\\[x](->> :post)"),
+            ("a`b`", "a\\`b`"),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(text_para(s), *expected, "escape of {s:?}");
+            let back = parse_inlines(expected, InlineContext::Paragraph).expect("reads");
+            assert_eq!(
+                back,
+                Inlines::new(vec![t(s)], InlineContext::Paragraph),
+                "{expected:?} reads back as the text {s:?}"
+            );
+        }
+    }
+
     #[test]
     fn prose_brackets_backticks_and_angles_stay_unescaped() {
         for s in [
@@ -919,13 +1092,14 @@ mod tests {
             "a<3",
             "1 < 2 > 0",
             "a ] b ( c",
+            // UM-1: the `](` closes no link opened by this `[`.
+            "a [b] c](d)",
         ] {
             assert_eq!(text_para(s), s, "{s:?} is prose");
         }
         let escaped: &[(&str, &str)] = &[
             // `[` before a later `](`.
             ("[x](y)", "\\[x](y)"),
-            ("a [b] c](d)", "a \\[b] c](d)"),
             // A later backtick can close a span.
             ("a `b` c", "a \\`b` c"),
             ("`a` and `b`", "\\`a\\` and \\`b`"),

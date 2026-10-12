@@ -725,6 +725,27 @@ fn round_trip_preserves_flattened_blocks() {
     );
 }
 
+/// UM-1: an unpaired `**` is saved as typed, and reads back as the same nodes.
+#[test]
+fn an_unclosed_strong_run_round_trips_through_a_save() {
+    let source = "a **bold\n";
+    let blocks: Vec<ContentElement> = parse_document(source)
+        .expect("parses")
+        .elements
+        .iter()
+        .map(|s| s.node.clone())
+        .collect();
+    let written = serialize_document(&body_only(&blocks));
+    assert_eq!(written, source, "saved as typed");
+    let again: Vec<ContentElement> = parse_document(&written)
+        .expect("re-reads")
+        .elements
+        .iter()
+        .map(|s| s.node.clone())
+        .collect();
+    assert_eq!(again, blocks, "the same nodes");
+}
+
 #[test]
 fn serialization_is_a_fixed_point() {
     let mut failures = Vec::new();
@@ -1061,6 +1082,8 @@ fn from_disk_corpus_is_written_unchanged() {
         "## The `<div>` element",
         "# Use \\<div>",
         "# a *b* \\#",
+        // UM-1: a lone `*` after a line opens no list item and reads back bare.
+        "a\n*",
     ];
     let mut failures = Vec::new();
     for md in corpus {
@@ -1077,15 +1100,13 @@ fn from_disk_corpus_is_written_unchanged() {
 }
 
 /// A paragraph is written canonically (ADR-059 stage 5): what its nodes do
-/// not keep is not written back. These were written as read before; now a
-/// lone `*` is escaped (the writer cannot tell it from the start of
-/// emphasis), indentation after a line break is not part of the nodes, and
+/// not keep is not written back. These were written as read before; now
+/// indentation after a line break is not part of the nodes, and
 /// an escaped `|` is the plain character, which then needs the delimiter row
 /// escaped. Each reads back as the same nodes.
 #[test]
 fn from_disk_markdown_that_is_canonicalised_by_a_save() {
     for (md, canonical) in [
-        ("a\n*", "a\n\\*"),
         ("a\n    - b", "a\n\\- b"),
         ("a \\| b\n--- | ---", "a | b\n\\--- | ---"),
     ] {
