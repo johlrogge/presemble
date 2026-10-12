@@ -48,17 +48,12 @@ pub fn validate_document(src: &str, doc: &Document, grammar: &Grammar) -> Vec<Di
     let mut diagnostics: Vec<Diagnostic> = result
         .diagnostics
         .iter()
-        .map(|vd| {
-            let span = vd
-                .span
-                .map(Range::from)
-                .or_else(|| find_span_for_diagnostic(vd.slot.as_ref(), doc));
-            Diagnostic {
-                severity: vd.severity.clone(),
-                message: vd.message.clone(),
-                slot: vd.slot.clone(),
-                span,
-            }
+        // The content validator decides where every diagnostic points.
+        .map(|vd| Diagnostic {
+            severity: vd.severity.clone(),
+            message: vd.message.clone(),
+            slot: vd.slot.clone(),
+            span: vd.span.map(Range::from),
         })
         .collect();
 
@@ -115,13 +110,6 @@ fn find_separator_span(src: &str) -> Option<Range<usize>> {
         offset += line.len() + 1; // +1 for the newline
     }
     None
-}
-
-/// Find the byte range of the first element in a named slot.
-fn find_span_for_diagnostic(slot_name: Option<&SlotName>, doc: &Document) -> Option<Range<usize>> {
-    let slot_name = slot_name?;
-    let slot = doc.preamble.iter().find(|s| &s.name == slot_name)?;
-    slot.elements.front().map(|e| Range::from(e.span))
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +394,25 @@ mod tests {
             src.len(),
             span
         );
+    }
+
+    /// FU-3: a missing slot is reported where its element would go, a
+    /// zero-width span that still has a line and column.
+    #[test]
+    fn a_missing_slot_has_a_zero_width_position_after_the_previous_slot() {
+        let src = "# My Title\n\n----\n\n### Body\n";
+        let diagnostics = validate_content(src, &article_grammar());
+        let summary = diagnostics
+            .iter()
+            .find(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary"))
+            .unwrap_or_else(|| panic!("a summary diagnostic: {diagnostics:#?}"));
+        let span = summary.span.clone().expect("a position");
+        assert_eq!(span.start, span.end, "{span:?}");
+        assert_eq!(
+            span.start,
+            src.find("# My Title\n").unwrap() + "# My Title\n".len()
+        );
+        assert_eq!(line_col(src, span.start), LineCol { line: 2, col: 1 });
     }
 
     // ── validate_document ───────────────────────────────────────────────────

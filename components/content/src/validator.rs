@@ -92,7 +92,10 @@ fn validate_with(doc: &Document, grammar: &Grammar, source: Option<&str>) -> Val
     let mut diagnostics: Vec<ValidationDiagnostic> = Vec::new();
 
     // ── Preamble validation ────────────────────────────────────────────────
-    for grammar_slot in &grammar.preamble {
+    for (slot_index, grammar_slot) in grammar.preamble.iter().enumerate() {
+        // Where an element of this slot that is not there would go.
+        let absent = absence_span(doc, grammar, slot_index);
+
         // Find the corresponding DocumentSlot by name.
         let slot_elements = doc
             .preamble
@@ -110,7 +113,7 @@ fn validate_with(doc: &Document, grammar: &Grammar, source: Option<&str>) -> Val
                         severity: Severity::Error,
                         message: format!("slot '{}': missing required element", grammar_slot.name),
                         slot: Some(grammar_slot.name.clone()),
-                        span: None,
+                        span: absent,
                         location: None,
                     });
                 }
@@ -122,34 +125,40 @@ fn validate_with(doc: &Document, grammar: &Grammar, source: Option<&str>) -> Val
 
         match &grammar_slot.element {
             Element::Heading { level: level_range } => {
-                let count =
-                    validate_headings(elements, level_range, grammar_slot, &mut diagnostics);
-                check_occurs_count(count, grammar_slot, &mut diagnostics);
+                let counted = validate_headings(
+                    elements,
+                    level_range,
+                    grammar_slot,
+                    absent,
+                    &mut diagnostics,
+                );
+                check_occurs_count(&counted, grammar_slot, absent, &mut diagnostics);
             }
 
             Element::Paragraph => {
-                let count = validate_paragraphs(elements, grammar_slot, &mut diagnostics);
+                let counted = validate_paragraphs(elements, grammar_slot, &mut diagnostics);
                 check_occurs_count_paragraphs(
-                    count,
+                    &counted,
                     &expected_count,
                     grammar_slot,
+                    absent,
                     &mut diagnostics,
                 );
             }
 
             Element::Link { .. } => {
-                let count = validate_links(elements, grammar_slot, &mut diagnostics);
-                check_occurs_count(count, grammar_slot, &mut diagnostics);
+                let counted = validate_links(elements, grammar_slot, absent, &mut diagnostics);
+                check_occurs_count(&counted, grammar_slot, absent, &mut diagnostics);
             }
 
             Element::Image { .. } => {
-                let count = validate_images(elements, grammar_slot, &mut diagnostics);
-                check_occurs_count(count, grammar_slot, &mut diagnostics);
+                let counted = validate_images(elements, grammar_slot, absent, &mut diagnostics);
+                check_occurs_count(&counted, grammar_slot, absent, &mut diagnostics);
             }
 
             Element::List => {
-                let count = validate_list(elements, grammar_slot, &mut diagnostics);
-                check_occurs_count(count, grammar_slot, &mut diagnostics);
+                let counted = validate_list(elements, grammar_slot, absent, &mut diagnostics);
+                check_occurs_count(&counted, grammar_slot, absent, &mut diagnostics);
             }
         }
     }
@@ -247,6 +256,64 @@ fn span_located(doc: &Document, diagnostics: &mut [ValidationDiagnostic]) {
             .map(|element| element.span)
             .filter(|span| span.end > span.start);
     }
+}
+
+/// Where an element of slot `index` of `grammar` that is not in `doc` would go
+/// (a missing element, or one too few), in reading order, as a zero-width
+/// span:
+/// 1. right after the slot's own last element;
+/// 2. else right after the last element of the nearest earlier slot that has
+///    one;
+/// 3. else at the start of the first element of the nearest later slot that
+///    has one;
+/// 4. else just before `----`;
+/// 5. else at the start of the file.
+///
+/// `None` for a document without source spans (built from the store).
+fn absence_span(doc: &Document, grammar: &Grammar, index: usize) -> Option<schema::Span> {
+    if !carries_spans(doc) {
+        return None;
+    }
+    let elements = |name: &SlotName| {
+        doc.preamble
+            .iter()
+            .find(|s| s.name == *name)
+            .map(|s| &s.elements)
+    };
+    let at = grammar.preamble[..=index]
+        .iter()
+        .rev()
+        .find_map(|s| elements(&s.name)?.back().map(|e| e.span.end))
+        .or_else(|| {
+            grammar.preamble[index + 1..]
+                .iter()
+                .find_map(|s| elements(&s.name)?.front().map(|e| e.span.start))
+        })
+        .or_else(|| doc.separator_span.map(|s| s.start))
+        .unwrap_or(0);
+    Some(schema::Span { start: at, end: at })
+}
+
+/// Whether `doc` was read from a source: some element, or the separator,
+/// has a span. Documents built from the store carry zero spans only.
+fn carries_spans(doc: &Document) -> bool {
+    let spanned = |span: &schema::Span| span.end > span.start;
+    doc.preamble
+        .iter()
+        .flat_map(|s| s.elements.iter())
+        .chain(doc.unassigned.iter())
+        .chain(doc.body.iter())
+        .any(|e| spanned(&e.span))
+        || doc.separator_span.as_ref().is_some_and(spanned)
+}
+
+/// The span of the first of `counted` past `max`, the one a slot holds too
+/// many of; `None` if there is none or it has no source span.
+fn first_extra(counted: &[schema::Span], max: Option<usize>) -> Option<schema::Span> {
+    counted
+        .get(max?)
+        .copied()
+        .filter(|span| span.end > span.start)
 }
 
 /// The part of an element some diagnostics are about, narrower than the
@@ -920,42 +987,49 @@ impl ExpectedCount {
 // Occurs constraint checks
 // ---------------------------------------------------------------------------
 
-/// Check that `count` satisfies the Occurs constraint on the slot.
-/// Used for heading/link/image slots that have explicit Occurs constraints.
-fn check_occurs_count(count: usize, slot: &Slot, diagnostics: &mut Vec<ValidationDiagnostic>) {
+/// Check that the number of `counted` elements (their spans) satisfies the
+/// Occurs constraint on the slot. Used for heading/link/image/list slots that
+/// have explicit Occurs constraints. Too few points at `absent`, where the
+/// next one would go; too many at the first one over the limit.
+fn check_occurs_count(
+    counted: &[schema::Span],
+    slot: &Slot,
+    absent: Option<schema::Span>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
     for constraint in &slot.constraints {
         if let Constraint::Occurs(count_range) = constraint {
-            check_count_against_range(count, count_range, slot, diagnostics);
+            check_count_against_range(counted, count_range, slot, absent, diagnostics);
         }
     }
 }
 
 fn check_count_against_range(
-    count: usize,
+    counted: &[schema::Span],
     count_range: &CountRange,
     slot: &Slot,
+    absent: Option<schema::Span>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    let ok = match count_range {
-        CountRange::Exactly(n) => count == *n,
-        CountRange::AtLeast(n) => count >= *n,
-        CountRange::AtMost(n) => count <= *n,
-        CountRange::Between { min, max } => count >= *min && count <= *max,
+    let count = counted.len();
+    let span = if count < count_range.min() {
+        absent
+    } else if count_range.max().is_some_and(|max| count > max) {
+        first_extra(counted, count_range.max())
+    } else {
+        return;
     };
-
-    if !ok {
-        let expected_desc = describe_count_range(count_range);
-        diagnostics.push(ValidationDiagnostic {
-            severity: Severity::Error,
-            message: format!(
-                "slot '{}': expected {expected_desc}, found {count}",
-                slot.name
-            ),
-            slot: Some(slot.name.clone()),
-            span: None,
-            location: None,
-        });
-    }
+    let expected_desc = describe_count_range(count_range);
+    diagnostics.push(ValidationDiagnostic {
+        severity: Severity::Error,
+        message: format!(
+            "slot '{}': expected {expected_desc}, found {count}",
+            slot.name
+        ),
+        slot: Some(slot.name.clone()),
+        span,
+        location: None,
+    });
 }
 
 fn describe_count_range(cr: &CountRange) -> String {
@@ -971,14 +1045,16 @@ fn describe_count_range(cr: &CountRange) -> String {
 // Element validators (operate on a slot's pre-assigned elements)
 // ---------------------------------------------------------------------------
 
-/// Validate headings in a slot's elements. Returns the count of valid headings.
+/// Validate headings in a slot's elements. Returns the spans of the valid
+/// headings (what the slot's count counts).
 fn validate_headings(
     elements: &im::Vector<Spanned<ContentElement>>,
     level_range: &HeadingLevelRange,
     slot: &Slot,
+    absent: Option<schema::Span>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) -> usize {
-    let mut count = 0usize;
+) -> Vec<schema::Span> {
+    let mut counted = Vec::new();
 
     for (index, spanned) in elements.iter().enumerate() {
         if let ContentElement::Heading {
@@ -989,7 +1065,7 @@ fn validate_headings(
         {
             if level.value() >= level_range.min.value() && level.value() <= level_range.max.value()
             {
-                count += 1;
+                counted.push(spanned.span);
                 // Constraints read the plain text; messages quote the
                 // heading's markdown.
                 let quoted = crate::inline::heading_source_text(content, marker.as_ref());
@@ -1013,7 +1089,7 @@ fn validate_headings(
     }
 
     // If 0 headings found but minimum > 0, report missing heading.
-    if count == 0 && expected_count_for_slot(slot).min() > 0 {
+    if counted.is_empty() && expected_count_for_slot(slot).min() > 0 {
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message: format!(
@@ -1023,12 +1099,12 @@ fn validate_headings(
                 level_range.max.value()
             ),
             slot: Some(slot.name.clone()),
-            span: None,
+            span: absent,
             location: None,
         });
     }
 
-    count
+    counted
 }
 
 /// The Error for a paragraph in a slot whose shape the slot does not take
@@ -1060,31 +1136,35 @@ fn slot_element(slot: &Slot, index: usize) -> Option<Location> {
     })
 }
 
-/// Validate paragraphs in a slot's elements. Returns count consumed.
+/// Validate paragraphs in a slot's elements. Returns the spans of the text
+/// paragraphs (what the slot's count counts).
 fn validate_paragraphs(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: &Slot,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) -> usize {
-    let mut count = 0usize;
+) -> Vec<schema::Span> {
+    let mut counted = Vec::new();
     for (index, spanned) in elements.iter().enumerate() {
         if spanned.node.is_text_paragraph() {
-            count += 1;
+            counted.push(spanned.span);
         } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
             // A lone link or image: text a paragraph slot does not take.
             wrong_shape(slot, "a paragraph", index, diagnostics);
         }
     }
-    count
+    counted
 }
 
-/// Check paragraph count bounds.
+/// Check paragraph count bounds. Too few points at `absent`, where the next
+/// one would go; too many at the first one over the limit.
 fn check_occurs_count_paragraphs(
-    count: usize,
+    counted: &[schema::Span],
     expected: &ExpectedCount,
     slot: &Slot,
+    absent: Option<schema::Span>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
+    let count = counted.len();
     let min = expected.min();
     let max = expected.max();
 
@@ -1096,7 +1176,7 @@ fn check_occurs_count_paragraphs(
                 slot.name
             ),
             slot: Some(slot.name.clone()),
-            span: None,
+            span: absent,
             location: None,
         });
     } else if let Some(limit) = max
@@ -1109,55 +1189,57 @@ fn check_occurs_count_paragraphs(
                 slot.name
             ),
             slot: Some(slot.name.clone()),
-            span: None,
+            span: first_extra(counted, max),
             location: None,
         });
     }
 }
 
-/// Validate links in a slot's elements. Returns count of links, link
+/// Validate links in a slot's elements. Returns the spans of the links, link
 /// expressions included (bound expressions can exceed the slot's maximum;
 /// ADR-058, decision 9).
 fn validate_links(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: &Slot,
+    absent: Option<schema::Span>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) -> usize {
-    let mut count = 0usize;
+) -> Vec<schema::Span> {
+    let mut counted = Vec::new();
     for (index, spanned) in elements.iter().enumerate() {
         if spanned.node.is_sole_link()
             || matches!(spanned.node, ContentElement::LinkExpression { .. })
         {
-            count += 1;
+            counted.push(spanned.span);
         } else if matches!(spanned.node, ContentElement::Paragraph { .. }) {
             wrong_shape(slot, "a link", index, diagnostics);
         }
     }
 
-    if count == 0 && expected_count_for_slot(slot).min() > 0 {
+    if counted.is_empty() && expected_count_for_slot(slot).min() > 0 {
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message: format!("slot '{}': missing required link", slot.name),
             slot: Some(slot.name.clone()),
-            span: None,
+            span: absent,
             location: None,
         });
     }
 
-    count
+    counted
 }
 
-/// Validate images in a slot's elements. Returns count of images.
+/// Validate images in a slot's elements. Returns the spans of the images.
 fn validate_images(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: &Slot,
+    absent: Option<schema::Span>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) -> usize {
-    let mut count = 0usize;
+) -> Vec<schema::Span> {
+    let mut counted = Vec::new();
 
     for (index, spanned) in elements.iter().enumerate() {
         if let Some(image) = spanned.node.sole_image() {
-            count += 1;
+            counted.push(spanned.span);
             let alt = image.alt.plain_text();
             check_alt_constraints(
                 (!alt.is_empty()).then_some(alt.as_str()),
@@ -1170,26 +1252,29 @@ fn validate_images(
         }
     }
 
-    if count == 0 && expected_count_for_slot(slot).min() > 0 {
+    if counted.is_empty() && expected_count_for_slot(slot).min() > 0 {
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message: format!("slot '{}': missing required image", slot.name),
             slot: Some(slot.name.clone()),
-            span: None,
+            span: absent,
             location: None,
         });
     }
 
-    count
+    counted
 }
 
-/// Validate a list slot. Returns the count of items in the first List element
-/// found (the `occurs` constraint bounds the item count, not element count).
+/// Validate a list slot. Returns the spans of the items of the first List
+/// element found (the `occurs` constraint bounds the item count, not element
+/// count). An item's span runs from its first block to its last; an empty
+/// item has none.
 fn validate_list(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: &Slot,
+    absent: Option<schema::Span>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
-) -> usize {
+) -> Vec<schema::Span> {
     // Find the first ContentElement::List in the assigned elements.
     let first_list = elements.iter().find_map(|s| {
         if let ContentElement::List { list } = &s.node {
@@ -1206,13 +1291,23 @@ fn validate_list(
                     severity: Severity::Error,
                     message: format!("slot '{}': missing required list", slot.name),
                     slot: Some(slot.name.clone()),
-                    span: None,
+                    span: absent,
                     location: None,
                 });
             }
-            0
+            Vec::new()
         }
-        Some(list) => list.items.len(),
+        Some(list) => list
+            .items
+            .iter()
+            .map(|item| match (item.elements.front(), item.elements.back()) {
+                (Some(first), Some(last)) => schema::Span {
+                    start: first.span.start,
+                    end: last.span.end,
+                },
+                _ => schema::Span { start: 0, end: 0 },
+            })
+            .collect(),
     }
 }
 
@@ -3061,16 +3156,22 @@ mod tests {
         }
     }
 
-    /// Guard: a diagnostic about a slot as a whole has no element to point at.
+    /// Guard: a diagnostic about a missing element has no element to point
+    /// at: it points between elements, where the element would go.
     #[test]
-    fn a_missing_slot_error_has_no_span() {
+    fn a_missing_slot_error_is_zero_width() {
         let d = diagnostics_for("# Title\n\n----\n\nBody.\n", &summary_grammar(true));
         let missing: Vec<&ValidationDiagnostic> = d
             .iter()
             .filter(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary"))
             .collect();
         assert!(!missing.is_empty(), "{d:#?}");
-        assert!(missing.iter().all(|d| d.span.is_none()), "{missing:#?}");
+        assert!(
+            missing
+                .iter()
+                .all(|d| d.span.is_some_and(|s| s.start == s.end)),
+            "{missing:#?}"
+        );
     }
 
     /// `elements` with every span, nested ones included, set to zero (as in a
@@ -3202,6 +3303,142 @@ mod tests {
             .collect();
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(spanned_text(&source, &d[0]), "# Title {#other}");
+    }
+
+    // ── Missing and extra elements point where they belong (FU-3) ────────
+
+    /// The diagnostics of `doc` whose message contains `part`.
+    fn messages_about(doc: &Document, g: &Grammar, part: &str) -> Vec<ValidationDiagnostic> {
+        validate(doc, g)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.message.contains(part))
+            .collect()
+    }
+
+    /// `src` read with `g`, with its first unassigned element moved to the end
+    /// of slot `slot` (a slot holding more than it takes).
+    fn with_unassigned_moved_into(src: &str, g: &Grammar, slot: &str) -> Document {
+        let mut doc = parse_and_assign(src, g).expect("parses");
+        let extra = doc.unassigned.pop_front().expect("an unassigned element");
+        doc.preamble
+            .iter_mut()
+            .find(|s| s.name.as_str() == slot)
+            .expect("the slot")
+            .elements
+            .push_back(extra);
+        doc
+    }
+
+    fn zero_width_at(at: usize) -> Option<schema::Span> {
+        Some(schema::Span { start: at, end: at })
+    }
+
+    #[test]
+    fn an_extra_element_is_pointed_at() {
+        let g = summary_grammar(true);
+        // Paragraphs: the third of a slot that takes at most two.
+        let src = "# Title\n\nOne.\n\nTwo.\n\nThree.\n\n----\n\nBody.\n";
+        let doc = with_unassigned_moved_into(src, &g, "summary");
+        let d = messages_about(&doc, &g, "expected at most 2 paragraph(s), found 3");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(spanned_text(src, &d[0]), "Three.");
+        assert_eq!(d[0].location, None, "a count stays about the slot");
+        // Headings: the second of a slot that takes exactly one.
+        let src = "# A\n\nOne.\n\n# B\n\n----\n\nBody.\n";
+        let doc = with_unassigned_moved_into(src, &g, "title");
+        let d = messages_about(&doc, &g, "expected exactly 1, found 2");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(spanned_text(src, &d[0]), "# B");
+    }
+
+    #[test]
+    fn a_missing_first_slot_points_at_the_start() {
+        let d = diagnostics_for("One.\n\n----\n\nBody.\n", &summary_grammar(true));
+        let missing: Vec<&ValidationDiagnostic> = d
+            .iter()
+            .filter(|d| d.message.starts_with("slot 'title': "))
+            .collect();
+        assert!(!missing.is_empty(), "{d:#?}");
+        assert!(
+            missing.iter().all(|d| d.span == zero_width_at(0)),
+            "{missing:#?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_later_slot_points_after_the_previous_one() {
+        let g = summary_grammar(true);
+        let src = "# Title\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(src, &g).expect("parses");
+        let after_title = slot_element_span(&doc, "title", 0).end;
+        let d = messages_about(&doc, &g, "slot 'summary': ");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].span, zero_width_at(after_title));
+    }
+
+    /// A missing slot belongs where it would appear in reading order: before
+    /// the later slots that are present.
+    #[test]
+    fn a_missing_slot_before_present_ones_points_at_the_first_of_them() {
+        // The comment is no element: the summary's paragraph starts after it.
+        let src = "<!-- note -->\n\nOne.\n\n----\n\nBody.\n";
+        let d = diagnostics_for(src, &summary_grammar(true));
+        let title: Vec<&ValidationDiagnostic> = d
+            .iter()
+            .filter(|d| d.message.starts_with("slot 'title': "))
+            .collect();
+        assert!(!title.is_empty(), "{d:#?}");
+        let at = src.find("One.").unwrap();
+        assert!(
+            title.iter().all(|d| d.span == zero_width_at(at)),
+            "{title:#?}"
+        );
+    }
+
+    #[test]
+    fn missing_slots_point_before_the_separator_when_no_slot_has_elements() {
+        // The image fills no slot: title and summary are both absent.
+        let src = "![a](b.png)\n\n----\n\nBody.\n";
+        let d = diagnostics_for(src, &summary_grammar(true));
+        let slots: Vec<&ValidationDiagnostic> = d.iter().filter(|d| d.slot.is_some()).collect();
+        assert!(slots.len() >= 2, "{d:#?}");
+        let at = src.find("----").unwrap();
+        assert!(
+            slots.iter().all(|d| d.span == zero_width_at(at)),
+            "{slots:#?}"
+        );
+    }
+
+    #[test]
+    fn too_few_elements_point_after_the_slots_last_one() {
+        let g = parse_schema(
+            "# Title {#title}\noccurs\n: exactly once\n\n\
+             Summary. {#summary}\noccurs\n: 2..3\n\n----\n\nBody.\nheadings\n: h3..h6\n",
+        )
+        .expect("schema parses");
+        let src = "# Title\n\nOne.\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(src, &g).expect("parses");
+        let after_one = slot_element_span(&doc, "summary", 0).end;
+        let d = messages_about(&doc, &g, "expected at least 2 paragraph(s), found 1");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].span, zero_width_at(after_one));
+    }
+
+    /// Guard: store-built documents have no positions, absent elements
+    /// included.
+    #[test]
+    fn a_missing_slot_in_a_store_built_document_has_no_span() {
+        let g = summary_grammar(true);
+        let mut doc = parse_and_assign("# Title\n\n----\n\nBody.\n", &g).expect("parses");
+        for slot in doc.preamble.iter_mut() {
+            without_spans(&mut slot.elements);
+        }
+        without_spans(&mut doc.body);
+        doc.separator_span = None;
+        let d = messages_about(&doc, &g, "slot 'summary': ");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].span, None);
     }
 
     /// A diagnostic in a slot is located in that slot.

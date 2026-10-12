@@ -680,9 +680,35 @@ fn element_at<'a>(
     Some(element)
 }
 
+/// FU-3: every diagnostic about a slot's count (no location) that has a span
+/// points where it belongs: zero-width at a slot boundary (the start of the
+/// file, the separator, or the start or end of a preamble element) for a
+/// missing element, or within a preamble element for one too many.
+fn count_diagnostic_points_into_the_preamble(
+    doc: &Document,
+    span: schema::Span,
+    message: &str,
+) -> Result<(), String> {
+    let mut elements = doc.preamble.iter().flat_map(|s| s.elements.iter());
+    let fits = if span.start == span.end {
+        span.start == 0
+            || doc.separator_span.is_some_and(|s| s.start == span.start)
+            || elements.any(|e| e.span.start == span.start || e.span.end == span.start)
+    } else {
+        elements.any(|e| e.span.start <= span.start && span.end <= e.span.end)
+    };
+    if fits {
+        Ok(())
+    } else {
+        Err(format!(
+            "span {span:?} is not at a slot boundary or element: {message}"
+        ))
+    }
+}
+
 /// FU-3: every diagnostic about an element (one with a location) has a span
-/// that lies within the element's span, inside the source, on character
-/// boundaries.
+/// that lies within the element's span; every span lies inside the source, on
+/// character boundaries.
 fn located_diagnostics_lie_in_their_elements(
     src: &str,
     doc: &Document,
@@ -690,6 +716,16 @@ fn located_diagnostics_lie_in_their_elements(
 ) -> Result<(), String> {
     for d in diagnostics {
         let Some(location) = &d.location else {
+            if let Some(span) = d.span {
+                if span.start > span.end
+                    || span.end > src.len()
+                    || !src.is_char_boundary(span.start)
+                    || !src.is_char_boundary(span.end)
+                {
+                    return Err(format!("span {span:?} outside the source: {}", d.message));
+                }
+                count_diagnostic_points_into_the_preamble(doc, span, &d.message)?;
+            }
             continue;
         };
         let element = element_at(doc, location)
