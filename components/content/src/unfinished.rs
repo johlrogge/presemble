@@ -57,6 +57,106 @@ pub fn unfinished_markup(inlines: &Inlines) -> Vec<Hit> {
     hits
 }
 
+/// The literal text a hit's `inline_path` leads to, if any.
+pub fn text_at<'a>(inlines: &'a Inlines, inline_path: &[usize]) -> Option<&'a str> {
+    let (first, rest) = inline_path.split_first()?;
+    match inlines.as_slice().get(*first)? {
+        Inline::Text(s) if rest.is_empty() => Some(s),
+        Inline::Emph(inner) | Inline::Strong(inner) => text_at(inner, rest),
+        Inline::Link { text, .. } => text_at(text, rest),
+        _ => None,
+    }
+}
+
+/// The byte range in `block_source` (the block's own source slice, quote
+/// markers and item indentation included as they are in the file) of the hit,
+/// when it can be found unambiguously: the hit's characters with up to 8
+/// characters of the Text on each side as context, found exactly once outside
+/// code spans; else the hit's characters alone, if they occur exactly once.
+/// `None` otherwise: the caller falls back to the block's span.
+pub fn locate_hit(block_source: &str, text: &str, hit: &Hit) -> Option<Range<usize>> {
+    // Char indices into `text` as byte offsets.
+    let bytes: Vec<usize> = text
+        .char_indices()
+        .map(|(b, _)| b)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let byte = |c: usize| bytes.get(c).copied();
+    let (start, end) = (byte(hit.chars.start)?, byte(hit.chars.end)?);
+    let before = byte(hit.chars.start.saturating_sub(8))?;
+    let after = byte((hit.chars.end + 8).min(bytes.len() - 1))?;
+    let needle = &text[start..end];
+    let with_context = &text[before..after];
+    let code = code_spans(block_source);
+
+    let unique = |pattern: &str| -> Option<usize> {
+        let mut found = occurrences(block_source, pattern).filter(|&at| {
+            !code
+                .iter()
+                .any(|c| at < c.end && at + pattern.len() > c.start)
+        });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    };
+    if let Some(at) = unique(with_context) {
+        let at = at + (start - before);
+        return Some(at..at + needle.len());
+    }
+    unique(needle).map(|at| at..at + needle.len())
+}
+
+/// Every byte offset where `pattern` starts in `haystack`, overlapping.
+fn occurrences<'a>(haystack: &'a str, pattern: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let mut from = 0;
+    std::iter::from_fn(move || {
+        if pattern.is_empty() {
+            return None;
+        }
+        let at = from + haystack.get(from..)?.find(pattern)?;
+        from = at + pattern.chars().next().map_or(1, char::len_utf8);
+        Some(at)
+    })
+}
+
+/// The byte ranges of the backtick code spans in `source`: a run of backticks
+/// up to the next run of the same length. A run with no closing run is
+/// literal and opens nothing.
+fn code_spans(source: &str) -> Vec<Range<usize>> {
+    let bytes = source.as_bytes();
+    let run_at = |i: usize| bytes[i..].iter().take_while(|&&b| b == b'`').count();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let open = run_at(i);
+        let mut j = i + open;
+        let mut close = None;
+        while j < bytes.len() {
+            if bytes[j] == b'`' {
+                let n = run_at(j);
+                if n == open {
+                    close = Some(j + n);
+                    break;
+                }
+                j += n;
+            } else {
+                j += 1;
+            }
+        }
+        match close {
+            Some(end) => {
+                spans.push(i..end);
+                i = end;
+            }
+            None => i += open,
+        }
+    }
+    spans
+}
+
 /// Visit every literal Text in `items` (descending into emphasis, strong and
 /// link text), `path` being the indices down to `items`.
 fn walk(items: &[Inline], path: &mut Vec<usize>, hits: &mut Vec<Hit>) {
@@ -284,6 +384,72 @@ mod tests {
         );
         assert_eq!(unfinished_markup(&inlines), vec![]);
         assert_eq!(unfinished_markup(&md("a `x](y **z` b")), vec![]);
+    }
+
+    // ── locate_hit ────────────────────────────────────────────────────────
+
+    /// The first hit in the paragraph `source` and the text it is in.
+    fn first_hit(source: &str) -> (Hit, String) {
+        let inlines = md(source);
+        let hit = unfinished_markup(&inlines)
+            .into_iter()
+            .next()
+            .expect("a hit");
+        let text = text_at(&inlines, &hit.inline_path)
+            .expect("its text")
+            .to_string();
+        (hit, text)
+    }
+
+    #[test]
+    fn locate_hit_finds_a_unique_occurrence() {
+        let source = "a **bold and more";
+        let (hit, text) = first_hit(source);
+        let range = locate_hit(source, &text, &hit).expect("found");
+        assert_eq!(&source[range], "**");
+    }
+
+    #[test]
+    fn locate_hit_uses_context_to_choose_between_occurrences() {
+        // Two literal `](` occurrences: the context picks the hit's.
+        let source = "see [a](b and also [c](d";
+        let inlines = md(source);
+        let hits = unfinished_markup(&inlines);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        let text = text_at(&inlines, &hits[1].inline_path).unwrap();
+        let range = locate_hit(source, text, &hits[1]).expect("found by context");
+        assert_eq!(range, 21..23);
+        assert_eq!(&source[range], "](");
+    }
+
+    #[test]
+    fn locate_hit_skips_code_spans() {
+        // The code span holds the very same characters as the hit and its
+        // context (` **x`): only the literal occurrence outside it counts.
+        let source = "` **x` **x";
+        let (hit, text) = first_hit(source);
+        assert_eq!(text, " **x");
+        let range = locate_hit(source, &text, &hit).expect("found");
+        assert_eq!(range, 7..9);
+    }
+
+    #[test]
+    fn locate_hit_converts_char_indices_to_bytes() {
+        let source = "å 😀 **bold";
+        let (hit, text) = first_hit(source);
+        assert_eq!(hit.chars, 4..6, "char indices");
+        let range = locate_hit(source, &text, &hit).expect("found");
+        assert_eq!(&source[range.clone()], "**");
+        assert_eq!(range.start, "å 😀 ".len());
+    }
+
+    #[test]
+    fn locate_hit_is_none_for_an_escaped_source() {
+        // `[a]\(b` reads as the text `[a](b`: the source has no `](`.
+        let source = "[a]\\(b";
+        let (hit, text) = first_hit(source);
+        assert_eq!(hit.kind, Unfinished::LinkTarget);
+        assert_eq!(locate_hit(source, &text, &hit), None);
     }
 
     #[test]

@@ -70,11 +70,25 @@ pub enum Severity {
     Warning,
 }
 
+/// [`validate`], for a document read from `source`: diagnostics that point
+/// inside a block (markup that looks unfinished) get the span of exactly
+/// what they are about, when it can be found in the source.
+pub fn validate_source(doc: &Document, grammar: &Grammar, source: &str) -> ValidationResult {
+    validate_with(doc, grammar, Some(source))
+}
+
 /// Validate a content document against a schema grammar.
 ///
 /// Checks that the document's structure matches the grammar's preamble slots
-/// and body rules, returning all diagnostics found.
+/// and body rules, returning all diagnostics found. Diagnostics carry the
+/// span of the block they are about; [`validate_source`] narrows the ones
+/// that point inside a block.
 pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
+    validate_with(doc, grammar, None)
+}
+
+/// The validator: `source`, when given, is the text `doc` was read from.
+fn validate_with(doc: &Document, grammar: &Grammar, source: Option<&str>) -> ValidationResult {
     let mut diagnostics: Vec<ValidationDiagnostic> = Vec::new();
 
     // ── Preamble validation ────────────────────────────────────────────────
@@ -156,6 +170,23 @@ pub fn validate(doc: &Document, grammar: &Grammar) -> ValidationResult {
     }
     validate_inline_html(&doc.unassigned, &Container::Unassigned, &mut diagnostics);
     validate_inline_html(&doc.body, &Container::Body, &mut diagnostics);
+
+    // ── Markup that looks unfinished, in every container (UM-1.1) ──────────
+    for slot in &doc.preamble {
+        validate_unfinished_markup(
+            &slot.elements,
+            &Container::Slot(slot.name.clone()),
+            source,
+            &mut diagnostics,
+        );
+    }
+    validate_unfinished_markup(
+        &doc.unassigned,
+        &Container::Unassigned,
+        source,
+        &mut diagnostics,
+    );
+    validate_unfinished_markup(&doc.body, &Container::Body, source, &mut diagnostics);
 
     // ── Body validation ────────────────────────────────────────────────────
     match &grammar.body {
@@ -450,6 +481,117 @@ fn validate_inline_html(
             location: Some(location),
         });
     }
+}
+
+/// One error per hit of markup that looks unfinished (UM-1.1), in every block
+/// that holds inline content: headings, paragraphs and table cells, at any
+/// depth in quotes and list items, link text included.
+///
+/// With `source` (the text the document was read from), each diagnostic spans
+/// exactly the flagged characters when [`crate::unfinished::locate_hit`] finds
+/// them in the block's source; otherwise, and without `source`, the block.
+fn validate_unfinished_markup(
+    elements: &im::Vector<Spanned<ContentElement>>,
+    container: &Container,
+    source: Option<&str>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    use crate::unfinished::{Unfinished, locate_hit, text_at, unfinished_markup};
+    let slot = slot_of(container);
+    for (location, spanned) in walk(container, elements) {
+        let (kind, runs): (&str, Vec<&crate::inline::Inlines>) = match &spanned.node {
+            ContentElement::Heading { content, .. } => ("heading", vec![content]),
+            ContentElement::Paragraph { content, .. } => ("paragraph", vec![content]),
+            ContentElement::Table { columns, rows } => (
+                "table cell",
+                columns
+                    .iter()
+                    .map(|c| &c.header)
+                    .chain(rows.iter().flatten())
+                    .collect(),
+            ),
+            _ => continue,
+        };
+        let block_span = (spanned.span.end > spanned.span.start).then_some(spanned.span);
+        // The block's own source, when there is one to search.
+        let block_source = source
+            .zip(block_span)
+            .and_then(|(src, span)| src.get(span.start..span.end).map(|s| (s, span.start)));
+        for inlines in runs {
+            for hit in unfinished_markup(inlines) {
+                let text = text_at(inlines, &hit.inline_path).unwrap_or_default();
+                let chars: Vec<char> = text.chars().collect();
+                // A complete `](->> …)` or `]((->> …))` is a link expression in
+                // running text: the link-expression pass reports it (it must
+                // stand alone). Anything else after `](` is an unclosed link.
+                if hit.kind == Unfinished::LinkTarget
+                    && is_complete_link_expression(&chars[hit.chars.end..])
+                {
+                    continue;
+                }
+                let from = hit.chars.start.saturating_sub(10);
+                let to = (hit.chars.end + 10).min(chars.len());
+                let excerpt: String = chars[from..to].iter().collect();
+                let name = match hit.kind {
+                    Unfinished::CodeSpan => "code span",
+                    Unfinished::LinkTarget => "link",
+                    Unfinished::Image => "image",
+                    Unfinished::Strong => "bold",
+                };
+                // Quoted as the author wrote it: the Text, not the element's
+                // canonical (escaped) markdown.
+                let message = format!(
+                    "{kind}: `{excerpt}` looks like unfinished formatting (an unclosed {name}). \
+                     Finish it, or put the characters in a code span (`` `…` ``) to show them as \
+                     written."
+                );
+                let message = match slot {
+                    Some(name) => format!("slot '{name}': {message}"),
+                    None => message,
+                };
+                let span = block_source
+                    .and_then(|(block, start)| {
+                        locate_hit(block, text, &hit).map(|r| schema::Span {
+                            start: start + r.start,
+                            end: start + r.end,
+                        })
+                    })
+                    .or(block_span);
+                diagnostics.push(ValidationDiagnostic {
+                    severity: Severity::Error,
+                    message,
+                    slot: slot.cloned(),
+                    span,
+                    location: Some(location.clone()),
+                });
+            }
+        }
+    }
+}
+
+/// Whether `after` (the characters right after a `](`) is a link-expression
+/// destination the link-expression pass reports in running text (`->>` or
+/// `(->>`), closed by its `)` within the same text.
+fn is_complete_link_expression(after: &[char]) -> bool {
+    let starts = |prefix: &str| after.iter().copied().take(prefix.len()).eq(prefix.chars());
+    if !(starts("->>") || starts("(->>")) {
+        return false;
+    }
+    // The `(` of `](` is open; the destination is complete when it closes.
+    let mut depth = 1usize;
+    for c in after {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The first inline HTML node (not a comment) in `items`, at any depth.
@@ -1976,6 +2118,211 @@ mod tests {
             crate::parser::byte_to_position(src, span.start).0,
             2,
             "line (0-based)"
+        );
+    }
+
+    // ── Markup that looks unfinished (UM-1.1) ────────────────────────────
+
+    /// The unfinished-markup diagnostics of `src` (summary grammar with a body).
+    fn unfinished(src: &str) -> Vec<ValidationDiagnostic> {
+        diagnostics_for(src, &summary_grammar(true))
+            .into_iter()
+            .filter(|d| d.message.contains("looks like unfinished formatting"))
+            .collect()
+    }
+
+    fn in_body(body: &str) -> String {
+        format!("# Title\n\nOne.\n\n----\n\n{body}\n")
+    }
+
+    #[test]
+    fn unfinished_markup_is_an_error_in_the_body() {
+        let d = unfinished(&in_body("a **bold"));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert_eq!(
+            d[0].message,
+            "paragraph: `a **bold` looks like unfinished formatting (an unclosed \
+             bold). Finish it, or put the characters in a code span (`` `…` ``) to show them as \
+             written."
+        );
+        assert_eq!(d[0].slot, None);
+    }
+
+    #[test]
+    fn each_kind_has_its_wording() {
+        for (body, name) in [
+            ("a `foo", "code span"),
+            ("[t](http://x", "link"),
+            ("see ![d", "image"),
+            ("**b", "bold"),
+        ] {
+            let d = unfinished(&in_body(body));
+            assert_eq!(d.len(), 1, "{body}: {d:#?}");
+            assert!(
+                d[0].message.contains(&format!("(an unclosed {name})")),
+                "{body}: {}",
+                d[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn two_hits_in_one_paragraph_are_two_errors() {
+        let d = unfinished(&in_body("**a and `b"));
+        assert_eq!(d.len(), 2, "{d:#?}");
+    }
+
+    #[test]
+    fn unfinished_markup_in_a_slot_names_the_slot_and_has_a_location() {
+        let d = unfinished("# Title\n\nOne **two.\n\n----\n\nBody.\n");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].slot.as_ref().map(|s| s.as_str()), Some("summary"));
+        assert!(
+            d[0].message.starts_with("slot 'summary': "),
+            "{}",
+            d[0].message
+        );
+        let location = d[0].location.as_ref().expect("a location");
+        assert_eq!(
+            location.container,
+            Container::Slot(SlotName::new("summary"))
+        );
+        assert_eq!((location.index, location.path.clone()), (0, vec![]));
+    }
+
+    #[test]
+    fn unfinished_markup_in_a_quote_or_list_item_is_located_there() {
+        let d = unfinished(&in_body("> fine\n>\n> **x"));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(
+            d[0].location.as_ref().map(|l| l.path.clone()),
+            Some(vec![NestedStep::Block(1)])
+        );
+        let d = unfinished(&in_body("- fine\n- **x"));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(
+            d[0].location.as_ref().map(|l| l.path.clone()),
+            Some(vec![NestedStep::Item(1), NestedStep::Block(0)])
+        );
+    }
+
+    #[test]
+    fn unfinished_markup_in_a_table_cell_and_in_link_text_is_reported() {
+        let d = unfinished(&in_body("| a |\n|---|\n| **x |"));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(d[0].message.starts_with("table "), "{}", d[0].message);
+        let d = unfinished(&in_body("see [a **b](/x) here"));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(
+            d[0].message.contains("(an unclosed bold)"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn the_span_covers_only_the_flagged_characters() {
+        let g = summary_grammar(true);
+        let src = in_body("a **bold and more");
+        let doc = parse_and_assign(&src, &g).expect("parses");
+        let d: Vec<_> = validate_source(&doc, &g, &src)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.message.contains("looks like unfinished formatting"))
+            .collect();
+        assert_eq!(d.len(), 1, "{d:#?}");
+        let span = d[0].span.expect("a span");
+        assert_eq!(&src[span.start..span.end], "**");
+        // `validate` keeps the block's span.
+        let block = unfinished(&src)[0].span.expect("a span");
+        assert_eq!(src[block.start..block.end].trim_end(), "a **bold and more");
+    }
+
+    /// A complete link expression in running text is the link-expression
+    /// pass's to report (it must stand alone), not unfinished markup too.
+    #[test]
+    fn a_complete_link_expression_in_running_text_is_reported_once() {
+        for body in ["see [x](->> :post) here", "see [x]((->> :post)) here"] {
+            let all = diagnostics_for(&in_body(body), &summary_grammar(true));
+            assert_eq!(all.len(), 1, "{body}: {all:#?}");
+            assert_eq!(all[0].severity, Severity::Warning, "{body}: {all:#?}");
+            assert!(
+                all[0].message.contains("must stand alone"),
+                "{body}: {all:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unclosed_link_expression_lookalike_is_an_error() {
+        let d = unfinished(&in_body("see [x](->> :post here"));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(
+            d[0].message.contains("(an unclosed link)"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    #[test]
+    fn path_and_single_arrow_lookalikes_are_unfinished_links() {
+        for body in ["see [x](:path here", "see [x](-> :post) here"] {
+            let d = unfinished(&in_body(body));
+            assert_eq!(d.len(), 1, "{body}: {d:#?}");
+            assert!(
+                d[0].message.contains("(an unclosed link)"),
+                "{body}: {}",
+                d[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn the_message_quotes_the_text_as_written() {
+        let d = unfinished(&in_body("a **bold"));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(!d[0].message.contains('\\'), "{}", d[0].message);
+        assert!(
+            d[0].message.starts_with("paragraph: `a **bold`"),
+            "{}",
+            d[0].message
+        );
+        let d = unfinished(&in_body("| a |\n|---|\n| **x |"));
+        assert!(
+            d[0].message.starts_with("table cell: `**x`"),
+            "{}",
+            d[0].message
+        );
+    }
+
+    /// GUARD: the code-span spelling of each kind validates clean, also after
+    /// a save and a re-read.
+    #[test]
+    fn the_way_out_clears_the_error() {
+        let g = summary_grammar(true);
+        for body in ["a `` `foo `` b", "`[t](http://x`", "see `![d`", "`**b`"] {
+            let src = in_body(body);
+            let doc = parse_and_assign(&src, &g).expect("parses");
+            assert!(unfinished(&src).is_empty(), "{body}");
+            let saved = crate::serializer::serialize_document(&doc);
+            assert!(
+                unfinished(&saved).is_empty(),
+                "{body} after a save: {saved}"
+            );
+        }
+    }
+
+    /// GUARD: a document with unfinished markup is still saved and re-read.
+    #[test]
+    fn unfinished_markup_is_saveable() {
+        let g = summary_grammar(true);
+        let doc = parse_and_assign(&in_body("a **bold"), &g).expect("parses");
+        let saved = crate::serializer::serialize_document(&doc);
+        let again = parse_and_assign(&saved, &g).expect("re-reads");
+        assert_eq!(
+            validate(&again, &g).diagnostics.len(),
+            validate(&doc, &g).diagnostics.len()
         );
     }
 
