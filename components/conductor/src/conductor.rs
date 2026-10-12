@@ -8475,6 +8475,56 @@ mod suggestion_accept_tests {
         );
     }
 
+    /// The smoketest's diagnostics probe, in the conductor: a file created from
+    /// outside, then rewritten from outside through a `.tmp` and a rename right
+    /// after; the editorial page shows the rewritten text and its diagnostics.
+    #[test]
+    fn an_outside_rewrite_right_after_creation_renders_the_new_text() {
+        const PROBE: &str = "content/post/probe.md";
+        let tmp = build_site();
+        // The body is rendered, so a diagnostic on it is placed on its block.
+        std::fs::write(
+            tmp.path().join("templates/post/item.html"),
+            r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert><div><presemble:insert data="(ref input.body)"></presemble:insert></div></body></html>"#,
+        )
+        .unwrap();
+        let conductor = make_conductor(&tmp);
+        let probe = || vec![editorial_types::SitePath::parse(PROBE).expect("valid")];
+
+        std::fs::write(
+            tmp.path().join(PROBE),
+            "# Probe Post\n\n----\n\nProbe paragraph with <b>x</b> inline html.\n",
+        )
+        .unwrap();
+        conductor.handle_command(Command::FileChanged { paths: probe() });
+        let before = conductor
+            .render_page("/post/probe", &RenderMode::View)
+            .expect("rendered");
+        assert!(before.contains("\"errors\":1"), "{before}");
+
+        let tmp_file = tmp.path().join("content/post/probe.md.tmp");
+        std::fs::write(
+            &tmp_file,
+            "# Probe Post\n\n----\n\nProbe paragraph with x inline html.\n",
+        )
+        .unwrap();
+        std::fs::rename(&tmp_file, tmp.path().join(PROBE)).unwrap();
+        conductor.handle_command(Command::FileChanged { paths: probe() });
+
+        let html = conductor
+            .render_page("/post/probe", &RenderMode::View)
+            .expect("rendered");
+        assert!(
+            html.contains("Probe paragraph with x inline html."),
+            "the new text: {html}"
+        );
+        assert!(
+            !html.contains("data-presemble-diagnostics=\""),
+            "no element diagnostics: {html}"
+        );
+        assert!(html.contains("\"errors\":0"), "no errors: {html}");
+    }
+
     #[test]
     fn editor_save_over_a_dirty_document_is_a_conflict() {
         let tmp = build_site();
