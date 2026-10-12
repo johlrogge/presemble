@@ -14,8 +14,8 @@ pub use content_store::edit::Plan;
 pub use dirty::DirtyDocs;
 pub use editorial_types;
 pub use protocol::{
-    Command, ConductorEvent, DependentFile, Drift, DriftId, DriftKind, FileClassification,
-    HeldRegion, LinkOption, PathStep, RenderMode, Response,
+    Command, ConductorEvent, ConflictId, ConflictRegion, DependentFile, Drift, DriftId, DriftKind,
+    FileClassification, FileConflicts, HeldRegion, LinkOption, PathStep, RenderMode, Response,
 };
 
 #[cfg(test)]

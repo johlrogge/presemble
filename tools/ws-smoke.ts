@@ -616,13 +616,15 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
     }
 
     // 3b. A file that changes on disk while it has unsaved edits (step 2 and 3
-    //     left FILE dirty) is a conflict: `conflict` on the editorial socket
-    //     only (the leak check at the end covers the public one). Saving needs
-    //     consent that names the file; with it the edits are written.
+    //     left FILE dirty) in a block those edits changed too (the title) is a
+    //     conflict: `conflict` on the editorial socket only (the leak check at
+    //     the end covers the public one). A change to another block would be
+    //     merged (ADR-065 amendment F2). Saving needs consent that names the
+    //     file; with it the edits are written.
     if (siteDir !== null) {
       const path = `${siteDir}/${FILE}`;
       const onDisk = await Deno.readTextFile(path);
-      await Deno.writeTextFile(path, onDisk + "\nChanged from outside.\n");
+      await Deno.writeTextFile(path, onDisk.replace(/^# .*$/m, "# Changed From Outside"));
       await editorialInbox.expect(
         `ws: an external change to a dirty file broadcasts conflict for ${FILE}`,
         conflictFor(FILE),

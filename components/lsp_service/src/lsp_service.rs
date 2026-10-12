@@ -115,7 +115,7 @@ impl Publisher {
         let rel = rel.to_string_lossy().replace('\\', "/");
         let cond = self.conductor.lock().await;
         match cond.send(&conductor::Command::GetConflicts) {
-            Ok(conductor::Response::Conflicts(files)) => files.contains(&rel),
+            Ok(conductor::Response::Conflicts(files)) => files.iter().any(|c| c.file == rel),
             _ => false,
         }
     }

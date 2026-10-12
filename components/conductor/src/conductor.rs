@@ -820,9 +820,9 @@ impl Conductor {
 
     /// Before a save: if the file of the dirty document at `rel` is not as we
     /// last saw it, something wrote it since, even if the watcher has not
-    /// reported that yet. Records the conflict (ADR-065) and returns the event
-    /// to announce when it is new.
-    fn detect_unreported_change(&self, rel: &Path) -> Option<ConductorEvent> {
+    /// reported that yet. The change is taken as a disk change is
+    /// ([`Conductor::take_disk_change`]); returns its events.
+    fn detect_unreported_change(&self, rel: &Path) -> Vec<ConductorEvent> {
         let current = crate::dirty::DiskStamp::of(&self.site_dir.join(rel));
         let changed = self
             .disk_stamps
@@ -830,34 +830,77 @@ impl Conductor {
             .unwrap_or_else(|e| e.into_inner())
             .changed(rel, current);
         if !changed {
-            return None;
+            return Vec::new();
         }
         // A file that reads as what we hold is no conflict (the amendment to
         // ADR-065 §1): it is the version our copy is based on now (the check
         // records the stamp the text was read with).
         if self.disk_reads_as_n(rel) {
-            return None;
+            return Vec::new();
         }
-        self.record_disk_conflict(rel)
+        self.take_disk_change(rel).unwrap_or_default()
     }
 
-    /// If the document at site-relative `rel` has unsaved edits, record that
-    /// the file on disk changed under them (ADR-065). Returns the event to
-    /// announce when the conflict is new; `None` when the document is not
-    /// dirty or the conflict was already recorded.
-    fn record_disk_conflict(&self, rel: &Path) -> Option<ConductorEvent> {
-        let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
-        if !dirty.contains(rel) {
+    /// The file of the document at site-relative `rel` changed on disk under
+    /// its unsaved edits (ADR-065). The change is merged block by block into N
+    /// against the base of the edits (amendment F2): what changed only on disk
+    /// reaches N, and what changed differently on both sides conflicts on its
+    /// blocks. Without a base, with the file gone, or when the document's
+    /// structure changed, the whole file conflicts. Returns the events (pages
+    /// rebuilt, and the conflict when it is new); `None` when the document has
+    /// no unsaved edits.
+    fn take_disk_change(&self, rel: &Path) -> Option<Vec<ConductorEvent>> {
+        if !self
+            .dirty_docs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(rel)
+        {
             return None;
         }
+        Some(match self.merge_disk_change(rel) {
+            editor_sync::DiskMerge::WholeDocument => self
+                .record_disk_conflict(rel, Vec::new())
+                .into_iter()
+                .collect(),
+            editor_sync::DiskMerge::Merged {
+                mut events,
+                regions,
+            } => {
+                if regions.is_empty() {
+                    // Nothing conflicts (any more): the document is an
+                    // ordinary unsaved document, with the merged blocks in N.
+                    self.dirty_docs
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear_conflict(rel);
+                } else {
+                    events.extend(self.record_disk_conflict(rel, regions));
+                }
+                events
+            }
+        })
+    }
+
+    /// Record that the document at site-relative `rel` conflicts with its file
+    /// on `regions` (none: the whole file). Returns the event to announce when
+    /// the conflict is new.
+    fn record_disk_conflict(
+        &self,
+        rel: &Path,
+        regions: Vec<crate::protocol::ConflictRegion>,
+    ) -> Option<ConductorEvent> {
         // A file that is gone still conflicts; its mtime is simply now.
         let disk_mtime = std::fs::metadata(self.site_dir.join(rel))
             .and_then(|m| m.modified())
             .unwrap_or_else(|_| std::time::SystemTime::now());
-        dirty
-            .mark_conflict(rel.to_path_buf(), disk_mtime)
+        self.dirty_docs
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_conflict(rel.to_path_buf(), disk_mtime, regions.clone())
             .then(|| ConductorEvent::DiskConflict {
                 file: rel.to_string_lossy().to_string(),
+                regions,
             })
     }
 
@@ -1047,8 +1090,21 @@ impl Conductor {
         for stem in repo.schema_stems() {
             let stem_str = stem.as_str();
 
-            // Item content
-            for slug in repo.content_slugs(&stem) {
+            // Item content: the files there are, and the documents with
+            // unsaved edits whose file is gone (ADR-065): those stay, as a
+            // conflict, until they are saved (which writes the file again) or
+            // reloaded.
+            let mut slugs = repo.content_slugs(&stem);
+            for kept_path in keep.keys() {
+                if let Some(slug) = kept_path.file_stem().and_then(|s| s.to_str())
+                    && slug != "index"
+                    && !slugs.iter().any(|s| s == slug)
+                    && relative(repo.content_path(&stem, slug)) == *kept_path
+                {
+                    slugs.push(slug.to_string());
+                }
+            }
+            for slug in slugs {
                 let rel = relative(repo.content_path(&stem, &slug));
                 let kept = keep.get(&rel).cloned();
                 if kept.is_none() {
@@ -4061,9 +4117,9 @@ impl Conductor {
                 if let Some(events) = self.settle_disk_write(path.as_path()) {
                     return CommandResult::ok_with_events(events);
                 }
-                match self.record_disk_conflict(path.as_path()) {
-                    Some(event) => CommandResult::ok_with_events(vec![event]),
-                    None => CommandResult::ok(),
+                match self.take_disk_change(path.as_path()) {
+                    Some(events) if !events.is_empty() => CommandResult::ok_with_events(events),
+                    _ => CommandResult::ok(),
                 }
             }
             Command::FileChanged { paths } => {
@@ -4121,14 +4177,11 @@ impl Conductor {
                         // N already holds what the file does (or was written
                         // over it), so the disk version is not loaded.
                         conflict_events.extend(events);
-                    } else if let Some(event) = self.record_disk_conflict(&rel) {
-                        conflict_events.push(event);
-                    } else if !self
-                        .dirty_docs
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .contains(&rel)
-                    {
+                    } else if let Some(events) = self.take_disk_change(&rel) {
+                        // Unsaved edits: the change is merged into them, or
+                        // conflicts (ADR-065).
+                        conflict_events.extend(events);
+                    } else {
                         disk_wins.push(rel);
                     }
                 }
@@ -4338,14 +4391,15 @@ impl Conductor {
                 CommandResult::with_response(Response::DirtyBuffers(paths.into_iter().collect()))
             }
             Command::GetConflicts => {
-                let mut files: Vec<String> = self
-                    .dirty_docs
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
+                let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
+                let mut files: Vec<crate::protocol::FileConflicts> = dirty
                     .conflicts()
-                    .map(|p| p.to_string_lossy().to_string())
+                    .map(|p| crate::protocol::FileConflicts {
+                        file: p.to_string_lossy().to_string(),
+                        regions: dirty.conflict_regions(p).unwrap_or_default().to_vec(),
+                    })
                     .collect();
-                files.sort();
+                files.sort_by(|a, b| a.file.cmp(&b.file));
                 CommandResult::with_response(Response::Conflicts(files))
             }
             Command::SaveBuffer { path, consent } => {
@@ -4420,7 +4474,7 @@ impl Conductor {
                     .collect();
                 let detected: Vec<ConductorEvent> = dirty_paths
                     .iter()
-                    .filter_map(|rel| self.detect_unreported_change(rel))
+                    .flat_map(|rel| self.detect_unreported_change(rel))
                     .collect();
                 let uncovered: Vec<String> = {
                     let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
@@ -4456,7 +4510,7 @@ impl Conductor {
                         dirty
                             .write()
                             .unwrap_or_else(|e| e.into_inner())
-                            .restore(rel_path.clone(), *state);
+                            .restore(rel_path.clone(), state.clone());
                     };
                     let text = match self.doc_root_for_path(rel_path) {
                         Some(root) => {
@@ -8146,7 +8200,7 @@ mod suggestion_accept_tests {
 
     fn conflicts(conductor: &Conductor) -> Vec<String> {
         match conductor.handle_command(Command::GetConflicts).response {
-            Response::Conflicts(files) => files,
+            Response::Conflicts(files) => files.into_iter().map(|c| c.file).collect(),
             other => panic!("expected Conflicts, got {other:?}"),
         }
     }
@@ -8160,7 +8214,7 @@ mod suggestion_accept_tests {
     }
 
     #[test]
-    fn external_change_to_a_dirty_file_keeps_its_edits_and_reports_a_conflict() {
+    fn an_unchanged_conflict_is_not_announced_again() {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         edit_title(&conductor, FILE, "Edited A");
@@ -8180,12 +8234,13 @@ mod suggestion_accept_tests {
         let announced = result
             .events
             .iter()
-            .filter(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE))
+            .filter(|e| matches!(e, ConductorEvent::DiskConflict { file, .. } if file == FILE))
             .count();
         assert_eq!(announced, 1, "{:?}", result.events);
 
-        // A second event for the same conflict is not announced again.
-        std::fs::write(tmp.path().join(FILE), "# Shell Again\n\n----\n\nAgain.\n").unwrap();
+        // A second disk change that leaves the conflict as it was (the body
+        // changes, and is merged) is not announced again.
+        std::fs::write(tmp.path().join(FILE), "# Shell Title\n\n----\n\nAgain.\n").unwrap();
         let again = conductor.handle_command(Command::FileChanged {
             paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")],
         });
@@ -8215,7 +8270,7 @@ mod suggestion_accept_tests {
             result
                 .events
                 .iter()
-                .any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE)),
+                .any(|e| matches!(e, ConductorEvent::DiskConflict { file, .. } if file == FILE)),
             "{:?}",
             result.events
         );
@@ -8415,7 +8470,7 @@ mod suggestion_accept_tests {
             refused
                 .events
                 .iter()
-                .any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == FILE)),
+                .any(|e| matches!(e, ConductorEvent::DiskConflict { file, .. } if file == FILE)),
             "the conflict is announced: {:?}",
             refused.events
         );
@@ -8462,10 +8517,9 @@ mod suggestion_accept_tests {
             refused.response
         );
         assert!(
-            refused
-                .events
-                .iter()
-                .any(|e| matches!(e, ConductorEvent::DiskConflict { file } if file == OTHER_FILE)),
+            refused.events.iter().any(
+                |e| matches!(e, ConductorEvent::DiskConflict { file, .. } if file == OTHER_FILE)
+            ),
             "{:?}",
             refused.events
         );

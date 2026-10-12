@@ -268,7 +268,7 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
                 file: Some(file.to_string()),
             }
         }
-        ConductorEvent::DiskConflict { file } => EditorialMessage::Conflict { file },
+        ConductorEvent::DiskConflict { file, .. } => EditorialMessage::Conflict { file },
     })
 }
 
@@ -1252,10 +1252,14 @@ async fn conflicts_handler(
     use axum::http::{StatusCode, header};
 
     let (status, body) = match state.conductor.send(&conductor::Command::GetConflicts) {
-        Ok(conductor::Response::Conflicts(files)) => (
-            StatusCode::OK,
-            serde_json::to_vec(&files).unwrap_or_else(|_| b"[]".to_vec()),
-        ),
+        Ok(conductor::Response::Conflicts(conflicts)) => {
+            // The browser lists the files (per-block display comes later).
+            let files: Vec<String> = conflicts.into_iter().map(|c| c.file).collect();
+            (
+                StatusCode::OK,
+                serde_json::to_vec(&files).unwrap_or_else(|_| b"[]".to_vec()),
+            )
+        }
         Ok(conductor::Response::Error(e)) | Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::to_vec(&serde_json::json!({ "error": e })).unwrap_or_default(),
@@ -4387,6 +4391,7 @@ mod tests {
     fn editorial_message_for_disk_conflict() {
         let msg = editorial_message_for(conductor::ConductorEvent::DiskConflict {
             file: "content/post/a.md".to_string(),
+            regions: vec![],
         });
         match &msg {
             EditorialMessage::Conflict { file } => assert_eq!(file, "content/post/a.md"),
@@ -4429,13 +4434,15 @@ mod tests {
         use tower::ServiceExt;
 
         let (client, tmp) = start_test_conductor();
-        // An unsaved edit, then the editor writes the file: a conflict.
+        // An unsaved edit, then the editor writes another version of the same
+        // block: a conflict.
         let program = r#"(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title"))) "Edited")"#;
         client
             .send(&conductor::Command::ApplyNedProgram {
                 program: program.to_string(),
             })
             .unwrap();
+        std::fs::write(tmp.path().join("content/test/doc.md"), "# Written Title\n").unwrap();
         client
             .send(&conductor::Command::DocumentSaved {
                 path: editorial_types::SitePath::parse("content/test/doc.md").expect("valid"),
@@ -4474,7 +4481,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("content/test/doc.md")).unwrap(),
-            "# Test Title\n"
+            "# Written Title\n"
         );
 
         // Consent that names the file: written.

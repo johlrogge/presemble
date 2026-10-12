@@ -2,17 +2,24 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::protocol::ConflictRegion;
+
 /// Why a document has unsaved edits in the conductor's store.
 ///
 /// A conflicted document is dirty by construction: it is the same unsaved
 /// edits, plus the fact that the file on disk changed under them (ADR-065).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsaved {
     /// Edited here; the file on disk is as we last saw it.
     Edited,
     /// Edited here, and the file on disk changed since. `disk_mtime` is the
-    /// modification time of the disk version that conflicts.
-    ConflictsWithDisk { disk_mtime: SystemTime },
+    /// modification time of the disk version that conflicts; `regions` are the
+    /// blocks that changed differently on both sides (ADR-065 amendment F2).
+    /// No regions: the whole file conflicts.
+    ConflictsWithDisk {
+        disk_mtime: SystemTime,
+        regions: Vec<ConflictRegion>,
+    },
 }
 
 /// What a file on disk looked like when the conductor last read or wrote it:
@@ -105,10 +112,6 @@ impl DiskBases {
     }
 
     /// The base of the document at `rel`, if it has one.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the block-by-block disk merge (F2.2)")
-    )]
     pub(crate) fn get(&self, rel: &Path) -> Option<&str> {
         self.bases.get(rel).map(String::as_str)
     }
@@ -145,13 +148,55 @@ impl DirtyDocs {
     }
 
     /// Mark a document as in conflict with the file on disk (it is dirty by
-    /// construction). Returns whether the conflict is new: it was not already
-    /// recorded, so the caller should report it once.
-    pub fn mark_conflict(&mut self, path: impl Into<PathBuf>, disk_mtime: SystemTime) -> bool {
-        let previous = self
-            .docs
-            .insert(path.into(), Unsaved::ConflictsWithDisk { disk_mtime });
-        !matches!(previous, Some(Unsaved::ConflictsWithDisk { .. }))
+    /// construction), on `regions` (none: the whole file); the regions replace
+    /// any recorded before. Returns whether the caller should announce the
+    /// conflict: the document was not in conflict, or the set of its region
+    /// ids changed (a new region, one gone, or one whose disk text changed).
+    /// The identical set seen again is not announced.
+    pub fn mark_conflict(
+        &mut self,
+        path: impl Into<PathBuf>,
+        disk_mtime: SystemTime,
+        regions: Vec<ConflictRegion>,
+    ) -> bool {
+        let path = path.into();
+        let ids = |regions: &[ConflictRegion]| {
+            regions
+                .iter()
+                .map(|r| r.id)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let new = match self.docs.get(&path) {
+            Some(Unsaved::ConflictsWithDisk {
+                regions: previous, ..
+            }) => ids(previous) != ids(&regions),
+            _ => true,
+        };
+        self.docs.insert(
+            path,
+            Unsaved::ConflictsWithDisk {
+                disk_mtime,
+                regions,
+            },
+        );
+        new
+    }
+
+    /// The document's last conflict is resolved: it is an ordinary unsaved
+    /// document again.
+    pub fn clear_conflict(&mut self, path: &Path) {
+        if let Some(state) = self.docs.get_mut(path) {
+            *state = Unsaved::Edited;
+        }
+    }
+
+    /// The regions a document conflicts on (`Some(&[])`: the whole file);
+    /// `None` when it is not in conflict.
+    pub fn conflict_regions(&self, path: &Path) -> Option<&[ConflictRegion]> {
+        match self.docs.get(path) {
+            Some(Unsaved::ConflictsWithDisk { regions, .. }) => Some(regions),
+            _ => None,
+        }
     }
 
     /// Remove a document from the dirty set (after save or reload), clearing
@@ -260,7 +305,7 @@ mod tests {
     #[test]
     fn a_conflicted_document_is_dirty() {
         let mut dirty = DirtyDocs::new();
-        assert!(dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH));
+        assert!(dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH, vec![]));
         assert!(dirty.contains(Path::new("content/a.md")));
         assert!(dirty.is_conflicted(Path::new("content/a.md")));
         assert_eq!(
@@ -273,9 +318,9 @@ mod tests {
     #[test]
     fn a_conflict_is_reported_once() {
         let mut dirty = DirtyDocs::new();
-        assert!(dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH));
+        assert!(dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH, vec![]));
         assert!(
-            !dirty.mark_conflict("content/a.md", SystemTime::now()),
+            !dirty.mark_conflict("content/a.md", SystemTime::now(), vec![]),
             "already recorded"
         );
     }
@@ -285,7 +330,7 @@ mod tests {
         let mut dirty = DirtyDocs::new();
         dirty.mark("content/a.md");
         assert!(!dirty.is_conflicted(Path::new("content/a.md")));
-        dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH);
+        dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH, vec![]);
         dirty.mark("content/a.md");
         assert!(dirty.is_conflicted(Path::new("content/a.md")));
     }
@@ -303,7 +348,7 @@ mod tests {
     #[test]
     fn clear_clears_a_conflict() {
         let mut dirty = DirtyDocs::new();
-        dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH);
+        dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH, vec![]);
         dirty.clear(Path::new("content/a.md"));
         assert!(!dirty.contains(Path::new("content/a.md")));
         assert!(!dirty.is_conflicted(Path::new("content/a.md")));

@@ -107,6 +107,42 @@ pub struct Drift {
     pub current: String,
 }
 
+/// Names a block conflict (ADR-065 amendment F2), built like a [`DriftId`]:
+/// a hash of the path to the region, its text in the base and the ids of the
+/// N blocks aligned with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConflictId(pub u64);
+
+impl std::fmt::Display for ConflictId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+/// A region of a file that changed on disk differently from the unsaved
+/// edits of its document (ADR-065 amendment F2): N keeps its version, and
+/// the conflict is on these blocks alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictRegion {
+    pub id: ConflictId,
+    /// The containers down to the one the region is in; empty for a region of
+    /// a slot, `unassigned` or the body itself.
+    pub path: Vec<PathStep>,
+    /// Bytes in the file's text.
+    pub range: std::ops::Range<usize>,
+    /// The file's version of the region.
+    pub disk: String,
+}
+
+/// A document in conflict with its file (ADR-065): the file, site-relative,
+/// and the regions in conflict. No regions: the whole file conflicts (there is
+/// no base to merge against, the file is gone, or its structure changed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileConflicts {
+    pub file: String,
+    pub regions: Vec<ConflictRegion>,
+}
+
 /// A region of the editor's text that is not lowered into N yet, because it
 /// opens a construct that is not closed (LSP-2 §0.6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,8 +314,9 @@ pub enum Response {
     /// unsaved edits, and the consent does not name them. Nothing was written.
     /// Sorted site-relative paths.
     ConflictsNeedConfirmation(Vec<String>),
-    /// The documents in conflict with the file on disk (sorted, site-relative).
-    Conflicts(Vec<String>),
+    /// The documents in conflict with the file on disk (sorted by file), each
+    /// with its conflicting regions.
+    Conflicts(Vec<FileConflicts>),
     /// A NED program was refused: which step, which builtin, and why.
     PlanRefused(editorial_types::PlanFailure),
     /// Content file created successfully. Returns the URL path.
@@ -373,9 +410,13 @@ pub enum ConductorEvent {
         pages: Vec<String>,
     },
     /// A document with unsaved edits changed on disk: the edits are kept and
-    /// the document is in conflict (reported once, when first recorded).
-    /// `file` is site-relative.
-    DiskConflict { file: String },
+    /// the document is in conflict on `regions` (reported when a region is
+    /// first recorded). No regions: the whole file conflicts. `file` is
+    /// site-relative.
+    DiskConflict {
+        file: String,
+        regions: Vec<ConflictRegion>,
+    },
     /// Documents were written to disk by a save: what readers see (the
     /// published output) may have changed. `files` are site-relative paths.
     /// Not sent for a refused save or for an edit that was not saved.
