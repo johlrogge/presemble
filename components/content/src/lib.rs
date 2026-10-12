@@ -7,6 +7,7 @@ mod error;
 pub mod html;
 pub mod inline;
 mod link_expression;
+mod locate;
 mod parser;
 mod serializer;
 mod shape;

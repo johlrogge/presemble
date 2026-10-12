@@ -26,6 +26,7 @@
 use std::ops::Range;
 
 use crate::inline::{Inline, Inlines};
+use crate::locate::find_once;
 
 /// Which kind of markup looks unfinished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -87,74 +88,11 @@ pub fn locate_hit(block_source: &str, text: &str, hit: &Hit) -> Option<Range<usi
     let after = byte((hit.chars.end + 8).min(bytes.len() - 1))?;
     let needle = &text[start..end];
     let with_context = &text[before..after];
-    let code = code_spans(block_source);
-
-    let unique = |pattern: &str| -> Option<usize> {
-        let mut found = occurrences(block_source, pattern).filter(|&at| {
-            !code
-                .iter()
-                .any(|c| at < c.end && at + pattern.len() > c.start)
-        });
-        let first = found.next()?;
-        found.next().is_none().then_some(first)
-    };
-    if let Some(at) = unique(with_context) {
+    if let Some(at) = find_once(block_source, with_context) {
         let at = at + (start - before);
         return Some(at..at + needle.len());
     }
-    unique(needle).map(|at| at..at + needle.len())
-}
-
-/// Every byte offset where `pattern` starts in `haystack`, overlapping.
-fn occurrences<'a>(haystack: &'a str, pattern: &'a str) -> impl Iterator<Item = usize> + 'a {
-    let mut from = 0;
-    std::iter::from_fn(move || {
-        if pattern.is_empty() {
-            return None;
-        }
-        let at = from + haystack.get(from..)?.find(pattern)?;
-        from = at + pattern.chars().next().map_or(1, char::len_utf8);
-        Some(at)
-    })
-}
-
-/// The byte ranges of the backtick code spans in `source`: a run of backticks
-/// up to the next run of the same length. A run with no closing run is
-/// literal and opens nothing.
-fn code_spans(source: &str) -> Vec<Range<usize>> {
-    let bytes = source.as_bytes();
-    let run_at = |i: usize| bytes[i..].iter().take_while(|&&b| b == b'`').count();
-    let mut spans = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'`' {
-            i += 1;
-            continue;
-        }
-        let open = run_at(i);
-        let mut j = i + open;
-        let mut close = None;
-        while j < bytes.len() {
-            if bytes[j] == b'`' {
-                let n = run_at(j);
-                if n == open {
-                    close = Some(j + n);
-                    break;
-                }
-                j += n;
-            } else {
-                j += 1;
-            }
-        }
-        match close {
-            Some(end) => {
-                spans.push(i..end);
-                i = end;
-            }
-            None => i += open,
-        }
-    }
-    spans
+    find_once(block_source, needle).map(|at| at..at + needle.len())
 }
 
 /// Visit every literal Text in `items` (descending into emphasis, strong and

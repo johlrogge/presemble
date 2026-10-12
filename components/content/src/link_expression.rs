@@ -288,6 +288,21 @@ pub enum LinkExpressionDiagnostic {
     MarkerNotOnLinkExpression(String),
 }
 
+impl LinkExpressionDiagnostic {
+    /// The name in the slot marker `{#name}` the diagnostic is about, if it
+    /// is about one.
+    pub fn marker_name(&self) -> Option<&str> {
+        match self {
+            Self::InvalidSlotMarker(name)
+            | Self::MarkerOnOwnLine(name)
+            | Self::StrayMarker(name)
+            | Self::MarkedExpressionSpansLines(name)
+            | Self::MarkerNotOnLinkExpression(name) => Some(name),
+            Self::Malformed(_) | Self::MustStandAlone => None,
+        }
+    }
+}
+
 impl fmt::Display for LinkExpressionDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -680,37 +680,62 @@ fn element_at<'a>(
     Some(element)
 }
 
-/// FU-3: every diagnostic about an element (one with a location) carries the
-/// element's span, and that span lies in the source, on character boundaries.
+/// FU-3: every diagnostic about an element (one with a location) has a span
+/// that lies within the element's span, inside the source, on character
+/// boundaries.
+fn located_diagnostics_lie_in_their_elements(
+    src: &str,
+    doc: &Document,
+    diagnostics: Vec<content::ValidationDiagnostic>,
+) -> Result<(), String> {
+    for d in diagnostics {
+        let Some(location) = &d.location else {
+            continue;
+        };
+        let element = element_at(doc, location)
+            .ok_or_else(|| format!("{location:?} names no element: {}", d.message))?;
+        let Some(span) = d.span else {
+            return Err(format!("no span at {location:?}: {}", d.message));
+        };
+        if span.start >= span.end
+            || span.end > src.len()
+            || !src.is_char_boundary(span.start)
+            || !src.is_char_boundary(span.end)
+        {
+            return Err(format!("span {span:?} outside the source: {}", d.message));
+        }
+        if span.start < element.span.start || span.end > element.span.end {
+            return Err(format!(
+                "span {span:?} is not within the element's {:?} at {location:?}: {}",
+                element.span, d.message
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[test]
-fn every_located_diagnostic_has_its_elements_span() {
+fn every_located_diagnostic_lies_in_its_element() {
     check_all("located diagnostic spans", |src, grammar| {
         let doc = assign(src, grammar);
-        for d in content::validate(&doc, grammar).diagnostics {
-            let Some(location) = &d.location else {
-                continue;
-            };
-            let element = element_at(&doc, location)
-                .ok_or_else(|| format!("{location:?} names no element: {}", d.message))?;
-            let Some(span) = d.span else {
-                return Err(format!("no span at {location:?}: {}", d.message));
-            };
-            if span.start >= span.end
-                || span.end > src.len()
-                || !src.is_char_boundary(span.start)
-                || !src.is_char_boundary(span.end)
-            {
-                return Err(format!("span {span:?} outside the source: {}", d.message));
-            }
-            if span != element.span {
-                return Err(format!(
-                    "span {span:?} is not the element's {:?} at {location:?}: {}",
-                    element.span, d.message
-                ));
-            }
-        }
-        Ok(())
+        let diagnostics = content::validate(&doc, grammar).diagnostics;
+        located_diagnostics_lie_in_their_elements(src, &doc, diagnostics)
     });
+}
+
+/// As [`every_located_diagnostic_lies_in_its_element`], with the source:
+/// narrowed spans (unfinished markup, markers, link expressions in text) stay
+/// inside their element.
+#[test]
+fn every_located_diagnostic_lies_in_its_element_with_the_source() {
+    check_all(
+        "located diagnostic spans with the source",
+        |src, grammar| {
+            let doc = assign(src, grammar);
+            let diagnostics = content::validate_source(&doc, grammar, src).diagnostics;
+            located_diagnostics_lie_in_their_elements(src, &doc, diagnostics)
+        },
+    );
 }
 
 /// Every line of every generated document, and every pair of consecutive

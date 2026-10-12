@@ -155,7 +155,7 @@ fn validate_with(doc: &Document, grammar: &Grammar, source: Option<&str>) -> Val
     }
 
     // ── Unassigned section-0 elements (ADR-060 P1) ─────────────────────────
-    validate_unassigned(doc, grammar, &mut diagnostics);
+    validate_unassigned(doc, grammar, source, &mut diagnostics);
 
     // ── Raw HTML in the body (ADR-062) ─────────────────────────────────────
     validate_html(&doc.body, &mut diagnostics);
@@ -204,20 +204,32 @@ fn validate_with(doc: &Document, grammar: &Grammar, source: Option<&str>) -> Val
 
     // ── Link expressions (ADR-058) ─────────────────────────────────────────
     for slot in &doc.preamble {
-        validate_link_expressions(&slot.elements, Some(&slot.name), grammar, &mut diagnostics);
+        validate_link_expressions(
+            &slot.elements,
+            Some(&slot.name),
+            grammar,
+            source,
+            &mut diagnostics,
+        );
     }
-    validate_link_expressions(&doc.body, None, grammar, &mut diagnostics);
+    validate_link_expressions(&doc.body, None, grammar, source, &mut diagnostics);
 
     // ── Slot markers on headings ───────────────────────────────────────────
     for slot in &doc.preamble {
         validate_heading_markers(
             &slot.elements,
             &Container::Slot(slot.name.clone()),
+            source,
             &mut diagnostics,
         );
     }
-    validate_heading_markers(&doc.unassigned, &Container::Unassigned, &mut diagnostics);
-    validate_heading_markers(&doc.body, &Container::Body, &mut diagnostics);
+    validate_heading_markers(
+        &doc.unassigned,
+        &Container::Unassigned,
+        source,
+        &mut diagnostics,
+    );
+    validate_heading_markers(&doc.body, &Container::Body, source, &mut diagnostics);
 
     span_located(doc, &mut diagnostics);
     ValidationResult { diagnostics }
@@ -235,6 +247,48 @@ fn span_located(doc: &Document, diagnostics: &mut [ValidationDiagnostic]) {
             .map(|element| element.span)
             .filter(|span| span.end > span.start);
     }
+}
+
+/// The part of an element some diagnostics are about, narrower than the
+/// element itself.
+enum Part<'a> {
+    /// The slot marker `{#name}`.
+    Marker(&'a str),
+    /// A link expression written inside text.
+    LinkExpression,
+}
+
+impl<'a> Part<'a> {
+    /// The part a link-expression diagnostic is about, if it is about one.
+    fn of(d: &'a LinkExpressionDiagnostic) -> Option<Self> {
+        match d {
+            LinkExpressionDiagnostic::MustStandAlone => Some(Part::LinkExpression),
+            _ => d.marker_name().map(Part::Marker),
+        }
+    }
+}
+
+/// The span of `part` of `spanned`, when `source` (the text the document was
+/// read from) is given and the part's characters occur exactly once in the
+/// element's own source. `None` otherwise: the diagnostic then gets the
+/// element's span ([`span_located`]).
+fn part_span(
+    source: Option<&str>,
+    spanned: &Spanned<ContentElement>,
+    part: Option<Part>,
+) -> Option<schema::Span> {
+    use crate::locate::{locate_link_expression, locate_marker};
+    let part = part?;
+    let start = spanned.span.start;
+    let block = source?.get(start..spanned.span.end)?;
+    let range = match part {
+        Part::Marker(name) => locate_marker(block, name),
+        Part::LinkExpression => locate_link_expression(block),
+    }?;
+    Some(schema::Span {
+        start: start + range.start,
+        end: start + range.end,
+    })
 }
 
 /// The element `location` names in `doc`, if there is one.
@@ -329,9 +383,11 @@ fn slot_of(container: &Container) -> Option<&SlotName> {
 /// One error per heading that ends in a slot marker (the heading's `marker`;
 /// an escaped `\{#x}` or a code span is literal text, not a marker). The heading stays where
 /// slot assignment put it; elements of a slot are reported against the slot.
+/// With `source`, the diagnostic points at the marker.
 fn validate_heading_markers(
     elements: &im::Vector<Spanned<ContentElement>>,
     container: &Container,
+    source: Option<&str>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     let slot = slot_of(container);
@@ -355,7 +411,7 @@ fn validate_heading_markers(
             severity: Severity::Error,
             message,
             slot: slot.cloned(),
-            span: None,
+            span: part_span(source, spanned, Some(Part::Marker(name.as_str()))),
             location: Some(location),
         });
     }
@@ -366,15 +422,25 @@ fn validate_heading_markers(
 // ---------------------------------------------------------------------------
 
 /// One error per element of `doc.unassigned`: it is kept and saved but never
-/// rendered, so the page cannot be published until it is fixed.
+/// rendered, so the page cannot be published until it is fixed. With
+/// `source`, a diagnostic about a marker points at the marker.
 fn validate_unassigned(
     doc: &Document,
     grammar: &Grammar,
+    source: Option<&str>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
     for (index, spanned) in doc.unassigned.iter().enumerate() {
         let el = &spanned.node;
-        let message = match unassigned_reason(el, grammar) {
+        let reason = unassigned_reason(el, grammar);
+        let part = match &reason {
+            UnassignedReason::MarkerNamesNoSlot(name)
+            | UnassignedReason::MarkerNamesNonLinkSlot(name) => Some(Part::Marker(name.as_str())),
+            UnassignedReason::MisplacedMarker(d) => Part::of(d),
+            UnassignedReason::Html | UnassignedReason::NotAllowedHere => None,
+        };
+        let span = part_span(source, spanned, part);
+        let message = match reason {
             UnassignedReason::MarkerNamesNoSlot(name) => {
                 format!("`{{#{name}}}` does not name a slot")
             }
@@ -434,7 +500,7 @@ fn validate_unassigned(
             severity: Severity::Error,
             message,
             slot: None,
-            span: None,
+            span,
             location: Some(Location {
                 container: Container::Unassigned,
                 index,
@@ -712,26 +778,29 @@ fn kind_plural(el: &ContentElement) -> &'static str {
 /// Report link expressions that will not take effect: malformed ones, ones
 /// inside running text, ones in the body (`slot` is `None`), misused slot
 /// markers (errors, ADR-060 P1), and labels that look like a missing marker
-/// (ADR-058, decision 9).
+/// (ADR-058, decision 9). With `source`, a diagnostic about a marker points at
+/// the marker, and one about a link expression inside text at the expression.
 fn validate_link_expressions(
     elements: &im::Vector<Spanned<ContentElement>>,
     slot: Option<&SlotName>,
     grammar: &Grammar,
+    source: Option<&str>,
     diagnostics: &mut Vec<ValidationDiagnostic>,
 ) {
-    let mut push = |severity: Severity, message: String, location: Location| {
-        let message = match slot {
-            Some(name) => format!("slot '{name}': {message}"),
-            None => message,
+    let mut push =
+        |severity: Severity, message: String, span: Option<schema::Span>, location: Location| {
+            let message = match slot {
+                Some(name) => format!("slot '{name}': {message}"),
+                None => message,
+            };
+            diagnostics.push(ValidationDiagnostic {
+                severity,
+                message,
+                slot: slot.cloned(),
+                span,
+                location: Some(location),
+            });
         };
-        diagnostics.push(ValidationDiagnostic {
-            severity,
-            message,
-            slot: slot.cloned(),
-            span: None,
-            location: Some(location),
-        });
-    };
     // Only slots and the body are checked here.
     let container = slot.map_or(Container::Body, |name| Container::Slot(name.clone()));
     for (location, spanned) in walk(&container, elements) {
@@ -741,30 +810,32 @@ fn validate_link_expressions(
                 content,
                 marker: Some(marker),
             } => {
-                push(
-                    Severity::Error,
-                    diagnose_paragraph_marker(content, marker).to_string(),
-                    location,
-                );
+                let d = diagnose_paragraph_marker(content, marker);
+                let span = part_span(source, spanned, Part::of(&d));
+                push(Severity::Error, d.to_string(), span, location);
             }
             ContentElement::Paragraph {
                 content,
                 marker: None,
             } => {
-                match diagnose_paragraph(&crate::inline::paragraph_diagnosis_source(content, None))
-                {
-                    Some(d @ LinkExpressionDiagnostic::MustStandAlone) => {
-                        push(Severity::Warning, d.to_string(), location);
-                    }
-                    Some(d) => push(Severity::Error, d.to_string(), location),
-                    None => {}
-                }
+                let Some(d) =
+                    diagnose_paragraph(&crate::inline::paragraph_diagnosis_source(content, None))
+                else {
+                    continue;
+                };
+                let severity = match d {
+                    LinkExpressionDiagnostic::MustStandAlone => Severity::Warning,
+                    _ => Severity::Error,
+                };
+                let span = part_span(source, spanned, Part::of(&d));
+                push(severity, d.to_string(), span, location);
             }
             ContentElement::LinkExpression { .. } if slot.is_none() => {
                 push(
                     Severity::Warning,
                     "link expressions only take effect in preamble slots; move it above `----`"
                         .to_string(),
+                    None,
                     location,
                 );
             }
@@ -775,7 +846,7 @@ fn validate_link_expressions(
                     && let Some(message) =
                         slot_marker_message(text, marker.as_ref(), slot_name, grammar)
                 {
-                    push(Severity::Warning, message, location);
+                    push(Severity::Warning, message, None, location);
                 }
             }
             _ => {}
@@ -3036,6 +3107,101 @@ mod tests {
         assert!(d.len() >= 5, "{d:#?}");
         assert!(d.iter().all(|d| d.span.is_none()), "{d:#?}");
         assert!(d.iter().all(|d| d.location.is_some()), "{d:#?}");
+    }
+
+    // ── Markers and lookalikes point at their characters (FU-3) ──────────
+
+    /// The diagnostics of `src` validated against its source, whose message
+    /// contains `part`.
+    fn source_diagnostics_about(src: &str, part: &str) -> Vec<ValidationDiagnostic> {
+        let g = summary_grammar(true);
+        let doc = parse_and_assign(src, &g).expect("parses");
+        validate_source(&doc, &g, src)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.message.contains(part))
+            .collect()
+    }
+
+    #[test]
+    fn a_heading_marker_error_points_at_the_marker() {
+        for (src, marker) in [
+            ("# Title {#title}\n\nOne.\n\n----\n\nBody.\n", "{#title}"),
+            ("# Title\n\nOne.\n\n----\n\n### Sec {#x}\n", "{#x}"),
+            ("# Title\n\nOne.\n\n----\n\n> ### Sec {#x}\n", "{#x}"),
+        ] {
+            let d = source_diagnostics_about(src, "slot markers only apply");
+            assert_eq!(d.len(), 1, "{src:?}: {d:#?}");
+            assert_eq!(spanned_text(src, &d[0]), marker, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn a_paragraph_marker_error_points_at_the_marker() {
+        let src = in_body("Some text {#x}");
+        let d = source_diagnostics_about(&src, "slot markers only apply");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(spanned_text(&src, &d[0]), "{#x}");
+    }
+
+    #[test]
+    fn a_link_expression_in_running_text_points_at_the_expression() {
+        for (body, expression) in [
+            ("See [x](->> :post) here.", "[x](->> :post)"),
+            ("See [x]((->> :post)) here.", "[x]((->> :post))"),
+            ("> See [x](->> :post) here.", "[x](->> :post)"),
+        ] {
+            let src = in_body(body);
+            let d = source_diagnostics_about(&src, "must stand alone");
+            assert_eq!(d.len(), 1, "{body:?}: {d:#?}");
+            assert_eq!(spanned_text(&src, &d[0]), expression, "{body:?}");
+        }
+    }
+
+    /// The span of the last `marker` in `src`.
+    fn last(src: &str, marker: &str) -> Option<schema::Span> {
+        let start = src.rfind(marker).expect("the marker");
+        Some(schema::Span {
+            start,
+            end: start + marker.len(),
+        })
+    }
+
+    /// A marker is the trailing `{#name}` of its block: an escaped one before
+    /// it is text.
+    #[test]
+    fn an_escaped_marker_earlier_in_the_text_is_not_the_marker() {
+        let src = "# Title \\{#title} {#title}\n\nOne.\n\n----\n\nBody.\n";
+        let d = source_diagnostics_about(src, "slot markers only apply");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].span, last(src, "{#title}"));
+    }
+
+    /// A literal `{#name}` before the marker is text too.
+    #[test]
+    fn a_literal_marker_earlier_in_the_text_is_not_the_marker() {
+        let src = in_body("a {#x} b {#x}");
+        let d = source_diagnostics_about(&src, "slot markers only apply");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].span, last(&src, "{#x}"));
+    }
+
+    /// Guard: a marker from the model that is not in the source given points
+    /// at the whole element.
+    #[test]
+    fn a_marker_not_found_in_the_source_falls_back_to_the_elements_span() {
+        let g = summary_grammar(true);
+        let read = "# Title {#title}\n\nOne.\n\n----\n\nBody.\n";
+        let doc = parse_and_assign(read, &g).expect("parses");
+        // Same length, other marker: the element's span still fits.
+        let source = read.replace("{#title}", "{#other}");
+        let d: Vec<ValidationDiagnostic> = validate_source(&doc, &g, &source)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.message.contains("slot markers only apply"))
+            .collect();
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(spanned_text(&source, &d[0]), "# Title {#other}");
     }
 
     /// A diagnostic in a slot is located in that slot.
