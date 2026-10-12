@@ -650,6 +650,69 @@ fn unfinished_markup_never_panics_on_generated_documents() {
     });
 }
 
+/// The element `location` names in `doc`, read independently of the
+/// validator.
+fn element_at<'a>(
+    doc: &'a Document,
+    location: &content::Location,
+) -> Option<&'a schema::Spanned<ContentElement>> {
+    let elements = match &location.container {
+        Container::Slot(name) => &doc.preamble.iter().find(|s| s.name == *name)?.elements,
+        Container::Unassigned => &doc.unassigned,
+        Container::Body => &doc.body,
+    };
+    let mut element = elements.get(location.index)?;
+    let mut steps = location.path.iter();
+    while let Some(step) = steps.next() {
+        element = match (&element.node, step) {
+            (ContentElement::Blockquote { blocks }, content::NestedStep::Block(n)) => {
+                blocks.elements.get(*n)?
+            }
+            (ContentElement::List { list }, content::NestedStep::Item(k)) => {
+                let content::NestedStep::Block(n) = steps.next()? else {
+                    return None;
+                };
+                list.items.get(*k)?.elements.get(*n)?
+            }
+            _ => return None,
+        };
+    }
+    Some(element)
+}
+
+/// FU-3: every diagnostic about an element (one with a location) carries the
+/// element's span, and that span lies in the source, on character boundaries.
+#[test]
+fn every_located_diagnostic_has_its_elements_span() {
+    check_all("located diagnostic spans", |src, grammar| {
+        let doc = assign(src, grammar);
+        for d in content::validate(&doc, grammar).diagnostics {
+            let Some(location) = &d.location else {
+                continue;
+            };
+            let element = element_at(&doc, location)
+                .ok_or_else(|| format!("{location:?} names no element: {}", d.message))?;
+            let Some(span) = d.span else {
+                return Err(format!("no span at {location:?}: {}", d.message));
+            };
+            if span.start >= span.end
+                || span.end > src.len()
+                || !src.is_char_boundary(span.start)
+                || !src.is_char_boundary(span.end)
+            {
+                return Err(format!("span {span:?} outside the source: {}", d.message));
+            }
+            if span != element.span {
+                return Err(format!(
+                    "span {span:?} is not the element's {:?} at {location:?}: {}",
+                    element.span, d.message
+                ));
+            }
+        }
+        Ok(())
+    });
+}
+
 /// Every line of every generated document, and every pair of consecutive
 /// lines, wrapped as an ATX and as a setext heading, reads back as heading
 /// content. A heading that did not would hit the parser's `debug_assert` (and

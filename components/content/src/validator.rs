@@ -30,9 +30,9 @@ pub struct ValidationDiagnostic {
     pub severity: Severity,
     pub message: String,
     pub slot: Option<SlotName>,
-    /// The source span of the element the diagnostic is about, when the
-    /// diagnostic concerns one element rather than a slot (an unassigned
-    /// element, ADR-060 P1). `None` for slot-level diagnostics and for
+    /// The source span of the element the diagnostic is about (or of the
+    /// characters in it, for markup that looks unfinished): every diagnostic
+    /// with a `location` has one. `None` for slot-level diagnostics and for
     /// documents built from the store (they carry no source spans).
     pub span: Option<schema::Span>,
     /// Where in the document's structure the diagnostic belongs, when it
@@ -219,7 +219,48 @@ fn validate_with(doc: &Document, grammar: &Grammar, source: Option<&str>) -> Val
     validate_heading_markers(&doc.unassigned, &Container::Unassigned, &mut diagnostics);
     validate_heading_markers(&doc.body, &Container::Body, &mut diagnostics);
 
+    span_located(doc, &mut diagnostics);
     ValidationResult { diagnostics }
+}
+
+/// Every diagnostic about one element points at it: one with a location and
+/// no span of its own gets its element's span. Store-built documents carry
+/// zero spans, so their diagnostics keep `None`.
+fn span_located(doc: &Document, diagnostics: &mut [ValidationDiagnostic]) {
+    for diagnostic in diagnostics.iter_mut().filter(|d| d.span.is_none()) {
+        diagnostic.span = diagnostic
+            .location
+            .as_ref()
+            .and_then(|location| element_at(doc, location))
+            .map(|element| element.span)
+            .filter(|span| span.end > span.start);
+    }
+}
+
+/// The element `location` names in `doc`, if there is one.
+fn element_at<'a>(doc: &'a Document, location: &Location) -> Option<&'a Spanned<ContentElement>> {
+    let elements = match &location.container {
+        Container::Slot(name) => &doc.preamble.iter().find(|s| s.name == *name)?.elements,
+        Container::Unassigned => &doc.unassigned,
+        Container::Body => &doc.body,
+    };
+    let mut element = elements.get(location.index)?;
+    let mut steps = location.path.iter();
+    while let Some(step) = steps.next() {
+        element = match (&element.node, step) {
+            (ContentElement::Blockquote { blocks }, NestedStep::Block(n)) => {
+                blocks.elements.get(*n)?
+            }
+            (ContentElement::List { list }, NestedStep::Item(k)) => {
+                let NestedStep::Block(n) = steps.next()? else {
+                    return None;
+                };
+                list.items.get(*k)?.elements.get(*n)?
+            }
+            _ => return None,
+        };
+    }
+    Some(element)
 }
 
 /// `elements` and every block nested in a blockquote or a list item among
@@ -306,19 +347,15 @@ fn validate_heading_markers(
              by position, so remove it (write `\\{{#{name}}}` for a literal marker)",
             describe_element(&spanned.node)
         );
-        let (message, span) = match slot {
-            Some(slot_name) => (format!("slot '{slot_name}': {message}"), None),
-            // Store-built documents carry zero spans.
-            None => (
-                message,
-                (spanned.span.end > spanned.span.start).then_some(spanned.span),
-            ),
+        let message = match slot {
+            Some(slot_name) => format!("slot '{slot_name}': {message}"),
+            None => message,
         };
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message,
             slot: slot.cloned(),
-            span,
+            span: None,
             location: Some(location),
         });
     }
@@ -393,13 +430,11 @@ fn validate_unassigned(
             Some(name) => format!("after slot '{name}': {message}"),
             None => message,
         };
-        // Store-built documents carry zero spans: no position to point at.
-        let span = (spanned.span.end > spanned.span.start).then_some(spanned.span);
         diagnostics.push(ValidationDiagnostic {
             severity: Severity::Error,
             message,
             slot: None,
-            span,
+            span: None,
             location: Some(Location {
                 container: Container::Unassigned,
                 index,
@@ -426,8 +461,7 @@ fn validate_html(
                 severity: Severity::Error,
                 message: html_block_message(&spanned.node),
                 slot: None,
-                // Store-built documents carry zero spans.
-                span: (spanned.span.end > spanned.span.start).then_some(spanned.span),
+                span: None,
                 location: Some(location),
             });
         }
@@ -477,7 +511,7 @@ fn validate_inline_html(
             severity: Severity::Error,
             message,
             slot: slot.cloned(),
-            span: (spanned.span.end > spanned.span.start).then_some(spanned.span),
+            span: None,
             location: Some(location),
         });
     }
@@ -549,14 +583,14 @@ fn validate_unfinished_markup(
                     Some(name) => format!("slot '{name}': {message}"),
                     None => message,
                 };
-                let span = block_source
-                    .and_then(|(block, start)| {
-                        locate_hit(block, text, &hit).map(|r| schema::Span {
-                            start: start + r.start,
-                            end: start + r.end,
-                        })
+                // Not found: the block's span, as for every diagnostic about
+                // an element.
+                let span = block_source.and_then(|(block, start)| {
+                    locate_hit(block, text, &hit).map(|r| schema::Span {
+                        start: start + r.start,
+                        end: start + r.end,
                     })
-                    .or(block_span);
+                });
                 diagnostics.push(ValidationDiagnostic {
                     severity: Severity::Error,
                     message,
@@ -2798,6 +2832,210 @@ mod tests {
         assert_eq!(d.len(), 1, "{d:#?}");
         assert_eq!(d[0].slot.as_ref().map(SlotName::as_str), Some("summary"));
         assert_eq!(d[0].location, None);
+    }
+
+    // ── Every diagnostic about an element carries its span (FU-3) ────────
+
+    /// The span of element `index` of slot `slot` in `doc`.
+    fn slot_element_span(doc: &Document, slot: &str, index: usize) -> schema::Span {
+        let span = doc
+            .preamble
+            .iter()
+            .find(|s| s.name.as_str() == slot)
+            .expect("slot")
+            .elements[index]
+            .span;
+        assert!(span.end > span.start, "a parsed element has a span");
+        span
+    }
+
+    /// The source a diagnostic's span covers, without trailing whitespace.
+    fn spanned_text<'a>(src: &'a str, d: &ValidationDiagnostic) -> &'a str {
+        let span = d.span.unwrap_or_else(|| panic!("a span: {d:#?}"));
+        src[span.start..span.end].trim_end()
+    }
+
+    #[test]
+    fn a_heading_level_error_in_a_slot_has_its_span() {
+        let (mut doc, grammar) = hello_world_doc(str::to_string);
+        let h2 = crate::parser::parse_document("## Hello\n")
+            .expect("parses")
+            .elements[0]
+            .node
+            .clone();
+        let title = doc
+            .preamble
+            .iter_mut()
+            .find(|s| s.name.as_str() == "title")
+            .expect("title");
+        title.elements.front_mut().expect("a heading").node = h2;
+        let d = about(&doc, &grammar, "is not in allowed range");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].span, Some(slot_element_span(&doc, "title", 0)));
+    }
+
+    #[test]
+    fn a_wrong_shape_error_has_its_elements_span() {
+        // The summary slot holds three paragraphs; the second is a lone link.
+        let (mut doc, grammar) = hello_world_doc(str::to_string);
+        let summary = doc
+            .preamble
+            .iter_mut()
+            .find(|s| s.name.as_str() == "summary")
+            .expect("summary");
+        summary
+            .elements
+            .get_mut(1)
+            .expect("a second paragraph")
+            .node = ContentElement::paragraph_from_markdown("[Jo](/author/jo)");
+        let d = about(&doc, &grammar, "expected a paragraph");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        let span = slot_element_span(&doc, "summary", 1);
+        assert_ne!(span, slot_element_span(&doc, "summary", 0));
+        assert_eq!(d[0].span, Some(span));
+    }
+
+    #[test]
+    fn a_capitalization_error_has_its_headings_span() {
+        let edit = |s: &str| s.replace("# Hello, World", "# hello, World");
+        let src = edit(include_str!(
+            "../../../fixtures/blog-site/content/article/hello-world.md"
+        ));
+        let (doc, grammar) = hello_world_doc(edit);
+        let d = about(&doc, &grammar, "uppercase");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(
+            spanned_text(&src, &d[0]).starts_with("# hello, World"),
+            "{}",
+            spanned_text(&src, &d[0])
+        );
+    }
+
+    #[test]
+    fn an_alt_text_error_has_its_images_span() {
+        let edit = |s: &str| {
+            s.replace(
+                "![A landscape photo of a desk with a laptop and notebook open side by side]",
+                "![]",
+            )
+        };
+        let src = edit(include_str!(
+            "../../../fixtures/blog-site/content/article/hello-world.md"
+        ));
+        let (doc, grammar) = hello_world_doc(edit);
+        let d = about(&doc, &grammar, "non-empty alt text");
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(
+            spanned_text(&src, &d[0]).starts_with("![]("),
+            "{}",
+            spanned_text(&src, &d[0])
+        );
+    }
+
+    #[test]
+    fn inline_html_in_a_slot_has_its_span() {
+        let src = "# Title\n\nOne <b>x</b>.\n\n----\n\nBody.\n";
+        let d = diagnostics_for(src, &summary_grammar(true));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(spanned_text(src, &d[0]), "One <b>x</b>.");
+    }
+
+    #[test]
+    fn a_heading_marker_in_a_slot_has_its_span() {
+        let src = "# Title {#title}\n\nOne.\n\n----\n\nBody.\n";
+        let d = diagnostics_for(src, &summary_grammar(true));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(spanned_text(src, &d[0]), "# Title {#title}");
+    }
+
+    #[test]
+    fn a_link_expression_warning_in_the_body_has_its_span() {
+        let src = in_body("[x](->> :post)");
+        let d = diagnostics_for(&src, &summary_grammar(true));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(d[0].message.contains("only take effect"), "{d:#?}");
+        assert_eq!(spanned_text(&src, &d[0]), "[x](->> :post)");
+    }
+
+    #[test]
+    fn a_body_heading_level_error_has_its_span() {
+        let src = in_body("## Sec");
+        let d = diagnostics_for(&src, &summary_grammar(true));
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert!(d[0].message.starts_with("body heading level H2"), "{d:#?}");
+        assert_eq!(spanned_text(&src, &d[0]), "## Sec");
+    }
+
+    #[test]
+    fn a_nested_diagnostic_has_the_nested_elements_span() {
+        for (body, path) in [
+            (
+                "Intro.\n\n> fine\n>\n> see [x](->> :post) here",
+                vec![NestedStep::Block(1)],
+            ),
+            (
+                "Intro.\n\n- fine\n- see [x](->> :post) here",
+                vec![NestedStep::Item(1), NestedStep::Block(0)],
+            ),
+        ] {
+            let src = in_body(body);
+            let d = diagnostics_for(&src, &summary_grammar(true));
+            assert_eq!(d.len(), 1, "{body}: {d:#?}");
+            assert_eq!(d[0].location, located(Container::Body, 1, path), "{body}");
+            assert_eq!(
+                spanned_text(&src, &d[0]),
+                "see [x](->> :post) here",
+                "{body}"
+            );
+        }
+    }
+
+    /// Guard: a diagnostic about a slot as a whole has no element to point at.
+    #[test]
+    fn a_missing_slot_error_has_no_span() {
+        let d = diagnostics_for("# Title\n\n----\n\nBody.\n", &summary_grammar(true));
+        let missing: Vec<&ValidationDiagnostic> = d
+            .iter()
+            .filter(|d| d.slot.as_ref().is_some_and(|s| s.as_str() == "summary"))
+            .collect();
+        assert!(!missing.is_empty(), "{d:#?}");
+        assert!(missing.iter().all(|d| d.span.is_none()), "{missing:#?}");
+    }
+
+    /// `elements` with every span, nested ones included, set to zero (as in a
+    /// document built from the store).
+    fn without_spans(elements: &mut im::Vector<Spanned<ContentElement>>) {
+        for spanned in elements.iter_mut() {
+            spanned.span = schema::Span { start: 0, end: 0 };
+            match &mut spanned.node {
+                ContentElement::Blockquote { blocks } => without_spans(&mut blocks.elements),
+                ContentElement::List { list } => {
+                    for item in list.items.iter_mut() {
+                        without_spans(&mut item.elements);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Guard: store-built documents carry no spans, so neither do their
+    /// diagnostics; they keep their locations.
+    #[test]
+    fn store_built_documents_have_no_spans() {
+        let g = summary_grammar(true);
+        let src = "# Title {#title}\n\nOne <b>x</b>.\n\n----\n\n## Sec\n\n[x](->> :post)\n\n\
+                   > see [x](->> :post) here\n";
+        let mut doc = parse_and_assign(src, &g).expect("parses");
+        for slot in doc.preamble.iter_mut() {
+            without_spans(&mut slot.elements);
+        }
+        without_spans(&mut doc.unassigned);
+        without_spans(&mut doc.body);
+        let d = validate(&doc, &g).diagnostics;
+        assert!(d.len() >= 5, "{d:#?}");
+        assert!(d.iter().all(|d| d.span.is_none()), "{d:#?}");
+        assert!(d.iter().all(|d| d.location.is_some()), "{d:#?}");
     }
 
     /// A diagnostic in a slot is located in that slot.
