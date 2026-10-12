@@ -67,6 +67,13 @@ impl DiskStamps {
         }
     }
 
+    /// Whether `stamp` is exactly the one recorded for `rel`: the file is the
+    /// version our copy was read from or last written as. A path with no
+    /// recorded stamp, or a missing file, matches nothing.
+    pub fn matches(&self, rel: &Path, stamp: Option<DiskStamp>) -> bool {
+        stamp.is_some() && self.stamps.get(rel).copied() == stamp
+    }
+
     /// Whether the file at `rel` differs from what we last saw. A file that
     /// was there and is now gone counts as changed.
     pub fn changed(&self, rel: &Path, current: Option<DiskStamp>) -> bool {
@@ -74,6 +81,42 @@ impl DiskStamps {
             Some(recorded) => current != Some(*recorded),
             None => false,
         }
+    }
+}
+
+/// The base of each document's unsaved edits (ADR-065 amendment F2): the
+/// text of its file (relative to site root) as N last agreed with it, read
+/// when the document went from saved to unsaved. A later disk change is
+/// merged against it block by block. A dirty document without a base (its
+/// file had already changed under N) can only conflict as a whole.
+#[derive(Debug, Default)]
+pub struct DiskBases {
+    bases: HashMap<PathBuf, String>,
+}
+
+impl DiskBases {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Remember `text` as the base of the document at `rel`.
+    pub fn record(&mut self, rel: impl Into<PathBuf>, text: String) {
+        self.bases.insert(rel.into(), text);
+    }
+
+    /// The base of the document at `rel`, if it has one.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the block-by-block disk merge (F2.2)")
+    )]
+    pub(crate) fn get(&self, rel: &Path) -> Option<&str> {
+        self.bases.get(rel).map(String::as_str)
+    }
+
+    /// Forget the base of the document at `rel` (it was saved, reloaded or
+    /// settled: it has no unsaved edits any more).
+    pub fn clear(&mut self, rel: &Path) {
+        self.bases.remove(rel);
     }
 }
 
@@ -245,6 +288,16 @@ mod tests {
         dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH);
         dirty.mark("content/a.md");
         assert!(dirty.is_conflicted(Path::new("content/a.md")));
+    }
+
+    #[test]
+    fn a_base_is_recorded_and_cleared() {
+        let mut bases = DiskBases::new();
+        assert_eq!(bases.get(Path::new("content/a.md")), None);
+        bases.record("content/a.md", "# A\n".to_string());
+        assert_eq!(bases.get(Path::new("content/a.md")), Some("# A\n"));
+        bases.clear(Path::new("content/a.md"));
+        assert_eq!(bases.get(Path::new("content/a.md")), None);
     }
 
     #[test]

@@ -288,6 +288,9 @@ pub struct Conductor {
     // save-time check that catches a change the watcher has not reported yet
     // (ADR-065). Not the self-write tracker: that one forgets after a second.
     disk_stamps: RwLock<crate::dirty::DiskStamps>,
+    // The file each dirty document's unsaved edits are based on, for merging a
+    // later disk change block by block (ADR-065 amendment F2).
+    disk_bases: RwLock<crate::dirty::DiskBases>,
     /// Test hook: run once, between reading a file and taking its second
     /// stamp, to write the file there (the race the double stamp closes).
     #[cfg(test)]
@@ -510,6 +513,7 @@ impl Conductor {
             cached_node_stem_index: RwLock::new(HashMap::new()),
             dirty_docs: RwLock::new(crate::dirty::DirtyDocs::new()),
             disk_stamps: RwLock::new(crate::dirty::DiskStamps::new()),
+            disk_bases: RwLock::new(crate::dirty::DiskBases::new()),
             #[cfg(test)]
             after_read_hook: std::sync::Mutex::new(None),
             path_to_doc_root: RwLock::new(HashMap::new()),
@@ -733,6 +737,67 @@ impl Conductor {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .record(rel, stamp);
+    }
+
+    /// Mark the documents at site-relative `paths` unsaved. One that goes from
+    /// saved to unsaved gets the base of its edits (ADR-065 amendment F2).
+    fn mark_unsaved(&self, paths: &[PathBuf]) {
+        let newly_unsaved: Vec<&PathBuf> = {
+            let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
+            paths
+                .iter()
+                .filter(|path| {
+                    let new = !dirty.contains(path);
+                    dirty.mark((*path).clone());
+                    new
+                })
+                .collect()
+        };
+        for rel in newly_unsaved {
+            self.record_base(rel);
+        }
+    }
+
+    /// Remember the file at `rel` as the base of the document's unsaved edits,
+    /// if it is still the version N was read from or last written as: the
+    /// text and the stamp are read together, and the stamp must be the one
+    /// recorded. Otherwise the document has no base, and a later disk change
+    /// conflicts as a whole.
+    fn record_base(&self, rel: &Path) {
+        let Ok(site_path) = editorial_types::SitePath::parse(&rel.to_string_lossy()) else {
+            return;
+        };
+        let Ok(abs) = crate::site_resolve::resolve_in_site(&self.site_dir, &site_path) else {
+            return;
+        };
+        let Some((text, stamp)) = self.read_stable(&abs) else {
+            return;
+        };
+        let agrees = self
+            .disk_stamps
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .matches(rel, stamp);
+        if agrees {
+            self.disk_bases
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(rel, text);
+        }
+    }
+
+    /// The document at site-relative `rel` has no unsaved edits any more (it
+    /// was saved, reloaded or settled): clear its dirty mark, any conflict,
+    /// and the base of its edits.
+    fn clear_unsaved(&self, rel: &Path) {
+        self.dirty_docs
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear(rel);
+        self.disk_bases
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear(rel);
     }
 
     /// Write a document's text and remember the resulting file as the base of
@@ -3231,12 +3296,7 @@ impl Conductor {
         paths: &[PathBuf],
         blocks_changed: bool,
     ) -> (Vec<String>, Vec<String>) {
-        {
-            let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
-            for path in paths {
-                dirty.mark(path.clone());
-            }
-        }
+        self.mark_unsaved(paths);
         let mut dependents = Vec::new();
         let mut refresh_failed = Vec::new();
         if blocks_changed {
@@ -4112,12 +4172,12 @@ impl Conductor {
                     return CommandResult::error(format!("{path}: {e}"));
                 }
                 let rel = PathBuf::from(path.as_str());
-                let was_dirty = {
-                    let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
-                    let was = dirty.contains(&rel);
-                    dirty.clear(&rel);
-                    was
-                };
+                let was_dirty = self
+                    .dirty_docs
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&rel);
+                self.clear_unsaved(&rel);
                 self.populate_node_store(&[rel]);
                 // An editor of it is given what N has now.
                 self.editor_follows_reload(&path);
@@ -4339,10 +4399,7 @@ impl Conductor {
                     if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
-                    self.dirty_docs
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clear(&rel_path);
+                    self.clear_unsaved(&rel_path);
                     return CommandResult::ok_with_events(vec![saved_event([&rel_path])]);
                 }
                 CommandResult::error(format!("buffer not dirty: {path}"))
@@ -4433,6 +4490,12 @@ impl Conductor {
                         failures.push(format!("write error for {}: {e}", rel_path.display()));
                         continue;
                     }
+                    // Saved: its edits have no base any more. (One kept dirty
+                    // above keeps its base.)
+                    self.disk_bases
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clear(rel_path);
                     saved.push(rel_path.clone());
                 }
 
@@ -8502,6 +8565,109 @@ mod suggestion_accept_tests {
             "the disk version is loaded"
         );
         assert_eq!(disk(&tmp, FILE), SHELL_A, "reload writes nothing");
+    }
+
+    // ── The base of unsaved edits (ADR-065 amendment F2) ───────────────────
+
+    /// The base recorded for `file`'s unsaved edits, if any.
+    fn base(conductor: &Conductor, file: &str) -> Option<String> {
+        conductor
+            .disk_bases
+            .read()
+            .unwrap()
+            .get(Path::new(file))
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn the_first_edit_records_the_file_as_the_base() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        assert_eq!(base(&conductor, FILE), None, "a saved document has none");
+        edit_title(&conductor, FILE, "Edited A");
+        assert_eq!(base(&conductor, FILE).as_deref(), Some(CONTENT));
+    }
+
+    #[test]
+    fn later_edits_keep_the_first_base() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        edit_title(&conductor, FILE, "Edited A");
+        // The file changes under N (not reported yet), then N is edited again:
+        // the base is still the file the first edit was made on.
+        std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
+        edit_title(&conductor, FILE, "Edited again");
+        assert_eq!(base(&conductor, FILE).as_deref(), Some(CONTENT));
+    }
+
+    #[test]
+    fn no_base_when_the_file_already_changed_under_n() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        // The file is not the version N was read from any more.
+        std::fs::write(tmp.path().join(FILE), SHELL_A).unwrap();
+        edit_title(&conductor, FILE, "Edited A");
+        assert!(is_dirty(&conductor));
+        assert_eq!(base(&conductor, FILE), None);
+    }
+
+    #[test]
+    fn saving_reloading_or_settling_clears_the_base() {
+        let save = |conductor: &Conductor| {
+            let response = conductor
+                .handle_command(Command::SaveBuffer {
+                    path: editorial_types::SitePath::parse(FILE).expect("valid"),
+                    consent: Default::default(),
+                })
+                .response;
+            assert!(matches!(response, Response::Ok), "{response:?}");
+        };
+        let save_all = |conductor: &Conductor| {
+            let response = conductor
+                .handle_command(Command::SaveAllBuffers {
+                    consent: Default::default(),
+                })
+                .response;
+            assert!(matches!(response, Response::Ok), "{response:?}");
+        };
+        let reload_it = |conductor: &Conductor| {
+            reload(conductor, FILE);
+        };
+        let settle = |conductor: &Conductor| {
+            // The file now reads as N: the edits are on disk.
+            std::fs::write(
+                conductor.site_dir.join(FILE),
+                CONTENT.replace("First Post", "Edited A"),
+            )
+            .unwrap();
+            conductor.handle_command(Command::FileChanged {
+                paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")],
+            });
+        };
+        /// A way to end the unsaved state, by name.
+        type Way<'a> = (&'a str, &'a dyn Fn(&Conductor));
+        let ways: [Way; 4] = [
+            ("save", &save),
+            ("save all", &save_all),
+            ("reload", &reload_it),
+            ("settle", &settle),
+        ];
+        for (way, clear) in ways {
+            let tmp = build_site();
+            let conductor = make_conductor(&tmp);
+            edit_title(&conductor, FILE, "Edited A");
+            assert!(base(&conductor, FILE).is_some(), "{way}: recorded");
+            clear(&conductor);
+            assert!(!is_dirty(&conductor), "{way}: saved");
+            assert_eq!(base(&conductor, FILE), None, "{way}");
+            // The next edit starts from the file as it is now.
+            edit_title(&conductor, FILE, "Edited B");
+            assert_eq!(
+                base(&conductor, FILE),
+                Some(disk(&tmp, FILE)),
+                "{way}: the next base"
+            );
+        }
     }
 
     /// ADR-043: every conductor write to a source file is recorded as a

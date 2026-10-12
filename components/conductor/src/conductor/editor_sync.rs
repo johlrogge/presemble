@@ -678,7 +678,10 @@ impl Conductor {
     /// so it is read again (a fresh disk change). `None` when the file cannot
     /// be read or keeps changing under us; the caller then treats the file as
     /// not agreeing with N, which is the safe side.
-    fn read_stable(&self, abs: &Path) -> Option<(String, Option<crate::dirty::DiskStamp>)> {
+    pub(super) fn read_stable(
+        &self,
+        abs: &Path,
+    ) -> Option<(String, Option<crate::dirty::DiskStamp>)> {
         for _ in 0..3 {
             let before = crate::dirty::DiskStamp::of(abs);
             let text = std::fs::read_to_string(abs).ok()?;
@@ -747,10 +750,7 @@ impl Conductor {
             .contains(rel);
         if dirty && self.disk_reads_as_n(rel) {
             // (`disk_reads_as_n` recorded the stamp the text was read with.)
-            self.dirty_docs
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear(rel);
+            self.clear_unsaved(rel);
             return Some(vec![saved_event([&rel.to_path_buf()])]);
         }
         None
@@ -790,18 +790,12 @@ impl Conductor {
             .contains(rel);
         let reads_as_n = self.n_reads_as_text(rel, &abs, &disk);
         if reads_as_n {
-            self.dirty_docs
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear(rel);
+            self.clear_unsaved(rel);
             self.record_stamp(rel, stamp);
         } else {
             let canonical = self.canonical_text(&key)?;
             self.write_document(rel, canonical.as_bytes()).ok()?;
-            self.dirty_docs
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear(rel);
+            self.clear_unsaved(rel);
         }
         if was_dirty || !reads_as_n {
             events.push(saved_event([&rel.to_path_buf()]));
@@ -932,10 +926,7 @@ impl Conductor {
         text: &str,
     ) -> Result<Vec<ConductorEvent>, String> {
         let pages = self.rebuild_page(abs, text)?;
-        self.dirty_docs
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .mark(PathBuf::from(path.as_str()));
+        self.mark_unsaved(&[PathBuf::from(path.as_str())]);
         Ok(if pages.is_empty() {
             vec![]
         } else {
