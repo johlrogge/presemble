@@ -92,7 +92,11 @@ fi
 
 JS_CHECK_FAILED=0
 for js_file in "${BROWSER_JS_FILES[@]}"; do
-    if deno check "$js_file" 2>&1 | tee /tmp/presemble-deno-check.log | grep -qE '^(error|TS[0-9]+)'; then
+    # Capture, then grep a herestring: under pipefail a pipe into `grep -q` reads
+    # deno's own failure exit (or a SIGPIPE) as "no match".
+    DENO_OUT=$(deno check "$js_file" 2>&1 || true)
+    printf '%s\n' "$DENO_OUT" > /tmp/presemble-deno-check.log
+    if grep -qE '^(error|TS[0-9]+)' <<< "$DENO_OUT"; then
         fail "deno check $js_file"
         cat /tmp/presemble-deno-check.log
         JS_CHECK_FAILED=1
@@ -111,7 +115,9 @@ DENO_TOOL_FILES=(
 )
 
 for ts_file in "${DENO_TOOL_FILES[@]}"; do
-    if deno check "$ts_file" 2>&1 | tee /tmp/presemble-deno-check.log | grep -qE '^(error|TS[0-9]+)'; then
+    DENO_OUT=$(deno check "$ts_file" 2>&1 || true)
+    printf '%s\n' "$DENO_OUT" > /tmp/presemble-deno-check.log
+    if grep -qE '^(error|TS[0-9]+)' <<< "$DENO_OUT"; then
         fail "deno check $ts_file"
         cat /tmp/presemble-deno-check.log
         JS_CHECK_FAILED=1
@@ -568,7 +574,10 @@ HW_ORIG=$(cat "$HW_PATH")
 wait_for_page_text() {
     local url="$1" text="$2" i
     for i in $(seq 1 50); do
-        if acurl "http://127.0.0.1:$PORT$url" 2>/dev/null | grep -qF -- "$text"; then return 0; fi
+        # Capture, then grep a herestring: see assert_curl (SIGPIPE under pipefail).
+        local page
+        page=$(acurl "http://127.0.0.1:$PORT$url" 2>/dev/null || true)
+        if grep -qF -- "$text" <<< "$page"; then return 0; fi
         sleep 0.2
     done
     return 1
@@ -669,19 +678,35 @@ log "Testing editorial diagnostics..."
 PROBE_FILE="content/post/diag-probe.md"
 PROBE_PATH="$SITE_DIR/$PROBE_FILE"
 { cat "$HW_PATH"; printf '\nProbe paragraph with <b>x</b> inline html.\n'; } > "$PROBE_PATH"
-wait_for_page_text "/post/diag-probe" "Probe paragraph" || true
+if wait_for_page_text "/post/diag-probe" "Probe paragraph"; then
+    pass "diagnostics: the probe page is built"
+else
+    fail "diagnostics: the probe page is built (no 'Probe paragraph' on /post/diag-probe after ~10 s)"
+fi
 assert_curl "diagnostics: editorial page carries the element attribute" "/post/diag-probe" GET "" 'data-presemble-diagnostics="'
 assert_curl "diagnostics: editorial page carries the page script" "/post/diag-probe" GET "" 'id="presemble-diagnostics"'
 assert_curl "diagnostics: page script counts the error" "/post/diag-probe" GET "" '"errors":1'
 assert_curl "diagnostics: a valid page counts no errors" "/post/hello-world" GET "" '"errors":0'
 assert_curl_not_contains "diagnostics: a valid page has no element diagnostics" "/post/hello-world" 'data-presemble-diagnostics="'
 sed 's|<b>x</b>|x|' "$PROBE_PATH" > "$PROBE_PATH.tmp" && mv "$PROBE_PATH.tmp" "$PROBE_PATH"
+DIAG_POLLS=0
 for i in $(seq 1 50); do
-    if ! acurl "http://127.0.0.1:$PORT/post/diag-probe" 2>/dev/null | grep -qF '"errors":1'; then break; fi
+    DIAG_POLLS=$i
+    # Capture, then grep a herestring: piped into `grep -q` under pipefail, an
+    # early match SIGPIPEs curl and reads as "no match", ending the wait at once.
+    DIAG_PAGE=$(acurl "http://127.0.0.1:$PORT/post/diag-probe" 2>/dev/null || true)
+    if ! grep -qF '"errors":1' <<< "$DIAG_PAGE"; then break; fi
     sleep 0.2
 done
+DIAG_FAIL_BEFORE=$FAIL
 assert_curl_not_contains "diagnostics: fixing the inline html clears the attribute" "/post/diag-probe" 'data-presemble-diagnostics="'
 assert_curl "diagnostics: fixing the inline html zeroes the page script" "/post/diag-probe" GET "" '"errors":0'
+# Keep the evidence of a failure before cleanup removes the site: how long the
+# wait above polled, and the end of the serve log (its `rebuild:` lines).
+if [ "$FAIL" -gt "$DIAG_FAIL_BEFORE" ]; then
+    echo "  diagnostics: the wait for the fix stopped after $DIAG_POLLS poll(s); serve.log (last 50 lines):"
+    tail -n 50 "$SITE_DIR/serve.log" | sed 's/^/    | /'
+fi
 
 # ── Test: Suggestions ─────────────────────────────────────────────────────
 
