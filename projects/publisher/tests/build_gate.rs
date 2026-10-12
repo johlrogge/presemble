@@ -220,6 +220,44 @@ fn a_site_with_unfinished_markup_does_not_publish() {
     assert!(!index_html(&tmp).exists(), "no page should be written");
 }
 
+/// FU-3: a slot error about one element is reported at that element's line,
+/// not at the slot's first element. The element is the second paragraph of
+/// the summary slot.
+#[test]
+fn a_slot_error_is_reported_at_its_line() {
+    let (tmp, site) = copy_fixture_site();
+    fs::remove_file(site.join("content/article/invalid-post.md")).expect("remove invalid post");
+    let post = site.join("content/article/hello-world.md");
+    let original = fs::read_to_string(&post).expect("read post");
+    let text = original.replacen(
+        "In this article you will learn",
+        "In this article you <b>will</b> learn",
+        1,
+    );
+    assert_ne!(
+        text, original,
+        "the fixture has the second summary paragraph"
+    );
+    fs::write(&post, &text).expect("write post");
+    let at = text.find("In this article").expect("the paragraph");
+    let line = text[..at].matches('\n').count() + 1;
+    assert!(line > 1, "the paragraph is not on the first line");
+
+    let out = presemble_build(&site);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
+    let expected = format!(
+        "content/article/hello-world.md:{line}:1: error: slot 'summary': paragraph `In this \
+         article you <b>will</b> learn"
+    );
+    assert!(
+        stderr.contains(&expected),
+        "expected {expected:?} in stderr:\n{stderr}"
+    );
+    assert!(!index_html(&tmp).exists(), "no page should be written");
+}
+
 #[test]
 fn build_publishes_valid_site() {
     let (tmp, site) = copy_fixture_site();

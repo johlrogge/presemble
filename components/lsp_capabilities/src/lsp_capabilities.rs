@@ -1170,6 +1170,46 @@ mod tests {
         assert_eq!(positioned.start, byte_to_position(&src, para_start));
     }
 
+    /// FU-3: an error about one element of a slot has that element's range,
+    /// not the slot's first element (here the second summary paragraph).
+    #[test]
+    fn a_slot_inline_html_error_has_its_range() {
+        let para = "Second <b>x</b> summary.";
+        let src = format!(
+            "# Title\n\nFirst summary.\n\n{para}\n\n[Author](/author/test)\n\n\
+             ![Cover](images/cover.jpg)\n\n----\n\n### Body\n"
+        );
+        let diags = validate_with_positions(&src, &article_grammar());
+        let d = diags
+            .iter()
+            .find(|d| d.message.contains("inline HTML `<b>`"))
+            .unwrap_or_else(|| panic!("expected an inline HTML error: {diags:#?}"));
+        assert!(d.message.starts_with("slot 'summary': "), "{}", d.message);
+        let para_start = src.find(para).expect("the paragraph");
+        let para_end = para_start + para.len();
+        assert_eq!(d.start, byte_to_position(&src, para_start), "{d:#?}");
+        assert!(
+            d.end >= byte_to_position(&src, para_end)
+                && d.end <= byte_to_position(&src, para_end + 1),
+            "{d:#?}"
+        );
+    }
+
+    /// FU-3: a misused slot marker has the marker's range.
+    #[test]
+    fn a_misused_marker_has_the_markers_range() {
+        let src = "# Title\n\nSummary.\n\n[Author](/author/test)\n\n\
+                   ![Cover](images/cover.jpg)\n\n----\n\nSome text {#x}\n";
+        let diags = validate_with_positions(src, &article_grammar());
+        let d = diags
+            .iter()
+            .find(|d| d.message.contains("slot markers only apply"))
+            .unwrap_or_else(|| panic!("expected a marker error: {diags:#?}"));
+        let at = src.find("{#x}").expect("the marker");
+        assert_eq!(d.start, byte_to_position(src, at), "{d:#?}");
+        assert_eq!(d.end, byte_to_position(src, at + "{#x}".len()), "{d:#?}");
+    }
+
     #[test]
     fn hover_for_line_returns_hint_for_title_line() {
         let src = "# Hello World\n\nSome text.\n\n[Author](/authors/test)\n\n![Cover](cover.jpg)\n\n----\n\n### Body\n";
