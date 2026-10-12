@@ -358,6 +358,15 @@ fn part_span(
     })
 }
 
+/// The source span of the element `location` names in `doc`, if there is
+/// one and it was read from a source (a store-built document has no spans).
+/// How a view finds, in its own text, a block that N names by its location.
+pub fn span_of_location(doc: &Document, location: &Location) -> Option<schema::Span> {
+    element_at(doc, location)
+        .map(|element| element.span)
+        .filter(|span| span.end > span.start)
+}
+
 /// The element `location` names in `doc`, if there is one.
 fn element_at<'a>(doc: &'a Document, location: &Location) -> Option<&'a Spanned<ContentElement>> {
     let elements = match &location.container {

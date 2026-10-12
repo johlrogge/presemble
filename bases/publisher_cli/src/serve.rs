@@ -268,6 +268,12 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
                 file: Some(file.to_string()),
             }
         }
+        // The end of a conflict has no message for the browser yet: its
+        // notice adds files, it never removes one.
+        ConductorEvent::DiskConflict {
+            state: conductor::ConflictState::Resolved,
+            ..
+        } => return None,
         ConductorEvent::DiskConflict { file, .. } => EditorialMessage::Conflict { file },
     })
 }
@@ -4391,7 +4397,7 @@ mod tests {
     fn editorial_message_for_disk_conflict() {
         let msg = editorial_message_for(conductor::ConductorEvent::DiskConflict {
             file: "content/post/a.md".to_string(),
-            regions: vec![],
+            state: conductor::ConflictState::WholeFile,
         });
         match &msg {
             EditorialMessage::Conflict { file } => assert_eq!(file, "content/post/a.md"),
@@ -4400,6 +4406,18 @@ mod tests {
         assert_eq!(
             msg.to_json(),
             r#"{"type":"conflict","file":"content/post/a.md"}"#
+        );
+    }
+
+    /// GUARD: the end of a conflict never reaches the browser as a conflict.
+    #[test]
+    fn the_end_of_a_disk_conflict_is_no_conflict_message() {
+        assert!(
+            editorial_message_of(conductor::ConductorEvent::DiskConflict {
+                file: "content/post/a.md".to_string(),
+                state: conductor::ConflictState::Resolved,
+            })
+            .is_none()
         );
     }
 

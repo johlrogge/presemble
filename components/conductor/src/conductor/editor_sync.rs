@@ -44,13 +44,13 @@ use super::*;
 use std::ops::Range;
 
 use content::sync::{self, BufferEdit, Part, Step};
-use content::{Blocks, Container, ContentElement, Document, Projection, Spacing};
+use content::{Blocks, Container, ContentElement, Document, NestedStep, Projection, Spacing};
 use editorial_types::CommentPlace;
 use node_store::{Node, NodeId, NodeStore};
 use schema::Spanned;
 
 use crate::protocol::{
-    ConflictId, ConflictRegion, Drift, DriftId, DriftKind, HeldRegion, PathStep,
+    BlockLocation, ConflictId, ConflictRegion, Drift, DriftId, DriftKind, HeldRegion, PathStep,
 };
 
 /// What the conductor keeps for a document an editor has open.
@@ -110,6 +110,15 @@ pub(super) enum DiskMerge {
     WholeDocument,
 }
 
+/// The file of a document lowered into N against a base (the disk channel).
+struct DiskSync {
+    file: String,
+    stamp: Option<crate::dirty::DiskStamp>,
+    /// The base advanced, and the regions N did not take (`drifts`).
+    state: EditorState,
+    events: Vec<ConductorEvent>,
+}
+
 /// A drift and what `KeepMine` does for it.
 #[derive(Debug, Clone)]
 struct DriftRecord {
@@ -119,6 +128,90 @@ struct DriftRecord {
     base_edit: BufferEdit,
     /// The region's text in the base (what a disk conflict is named by).
     base_text: String,
+    /// Where the region's first block is in N, when N has one for it.
+    location: Option<BlockLocation>,
+}
+
+/// The element children of `node`: the blocks of a container or a quote, the
+/// items of a list.
+fn element_children(store: &NodeStore, node: NodeId) -> Vec<NodeId> {
+    store
+        .children(node)
+        .into_iter()
+        .filter(|&id| matches!(store.get(id), Some(Node::Element(_))))
+        .collect()
+}
+
+fn element_kind(store: &NodeStore, node: NodeId) -> Option<&str> {
+    match store.get(node) {
+        Some(Node::Element(name)) => Some(store.resolve_name(*name)),
+        _ => None,
+    }
+}
+
+/// The steps from the block `block` down to `target` inside it (none when it
+/// is `target`), through quotes and list items.
+fn steps_to(store: &NodeStore, block: NodeId, target: NodeId) -> Option<Vec<NestedStep>> {
+    if block == target {
+        return Some(Vec::new());
+    }
+    let within = |steps: Vec<NestedStep>, child: NodeId| {
+        steps_to(store, child, target).map(|rest| steps.into_iter().chain(rest).collect())
+    };
+    match element_kind(store, block)? {
+        "blockquote" => element_children(store, block)
+            .into_iter()
+            .enumerate()
+            .find_map(|(n, child)| within(vec![NestedStep::Block(n)], child)),
+        "list" => element_children(store, block)
+            .into_iter()
+            .enumerate()
+            .find_map(|(k, item)| {
+                element_children(store, item)
+                    .into_iter()
+                    .enumerate()
+                    .find_map(|(n, child)| {
+                        within(vec![NestedStep::Item(k), NestedStep::Block(n)], child)
+                    })
+            }),
+        _ => None,
+    }
+}
+
+/// Where the block `target` is in N's document `root`: its container, the
+/// top-level block, and the path into quotes and list items (as a validation
+/// diagnostic names a block).
+fn n_location(store: &NodeStore, root: NodeId, target: NodeId) -> Option<BlockLocation> {
+    let find = node_store_bridge::content_bridge::find_child_by_name;
+    let mut containers: Vec<(Container, NodeId)> = Vec::new();
+    if let Some(preamble) = find(store, root, "preamble") {
+        for child in element_children(store, preamble) {
+            if element_kind(store, child) == Some("unassigned") {
+                containers.push((Container::Unassigned, child));
+            } else if let Some(name) =
+                node_store_bridge::content_bridge::find_attr_text(store, child, "name")
+            {
+                containers.push((Container::Slot(schema::SlotName::new(name.as_str())), child));
+            }
+        }
+    }
+    if let Some(body) = find(store, root, "body") {
+        containers.push((Container::Body, body));
+    }
+    containers.into_iter().find_map(|(container, node)| {
+        element_children(store, node)
+            .into_iter()
+            .enumerate()
+            .find_map(|(index, block)| {
+                steps_to(store, block, target).map(|path| {
+                    BlockLocation::from(&content::Location {
+                        container: container.clone(),
+                        index,
+                        path,
+                    })
+                })
+            })
+    })
 }
 
 /// How the editor's version of a drifted region is taken over N's.
@@ -823,8 +916,12 @@ impl Conductor {
             .contains(rel);
         if dirty && self.disk_reads_as_n(rel) {
             // (`disk_reads_as_n` recorded the stamp the text was read with.)
-            self.clear_unsaved(rel);
-            return Some(vec![saved_event([&rel.to_path_buf()])]);
+            let ended = self.clear_unsaved(rel);
+            return Some(
+                std::iter::once(saved_event([&rel.to_path_buf()]))
+                    .chain(ended)
+                    .collect(),
+            );
         }
         None
     }
@@ -840,44 +937,135 @@ impl Conductor {
     /// read (it is gone), either text does not parse, or the document's
     /// structure changed (its slots or `----`).
     pub(super) fn merge_disk_change(&self, rel: &Path) -> DiskMerge {
-        let Some(base) = self
-            .disk_bases
+        let Some(base) = self.disk_base(rel) else {
+            return DiskMerge::WholeDocument;
+        };
+        match self.disk_sync(rel, base) {
+            Some(synced) => self.finish_disk_sync(rel, synced, Vec::new()),
+            None => DiskMerge::WholeDocument,
+        }
+    }
+
+    /// Resolve the block conflict `id` of the document at `rel` (ADR-065
+    /// amendment F2): take the file's version of the blocks, or keep N's.
+    /// N's blocks are found now, by running the merge again (as `KeepMine`
+    /// does), never by a node id kept from before. Either way the base of the
+    /// region advances to the file's version, so the region no longer differs
+    /// from the file, and the merge is run once more: what is left is the
+    /// document's remaining conflicts.
+    ///
+    /// Refused (an `Err` saying why) when the id is not a current conflict, or
+    /// when the document conflicts as a whole (reload or save with consent).
+    pub(super) fn resolve_disk_conflict(
+        &self,
+        rel: &Path,
+        id: ConflictId,
+        take: crate::protocol::ConflictSide,
+    ) -> Result<DiskMerge, String> {
+        let whole = || {
+            "the document conflicts as a whole: reload it, or save it to overwrite the file"
+                .to_string()
+        };
+        let base = self.disk_base(rel).ok_or_else(whole)?;
+        let first = self.disk_sync(rel, base.clone()).ok_or_else(whole)?;
+        let record = first
+            .state
+            .drifts
+            .iter()
+            .find(|d| {
+                let disk = first.file.get(d.drift.range.clone()).unwrap_or_default();
+                conflict_id(&d.drift.path, &d.base_text, disk) == id
+            })
+            .cloned()
+            .ok_or_else(|| "the conflict has changed; look at the current ones".to_string())?;
+        let mut events = first.events;
+        if take == crate::protocol::ConflictSide::Disk {
+            // The user chose the file's version: no base check.
+            let KeepAction::Replace { nodes, trees } = &record.action else {
+                return Err(
+                    "this conflict can only be resolved for the whole file: reload it".to_string(),
+                );
+            };
+            let Some((first_node, rest)) = nodes.split_first() else {
+                return Err("the conflict has changed; look at the current ones".to_string());
+            };
+            let mut steps = if trees.is_empty() {
+                vec![step(*first_node, editorial_types::NedMutation::Delete)]
+            } else {
+                vec![step(
+                    *first_node,
+                    editorial_types::NedMutation::Replace(trees.clone()),
+                )]
+            };
+            steps.extend(
+                rest.iter()
+                    .map(|n| step(*n, editorial_types::NedMutation::Delete)),
+            );
+            let (_, applied) = self
+                .execute_plan(steps.into_iter().collect())
+                .map_err(|_| "the conflict has changed; look at the current ones".to_string())?;
+            events.extend(applied);
+        }
+        // The region's base is the file's version now: it no longer differs.
+        let advanced = sync::apply_edits(&base, std::slice::from_ref(&record.base_edit));
+        let second = self.disk_sync(rel, advanced).ok_or_else(whole)?;
+        Ok(self.finish_disk_sync(rel, second, events))
+    }
+
+    /// The base of the unsaved edits of the document at `rel`, if it has one.
+    fn disk_base(&self, rel: &Path) -> Option<String> {
+        self.disk_bases
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(rel)
             .map(str::to_string)
-        else {
-            return DiskMerge::WholeDocument;
-        };
-        let Ok(key) = editorial_types::ContentPath::parse(&rel.to_string_lossy()) else {
-            return DiskMerge::WholeDocument;
-        };
-        let Ok(abs) = crate::site_resolve::resolve_in_site(&self.site_dir, key.as_site_path())
-        else {
-            return DiskMerge::WholeDocument;
-        };
-        let Some((file, stamp)) = self.read_stable(&abs) else {
-            return DiskMerge::WholeDocument;
-        };
-        let Ok((_, _, _, grammar)) = self.document_coordinates(&abs) else {
-            return DiskMerge::WholeDocument;
-        };
-        let (Ok(base_doc), Ok(file_doc)) = (
-            content::parse_and_assign(&base, &grammar),
-            content::parse_and_assign(&file, &grammar),
-        ) else {
-            return DiskMerge::WholeDocument;
-        };
+    }
+
+    /// The file now at `rel` lowered into N against `base` (the disk channel
+    /// of the engine). `None` when it cannot be merged block by block: the
+    /// file cannot be read (it is gone), either text does not parse, or the
+    /// document's structure changed (its slots or `----`).
+    fn disk_sync(&self, rel: &Path, base: String) -> Option<DiskSync> {
+        let key = editorial_types::ContentPath::parse(&rel.to_string_lossy()).ok()?;
+        let abs = crate::site_resolve::resolve_in_site(&self.site_dir, key.as_site_path()).ok()?;
+        let (file, stamp) = self.read_stable(&abs)?;
+        let (_, _, _, grammar) = self.document_coordinates(&abs).ok()?;
+        let base_doc = content::parse_and_assign(&base, &grammar).ok()?;
+        let file_doc = content::parse_and_assign(&file, &grammar).ok()?;
         // Which block belongs to which slot is then not a block-by-block
         // question.
         if structure_differs(&base_doc, &file_doc) {
-            return DiskMerge::WholeDocument;
+            return None;
         }
         let mut state = EditorState::opened(base);
         state.last = file.clone();
-        let Ok(events) = self.sync_channel(Channel::Disk, &key, &abs, &mut state, true) else {
-            return DiskMerge::WholeDocument;
-        };
+        let events = self
+            .sync_channel(Channel::Disk, &key, &abs, &mut state, true)
+            .ok()?;
+        Some(DiskSync {
+            file,
+            stamp,
+            state,
+            events,
+        })
+    }
+
+    /// Keep what a disk sync came to: the base advances to the file, except
+    /// where a conflict remains, and our copy is now based on this version of
+    /// the file. `events` come before the sync's own.
+    fn finish_disk_sync(
+        &self,
+        rel: &Path,
+        synced: DiskSync,
+        mut events: Vec<ConductorEvent>,
+    ) -> DiskMerge {
+        let DiskSync {
+            file,
+            stamp,
+            state,
+            events: more,
+        } = synced;
+        events.extend(more);
         let regions = state
             .drifts
             .iter()
@@ -886,13 +1074,12 @@ impl Conductor {
                 ConflictRegion {
                     id: conflict_id(&d.drift.path, &d.base_text, disk),
                     path: d.drift.path.clone(),
-                    range: d.drift.range.clone(),
+                    location: d.location.clone(),
+                    disk_range: d.drift.range.clone(),
                     disk: disk.to_string(),
                 }
             })
             .collect();
-        // The base advances to the file, except where a conflict remains; our
-        // copy is now based on this version of the file.
         self.disk_bases
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -934,17 +1121,19 @@ impl Conductor {
             .unwrap_or_else(|e| e.into_inner())
             .contains(rel);
         let reads_as_n = self.n_reads_as_text(rel, &abs, &disk);
-        if reads_as_n {
-            self.clear_unsaved(rel);
+        let ended = if reads_as_n {
+            let ended = self.clear_unsaved(rel);
             self.record_stamp(rel, stamp);
+            ended
         } else {
             let canonical = self.canonical_text(&key)?;
             self.write_document(rel, canonical.as_bytes()).ok()?;
-            self.clear_unsaved(rel);
-        }
+            self.clear_unsaved(rel)
+        };
         if was_dirty || !reads_as_n {
             events.push(saved_event([&rel.to_path_buf()]));
         }
+        events.extend(ended);
         self.editors
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -1203,6 +1392,7 @@ impl Conductor {
                         text: state.last.clone(),
                     },
                     base_text: state.base.clone(),
+                    location: None,
                 });
             }
         }
@@ -1291,6 +1481,9 @@ impl Conductor {
                         action,
                         base_edit: group.to_new.clone(),
                         base_text: group.base_text.clone(),
+                        location: aligned
+                            .first()
+                            .and_then(|first| n_location(&store, root, *first)),
                     });
                 }
                 _ => {}
@@ -1301,7 +1494,13 @@ impl Conductor {
         // drifted. Until then the base keeps the old spacing, so the list is
         // looked at again on the next sync, whatever else changes.
         if !reread_needed {
-            events.extend(self.settle_spacing(&sites, &groups, &mut unsettled, &mut state.drifts));
+            events.extend(self.settle_spacing(
+                root,
+                &sites,
+                &groups,
+                &mut unsettled,
+                &mut state.drifts,
+            ));
         }
         // A document that could not be read again keeps its text as the base.
         if !reread_needed || reread_done {
@@ -1312,9 +1511,11 @@ impl Conductor {
 
     /// Replace the lists whose spacing the text changed and N does not follow,
     /// when nothing inside them is held or drifted. Whatever waits adds its
-    /// `gap_edits` to `unsettled`, so the base keeps the old spacing.
+    /// `gap_edits` to `unsettled`, so the base keeps the old spacing. `root`
+    /// is the document's root in N.
     fn settle_spacing(
         &self,
+        root: NodeId,
         sites: &[SpacingSite],
         groups: &[Group],
         unsettled: &mut Vec<BufferEdit>,
@@ -1392,6 +1593,7 @@ impl Conductor {
                                 text: String::new(),
                             },
                             base_text: site.base_text.clone(),
+                            location: n_location(&store, root, node),
                         });
                     }
                     _ => unsettled.extend(site.gap_edits.iter().cloned()),
@@ -1841,6 +2043,7 @@ fn structure_differs(base: &Document, new: &Document) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::ConflictState;
     use editorial_types::{BlockEditIntent, BlockText, ContentPath};
     use node_store::{Node, NodeId};
 
@@ -3354,13 +3557,27 @@ mod tests {
     /// The regions the document conflicts on (empty: the whole file, or no
     /// conflict; see `conflicts`).
     fn conflict_regions(w: &World) -> Vec<ConflictRegion> {
+        match conflict_state(w) {
+            Some(ConflictState::Blocks(regions)) => regions,
+            _ => Vec::new(),
+        }
+    }
+
+    /// The state of the document's conflict, as listed (`None`: none).
+    fn conflict_state(w: &World) -> Option<ConflictState> {
         match w.conductor.handle_command(Command::GetConflicts).response {
-            Response::Conflicts(files) => files
-                .into_iter()
-                .find(|c| c.file == FILE)
-                .map(|c| c.regions)
-                .unwrap_or_default(),
+            Response::Conflicts(files) => {
+                files.into_iter().find(|c| c.file == FILE).map(|c| c.state)
+            }
             other => panic!("expected Conflicts, got {other:?}"),
+        }
+    }
+
+    /// The blocks of an announced state (none for any other state).
+    fn blocks_of(state: &ConflictState) -> &[ConflictRegion] {
+        match state {
+            ConflictState::Blocks(regions) => regions,
+            _ => &[],
         }
     }
 
@@ -3370,14 +3587,12 @@ mod tests {
         watcher_saw(w)
     }
 
-    fn conflict_events(result: &CommandResult) -> Vec<Vec<ConflictRegion>> {
+    fn conflict_events(result: &CommandResult) -> Vec<ConflictState> {
         result
             .events
             .iter()
             .filter_map(|e| match e {
-                ConductorEvent::DiskConflict { file, regions } if file == FILE => {
-                    Some(regions.clone())
-                }
+                ConductorEvent::DiskConflict { file, state } if file == FILE => Some(state.clone()),
                 _ => None,
             })
             .collect()
@@ -3431,9 +3646,12 @@ mod tests {
         let regions = conflict_regions(&w);
         assert_eq!(regions.len(), 1, "{regions:?}");
         assert!(regions[0].path.is_empty(), "{regions:?}");
-        assert_eq!(&file[regions[0].range.clone()], "Alpha disk.");
+        assert_eq!(&file[regions[0].disk_range.clone()], "Alpha disk.");
         assert_eq!(regions[0].disk, "Alpha disk.");
-        assert_eq!(conflict_events(&result), vec![regions.clone()]);
+        assert_eq!(
+            conflict_events(&result),
+            vec![ConflictState::Blocks(regions.clone())]
+        );
         let body = body_markdown(&w);
         assert_eq!(body[0], "Alpha browser.", "N keeps its version");
         assert_eq!(body[4], "Gamma disk.", "the other block is merged");
@@ -3452,7 +3670,7 @@ mod tests {
         assert_eq!(regions.len(), 1, "{regions:?}");
         assert_eq!(regions[0].path.len(), 1, "{regions:?}");
         assert_eq!(the_item(&regions[0].path[0]), 1, "{regions:?}");
-        assert_eq!(&file[regions[0].range.clone()], "two disk");
+        assert_eq!(&file[regions[0].disk_range.clone()], "two disk");
         assert_eq!(
             item_texts(&w),
             ["one", "two browser", "three disk"],
@@ -3486,9 +3704,9 @@ mod tests {
         assert_eq!(regions.len(), 1, "{regions:?}");
         assert!(regions[0].path.is_empty(), "{regions:?}");
         assert!(
-            file[regions[0].range.clone()].contains("<!-- note disk -->"),
+            file[regions[0].disk_range.clone()].contains("<!-- note disk -->"),
             "{:?}",
-            &file[regions[0].range.clone()]
+            &file[regions[0].disk_range.clone()]
         );
         assert_eq!(
             comments_before(&w, body_blocks(&w)[1]),
@@ -3510,8 +3728,8 @@ mod tests {
                 .replace("Gamma para.", "Gamma disk."),
         );
         assert_eq!(conflicts(&w), [FILE]);
-        assert!(conflict_regions(&w).is_empty(), "the whole file");
-        assert_eq!(conflict_events(&result), vec![Vec::<ConflictRegion>::new()]);
+        assert_eq!(conflict_state(&w), Some(ConflictState::WholeFile));
+        assert_eq!(conflict_events(&result), vec![ConflictState::WholeFile]);
         assert_eq!(body_markdown(&w), before, "nothing is merged");
     }
 
@@ -3523,8 +3741,8 @@ mod tests {
         browser_sets_alpha(&w, "Alpha browser.");
         let result = disk_changes(&w, &CONTENT.replace("Gamma para.", "Gamma disk."));
         assert_eq!(conflicts(&w), [FILE]);
-        assert!(conflict_regions(&w).is_empty(), "the whole file");
-        assert_eq!(conflict_events(&result), vec![Vec::<ConflictRegion>::new()]);
+        assert_eq!(conflict_state(&w), Some(ConflictState::WholeFile));
+        assert_eq!(conflict_events(&result), vec![ConflictState::WholeFile]);
         assert_eq!(body_markdown(&w)[4], "Gamma para.", "nothing is merged");
     }
 
@@ -3555,19 +3773,19 @@ mod tests {
         let first = CONTENT.replace("Alpha para.", "Alpha disk.");
         let announced = conflict_events(&disk_changes(&w, &first));
         assert_eq!(announced.len(), 1, "{announced:?}");
-        assert_eq!(announced[0].len(), 1, "{announced:?}");
+        assert_eq!(blocks_of(&announced[0]).len(), 1, "{announced:?}");
 
         // A second block now conflicts too: announced, with both.
         let second = first.replace("Gamma para.", "Gamma disk.");
         let announced = conflict_events(&disk_changes(&w, &second));
         assert_eq!(announced.len(), 1, "{announced:?}");
-        assert_eq!(announced[0].len(), 2, "{announced:?}");
+        assert_eq!(blocks_of(&announced[0]).len(), 2, "{announced:?}");
 
         // The disk's version of one of them changes: announced again.
         let third = second.replace("Gamma disk.", "Gamma disk again.");
         let announced = conflict_events(&disk_changes(&w, &third));
         assert_eq!(announced.len(), 1, "{announced:?}");
-        assert_eq!(conflict_regions(&w), announced[0]);
+        assert_eq!(conflict_regions(&w), blocks_of(&announced[0]));
     }
 
     #[test]
@@ -3580,7 +3798,7 @@ mod tests {
         disk_changes(&w, &file);
         let regions = conflict_regions(&w);
         assert_eq!(regions.len(), 1, "{regions:?}");
-        assert_eq!(&file[regions[0].range.clone()], "Alpha disk.");
+        assert_eq!(&file[regions[0].disk_range.clone()], "Alpha disk.");
         let body = body_markdown(&w);
         assert_eq!(body[0], "Alpha browser.", "N keeps its version");
         assert_eq!(body[1], "Beta disk.", "the block next to it is merged");
@@ -3616,7 +3834,7 @@ mod tests {
         let regions = conflict_regions(&w);
         assert_eq!(regions.len(), 1, "{regions:?}");
         assert_eq!(
-            &file[regions[0].range.clone()],
+            &file[regions[0].disk_range.clone()],
             "Alpha disk.\n\nNew para.\n\nBeta disk."
         );
         assert_eq!(body_markdown(&w)[0], "Alpha browser.");
@@ -3662,6 +3880,295 @@ mod tests {
         assert_eq!(body_markdown(&w)[0], "Alpha mine.");
     }
 
+    // ── resolving a conflict block by block (F2.3) ─────────────────────────
+
+    /// Alpha and Gamma changed in N and, differently, on disk: two conflicts.
+    fn two_conflicts() -> (World, String) {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        other_channel_sets(&w, body_blocks(&w)[4], "Gamma browser.");
+        let file = CONTENT
+            .replace("Alpha para.", "Alpha disk.")
+            .replace("Gamma para.", "Gamma disk.");
+        disk_changes(&w, &file);
+        assert_eq!(conflict_regions(&w).len(), 2, "{:?}", conflict_regions(&w));
+        (w, file)
+    }
+
+    /// The conflict on the block whose file version is `disk`.
+    fn region_of(w: &World, disk: &str) -> ConflictRegion {
+        conflict_regions(w)
+            .into_iter()
+            .find(|r| r.disk == disk)
+            .unwrap_or_else(|| panic!("no conflict on {disk:?}: {:?}", conflict_regions(w)))
+    }
+
+    fn resolve(w: &World, id: ConflictId, take: crate::protocol::ConflictSide) -> CommandResult {
+        w.conductor.handle_command(Command::ResolveConflict {
+            path: path(),
+            id,
+            take,
+        })
+    }
+
+    #[test]
+    fn taking_the_files_version_resolves_that_block() {
+        let (w, _) = two_conflicts();
+        let alpha = region_of(&w, "Alpha disk.");
+        let result = resolve(&w, alpha.id, crate::protocol::ConflictSide::Disk);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        let body = body_markdown(&w);
+        assert_eq!(body[0], "Alpha disk.", "the file's version is in N");
+        assert_eq!(body[4], "Gamma browser.", "the other conflict is untouched");
+        let left = conflict_regions(&w);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert_eq!(left[0].disk, "Gamma disk.");
+        assert!(dirty(&w));
+    }
+
+    #[test]
+    fn keeping_the_unsaved_version_resolves_that_block() {
+        let (w, file) = two_conflicts();
+        let alpha = region_of(&w, "Alpha disk.");
+        let result = resolve(&w, alpha.id, crate::protocol::ConflictSide::Unsaved);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(
+            body_markdown(&w)[0],
+            "Alpha browser.",
+            "N keeps its version"
+        );
+        let left = conflict_regions(&w);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert_eq!(left[0].disk, "Gamma disk.");
+        // The base now has the file's version there: the same file seen again
+        // does not bring the conflict back.
+        disk_changes(&w, &file);
+        assert_eq!(conflict_regions(&w).len(), 1, "{:?}", conflict_regions(&w));
+    }
+
+    #[test]
+    fn the_last_resolution_ends_the_conflict() {
+        let (w, _) = two_conflicts();
+        let alpha = region_of(&w, "Alpha disk.");
+        let gamma = region_of(&w, "Gamma disk.");
+        resolve(&w, alpha.id, crate::protocol::ConflictSide::Disk);
+        let result = resolve(&w, gamma.id, crate::protocol::ConflictSide::Unsaved);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        assert!(conflicts(&w).is_empty(), "{:?}", conflicts(&w));
+        assert!(dirty(&w), "an ordinary unsaved document again");
+        let body = body_markdown(&w);
+        assert_eq!(body[0], "Alpha disk.");
+        assert_eq!(body[4], "Gamma browser.");
+    }
+
+    #[test]
+    fn an_old_conflict_id_is_refused() {
+        let (w, _) = two_conflicts();
+        let alpha = region_of(&w, "Alpha disk.");
+        let result = resolve(
+            &w,
+            ConflictId(alpha.id.0 ^ 1),
+            crate::protocol::ConflictSide::Disk,
+        );
+        assert!(
+            matches!(result.response, Response::Error(_)),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(
+            body_markdown(&w)[0],
+            "Alpha browser.",
+            "nothing was applied"
+        );
+        assert_eq!(conflict_regions(&w).len(), 2);
+
+        // Resolved once, the same id is not current any more.
+        resolve(&w, alpha.id, crate::protocol::ConflictSide::Unsaved);
+        let again = resolve(&w, alpha.id, crate::protocol::ConflictSide::Disk);
+        assert!(
+            matches!(again.response, Response::Error(_)),
+            "{:?}",
+            again.response
+        );
+        assert_eq!(body_markdown(&w)[0], "Alpha browser.");
+    }
+
+    /// GUARD: a whole-document conflict has no blocks to resolve: reloading or
+    /// saving with consent ends it.
+    #[test]
+    fn a_whole_document_conflict_is_not_resolved_by_block() {
+        let (w, _) = deleted_under_unsaved_edits();
+        let result = resolve(&w, ConflictId(0), crate::protocol::ConflictSide::Disk);
+        // Refused, with the ways out of a whole-file conflict.
+        assert!(
+            matches!(&result.response, Response::Error(e) if e.contains("reload")),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(conflicts(&w), [FILE]);
+        assert_eq!(conflict_state(&w), Some(ConflictState::WholeFile));
+        assert!(conflict_events(&result).is_empty(), "{:?}", result.events);
+    }
+
+    /// A resolution finds N's blocks when it runs: N read again in between
+    /// (new node ids) changes nothing.
+    #[test]
+    fn resolving_after_an_unrelated_repopulate_takes_the_block() {
+        let (w, _) = two_conflicts();
+        let alpha = region_of(&w, "Alpha disk.");
+        repopulate(&w);
+        let result = resolve(&w, alpha.id, crate::protocol::ConflictSide::Disk);
+        assert!(
+            matches!(result.response, Response::Ok),
+            "{:?}",
+            result.response
+        );
+        assert_eq!(body_markdown(&w)[0], "Alpha disk.");
+        assert_eq!(conflict_regions(&w).len(), 1);
+    }
+
+    #[test]
+    fn the_last_resolution_announces_the_end() {
+        let (w, _) = two_conflicts();
+        let alpha = region_of(&w, "Alpha disk.");
+        let gamma = region_of(&w, "Gamma disk.");
+        let first = resolve(&w, alpha.id, crate::protocol::ConflictSide::Disk);
+        let announced = conflict_events(&first);
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert_eq!(blocks_of(&announced[0]).len(), 1, "one block is left");
+        let last = resolve(&w, gamma.id, crate::protocol::ConflictSide::Unsaved);
+        assert_eq!(conflict_events(&last), [ConflictState::Resolved]);
+        assert_eq!(
+            conflict_state(&w),
+            None,
+            "a resolved conflict is not listed"
+        );
+    }
+
+    /// A whole-file conflict is announced as one, and its end (a reload or a
+    /// save with consent) as the end.
+    #[test]
+    fn a_whole_file_conflict_is_announced_as_such() {
+        let (w, result) = deleted_under_unsaved_edits();
+        assert_eq!(conflict_events(&result), [ConflictState::WholeFile]);
+        let reloaded = w
+            .conductor
+            .handle_command(Command::ReloadDocument { path: path() });
+        assert_eq!(conflict_events(&reloaded), [ConflictState::Resolved]);
+
+        let (w, _) = deleted_under_unsaved_edits();
+        let saved = w.conductor.handle_command(Command::SaveBuffer {
+            path: site_path(),
+            consent: editorial_types::ConflictConsent::Overwrite([FILE.to_string()].into()),
+        });
+        assert_eq!(conflict_events(&saved), [ConflictState::Resolved]);
+
+        let (w, _) = deleted_under_unsaved_edits();
+        let saved = w.conductor.handle_command(Command::SaveAllBuffers {
+            consent: editorial_types::ConflictConsent::Overwrite([FILE.to_string()].into()),
+        });
+        assert_eq!(conflict_events(&saved), [ConflictState::Resolved]);
+    }
+
+    /// GUARD: saving or reloading a document that was never in conflict
+    /// announces no end of one.
+    #[test]
+    fn an_ordinary_save_announces_no_conflict() {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        let saved = w.conductor.handle_command(Command::SaveBuffer {
+            path: site_path(),
+            consent: editorial_types::ConflictConsent::None,
+        });
+        assert!(conflict_events(&saved).is_empty(), "{:?}", saved.events);
+        browser_sets_alpha(&w, "Alpha again.");
+        let reloaded = w
+            .conductor
+            .handle_command(Command::ReloadDocument { path: path() });
+        assert!(
+            conflict_events(&reloaded).is_empty(),
+            "{:?}",
+            reloaded.events
+        );
+    }
+
+    /// GUARD: an editor writing the file of a document it dirtied, with no
+    /// conflict, is a save and announces no conflict of any state.
+    #[test]
+    fn an_editor_save_of_a_document_without_a_conflict_announces_nothing() {
+        let w = world();
+        let typed = CONTENT.replace("Alpha para.", "Alpha typed.");
+        open(&w, CONTENT);
+        change(&w, &typed);
+        assert!(dirty(&w), "the editor's change made the document dirty");
+        editor_writes(&w, &typed);
+        let seen = watcher_saw(&w);
+        let saved = editor_saved(&w);
+        assert!(!dirty(&w), "the editor's write was a save");
+        for result in [&seen, &saved] {
+            assert!(
+                !result
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, ConductorEvent::DiskConflict { .. })),
+                "{:?}",
+                result.events
+            );
+        }
+    }
+
+    /// A conflict says where its block is in N: the container, the top-level
+    /// block, and the path into a list item.
+    #[test]
+    fn a_conflict_says_where_its_block_is_in_n() {
+        let w = world();
+        browser_sets_alpha(&w, "Alpha browser.");
+        disk_changes(&w, &CONTENT.replace("Alpha para.", "Alpha disk."));
+        let regions = conflict_regions(&w);
+        assert_eq!(
+            regions[0].location,
+            Some(crate::protocol::BlockLocation {
+                container: crate::protocol::BlockContainer::Body,
+                index: 0,
+                path: Vec::new(),
+            })
+        );
+
+        let w = world();
+        let (list, items) = list_and_items(&w);
+        let list_index = body_blocks(&w)
+            .iter()
+            .position(|b| *b == list)
+            .expect("the list is in the body");
+        other_channel_sets(&w, item_blocks(&w, items[1])[0], "two browser");
+        disk_changes(&w, &CONTENT.replace("- two", "- two disk"));
+        let regions = conflict_regions(&w);
+        assert_eq!(regions.len(), 1, "{regions:?}");
+        assert_eq!(
+            regions[0].location,
+            Some(crate::protocol::BlockLocation {
+                container: crate::protocol::BlockContainer::Body,
+                index: list_index,
+                path: vec![
+                    crate::protocol::BlockStep::Item(1),
+                    crate::protocol::BlockStep::Block(0)
+                ],
+            })
+        );
+    }
+
     /// A watched delete of a document with unsaved edits (F2.1b).
     fn deleted_under_unsaved_edits() -> (World, CommandResult) {
         let w = world();
@@ -3675,8 +4182,8 @@ mod tests {
     fn a_deleted_file_keeps_its_unsaved_edits_as_a_conflict() {
         let (w, result) = deleted_under_unsaved_edits();
         assert_eq!(conflicts(&w), [FILE]);
-        assert!(conflict_regions(&w).is_empty(), "the whole file");
-        assert_eq!(conflict_events(&result), vec![Vec::<ConflictRegion>::new()]);
+        assert_eq!(conflict_state(&w), Some(ConflictState::WholeFile));
+        assert_eq!(conflict_events(&result), vec![ConflictState::WholeFile]);
         assert!(dirty(&w), "the unsaved edits are kept");
         assert_eq!(
             body_markdown(&w)[0],

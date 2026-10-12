@@ -119,28 +119,138 @@ impl std::fmt::Display for ConflictId {
     }
 }
 
+/// The container of a block in a document (the wire form of
+/// `content::Container`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlockContainer {
+    Slot(String),
+    Unassigned,
+    Body,
+}
+
+/// One step into a quote or a list item (the wire form of
+/// `content::NestedStep`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlockStep {
+    /// Child `n` of a quote or of a list item.
+    Block(usize),
+    /// Item `n` of a list.
+    Item(usize),
+}
+
+/// Where a block is in a document, structurally (the wire form of
+/// `content::Location`, the kind validation diagnostics carry): its container,
+/// the top-level block, and the path into quotes and list items. Each view
+/// finds the block in its own text or page by it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BlockLocation {
+    pub container: BlockContainer,
+    pub index: usize,
+    pub path: Vec<BlockStep>,
+}
+
+impl From<&content::Location> for BlockLocation {
+    fn from(location: &content::Location) -> BlockLocation {
+        BlockLocation {
+            container: match &location.container {
+                content::Container::Slot(name) => BlockContainer::Slot(name.as_str().to_string()),
+                content::Container::Unassigned => BlockContainer::Unassigned,
+                content::Container::Body => BlockContainer::Body,
+            },
+            index: location.index,
+            path: location
+                .path
+                .iter()
+                .map(|step| match step {
+                    content::NestedStep::Block(n) => BlockStep::Block(*n),
+                    content::NestedStep::Item(n) => BlockStep::Item(*n),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<&BlockLocation> for content::Location {
+    fn from(location: &BlockLocation) -> content::Location {
+        content::Location {
+            container: match &location.container {
+                BlockContainer::Slot(name) => {
+                    content::Container::Slot(schema::SlotName::new(name.as_str()))
+                }
+                BlockContainer::Unassigned => content::Container::Unassigned,
+                BlockContainer::Body => content::Container::Body,
+            },
+            index: location.index,
+            path: location
+                .path
+                .iter()
+                .map(|step| match step {
+                    BlockStep::Block(n) => content::NestedStep::Block(*n),
+                    BlockStep::Item(n) => content::NestedStep::Item(*n),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// A region of a file that changed on disk differently from the unsaved
 /// edits of its document (ADR-065 amendment F2): N keeps its version, and
 /// the conflict is on these blocks alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictRegion {
     pub id: ConflictId,
-    /// The containers down to the one the region is in; empty for a region of
-    /// a slot, `unassigned` or the body itself.
+    /// The containers down to the one the region is in, in the merge's terms;
+    /// empty for a region of a slot, `unassigned` or the body itself.
     pub path: Vec<PathStep>,
-    /// Bytes in the file's text.
-    pub range: std::ops::Range<usize>,
+    /// Where the region's (first) block is in N, when it was found; each view
+    /// finds it in its own text by this.
+    pub location: Option<BlockLocation>,
+    /// Bytes in the file's text: where the file's version is.
+    pub disk_range: std::ops::Range<usize>,
     /// The file's version of the region.
     pub disk: String,
 }
 
+/// The state of a document's conflict with its file (ADR-065).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictState {
+    /// The whole file conflicts: there is no base to merge against, the file
+    /// is gone, or the document's structure changed. Resolved by reloading or
+    /// by saving with consent.
+    WholeFile,
+    /// These blocks conflict; each is resolved on its own.
+    Blocks(Vec<ConflictRegion>),
+    /// The conflict has ended (its last block was resolved, or the document
+    /// was reloaded or saved). Only announced, never listed.
+    Resolved,
+}
+
+impl ConflictState {
+    /// The state of a current conflict on `regions` (none: the whole file).
+    pub fn of(regions: Vec<ConflictRegion>) -> ConflictState {
+        if regions.is_empty() {
+            ConflictState::WholeFile
+        } else {
+            ConflictState::Blocks(regions)
+        }
+    }
+}
+
+/// Which version of a conflicting block wins ([`Command::ResolveConflict`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictSide {
+    /// The file's version of the block.
+    Disk,
+    /// The unsaved version (N's).
+    Unsaved,
+}
+
 /// A document in conflict with its file (ADR-065): the file, site-relative,
-/// and the regions in conflict. No regions: the whole file conflicts (there is
-/// no base to merge against, the file is gone, or its structure changed).
+/// and the state of the conflict (never `Resolved`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileConflicts {
     pub file: String,
-    pub regions: Vec<ConflictRegion>,
+    pub state: ConflictState,
 }
 
 /// A region of the editor's text that is not lowered into N yet, because it
@@ -177,6 +287,16 @@ pub enum Command {
     KeepMine {
         path: editorial_types::ContentPath,
         drift_id: DriftId,
+    },
+    /// Resolve one block conflict of a document (ADR-065 amendment F2): take
+    /// the file's version of the blocks, or keep the unsaved version. Either
+    /// way the conflict on those blocks ends; the other conflicts stay. A
+    /// conflict id that is not current, or a whole-document conflict, is
+    /// refused (those are resolved by reloading or by saving with consent).
+    ResolveConflict {
+        path: editorial_types::ContentPath,
+        id: ConflictId,
+        take: ConflictSide,
     },
     /// Editor saved a document (from LSP did_save). When the file holds the
     /// editor's latest text this is a flush of N (held regions are lowered as
@@ -409,14 +529,10 @@ pub enum ConductorEvent {
         file: editorial_types::ContentPath,
         pages: Vec<String>,
     },
-    /// A document with unsaved edits changed on disk: the edits are kept and
-    /// the document is in conflict on `regions` (reported when a region is
-    /// first recorded). No regions: the whole file conflicts. `file` is
-    /// site-relative.
-    DiskConflict {
-        file: String,
-        regions: Vec<ConflictRegion>,
-    },
+    /// A document's conflict with its file changed: it began, its blocks
+    /// changed, or it ended (`Resolved`). The unsaved edits are kept until it
+    /// is resolved. `file` is site-relative.
+    DiskConflict { file: String, state: ConflictState },
     /// Documents were written to disk by a save: what readers see (the
     /// published output) may have changed. `files` are site-relative paths.
     /// Not sent for a refused save or for an edit that was not saved.

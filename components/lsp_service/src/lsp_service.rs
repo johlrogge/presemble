@@ -96,28 +96,79 @@ pub struct PresembleLsp {
 struct Publisher {
     client: Client,
     site_dir: std::path::PathBuf,
+    /// The text of each open document, as the client last sent it.
+    doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
     synced: Arc<Mutex<HashMap<String, Synced>>>,
     conductor: Arc<Mutex<conductor::ConductorClient>>,
 }
 
 impl Publisher {
-    /// Whether the conductor holds unsaved edits for this file that conflict
-    /// with a change on disk. Asked synchronously: the conductor is the source
-    /// of truth and the LSP has no channel for it to push (channel gap 8).
-    async fn has_disk_conflict(&self, uri: &Url) -> bool {
-        let Ok(path) = uri.to_file_path() else {
-            return false;
-        };
-        let Ok(rel) = path.strip_prefix(&self.site_dir) else {
-            return false;
-        };
+    /// The conflict of this file's unsaved edits in the conductor with a change
+    /// on disk: `None` when there is none (or it has been resolved). Asked
+    /// synchronously: the conductor is the source of truth and the LSP has no
+    /// channel for it to push (channel gap 8).
+    async fn disk_conflict(&self, uri: &Url) -> Option<conductor::ConflictState> {
+        let path = uri.to_file_path().ok()?;
+        let rel = path.strip_prefix(&self.site_dir).ok()?;
         let rel = rel.to_string_lossy().replace('\\', "/");
         let cond = self.conductor.lock().await;
         match cond.send(&conductor::Command::GetConflicts) {
-            Ok(conductor::Response::Conflicts(files)) => files.iter().any(|c| c.file == rel),
-            _ => false,
+            Ok(conductor::Response::Conflicts(files)) => {
+                files.into_iter().find(|c| c.file == rel).map(|c| c.state)
+            }
+            _ => None,
         }
+    }
+
+    /// The grammar of the content file behind `uri`, and its schema stem.
+    async fn grammar_for_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
+        let path = uri.to_file_path().ok()?;
+        let site_path = site_path_for(&self.site_dir, &path)?;
+        let cond = self.conductor.lock().await;
+        let stem = match cond.classify(&site_path) {
+            Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
+            Ok(_) => return None, // Not a content file — expected, no need to log
+            Err(e) => {
+                eprintln!("presemble-lsp: classify error for {site_path}: {e}");
+                return None;
+            }
+        };
+        let src = match cond.get_schema_source(&stem) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                eprintln!("presemble-lsp: no schema source for stem '{stem}'");
+                return None;
+            }
+            Err(e) => {
+                eprintln!("presemble-lsp: get_schema_source error for '{stem}': {e}");
+                return None;
+            }
+        };
+        let grammar = match schema::parse_schema(&src) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("presemble-lsp: schema parse error for '{stem}': {e}");
+                return None;
+            }
+        };
+        Some((grammar, stem))
+    }
+
+    /// The open buffer's text for `uri`, and its document when it parses.
+    async fn buffer_doc(&self, uri: &Url) -> (String, Option<content::Document>) {
+        let text = self
+            .doc_sources
+            .lock()
+            .await
+            .get(&uri.to_string())
+            .cloned()
+            .unwrap_or_default();
+        let doc = match self.grammar_for_uri(uri).await {
+            Some((grammar, _)) => content::parse_and_assign(&text, &grammar).ok(),
+            None => None,
+        };
+        (text, doc)
     }
 
     /// Keep what the conductor answered, and show it.
@@ -162,9 +213,17 @@ impl Publisher {
             diags.extend(buffer::sync_diagnostics(synced));
         }
         // ADR-065: unsaved edits that conflict with this file on disk are never
-        // discarded automatically; tell the author where they stand.
-        if self.has_disk_conflict(&uri).await {
-            diags.push(buffer::conflict_diagnostic());
+        // discarded automatically; tell the author where they stand, on each
+        // block that conflicts (found in the buffer by its location in N). A
+        // resolved conflict is no longer listed, so its diagnostics go.
+        let conflict = self.disk_conflict(&uri).await;
+        if conflict.is_some() {
+            let (text, doc) = self.buffer_doc(&uri).await;
+            let buffer = buffer::BufferDoc {
+                text: &text,
+                doc: doc.as_ref(),
+            };
+            diags.extend(buffer::conflict_diagnostics(conflict.as_ref(), &buffer));
         }
         self.client.publish_diagnostics(uri, diags, None).await;
     }
@@ -190,10 +249,12 @@ impl PresembleLsp {
         let repo = site_repository::SiteRepository::new(site_dir.clone());
         let conductor = Arc::new(Mutex::new(conductor));
         let doc_diagnostics = Arc::new(Mutex::new(HashMap::new()));
+        let doc_sources = Arc::new(Mutex::new(HashMap::new()));
         let synced = Arc::new(Mutex::new(HashMap::new()));
         let publisher = Publisher {
             client: client.clone(),
             site_dir: site_dir.clone(),
+            doc_sources: doc_sources.clone(),
             doc_diagnostics: doc_diagnostics.clone(),
             synced: synced.clone(),
             conductor: conductor.clone(),
@@ -202,7 +263,7 @@ impl PresembleLsp {
             client,
             repo,
             site_dir,
-            doc_sources: Arc::new(Mutex::new(HashMap::new())),
+            doc_sources,
             doc_diagnostics,
             sender: buffer::Sender::start(ConductorLink(conductor.clone())),
             conductor,
@@ -274,36 +335,7 @@ impl PresembleLsp {
     }
 
     async fn grammar_for_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
-        let path = uri.to_file_path().ok()?;
-        let site_path = site_path_for(&self.site_dir, &path)?;
-        let cond = self.conductor.lock().await;
-        let stem = match cond.classify(&site_path) {
-            Ok(conductor::FileClassification::Content { schema_stem }) => schema_stem,
-            Ok(_) => return None, // Not a content file — expected, no need to log
-            Err(e) => {
-                eprintln!("presemble-lsp: classify error for {site_path}: {e}");
-                return None;
-            }
-        };
-        let src = match cond.get_schema_source(&stem) {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                eprintln!("presemble-lsp: no schema source for stem '{stem}'");
-                return None;
-            }
-            Err(e) => {
-                eprintln!("presemble-lsp: get_schema_source error for '{stem}': {e}");
-                return None;
-            }
-        };
-        let grammar = match schema::parse_schema(&src) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("presemble-lsp: schema parse error for '{stem}': {e}");
-                return None;
-            }
-        };
-        Some((grammar, stem))
+        self.publisher.grammar_for_uri(uri).await
     }
 
     async fn grammar_for_template_uri(&self, uri: &Url) -> Option<(schema::Grammar, String)> {
@@ -375,10 +407,10 @@ impl PresembleLsp {
         cond.get_document_text(&site_path).ok().flatten()
     }
 
-    /// Whether the conductor holds unsaved edits for this file that conflict
-    /// with a change on disk.
-    async fn has_disk_conflict(&self, uri: &Url) -> bool {
-        self.publisher.has_disk_conflict(uri).await
+    /// The conflict of this file's unsaved edits with a change on disk, if any
+    /// (see [`Publisher::disk_conflict`]).
+    async fn disk_conflict(&self, uri: &Url) -> Option<conductor::ConflictState> {
+        self.publisher.disk_conflict(uri).await
     }
 
     async fn validate_and_publish(&self, uri: Url, src: String) {
@@ -660,6 +692,7 @@ impl LanguageServer for PresembleLsp {
                         buffer::KEEP_MINE.to_string(),
                         buffer::RELOAD_DOCUMENT.to_string(),
                         buffer::OVERWRITE_FILE.to_string(),
+                        buffer::RESOLVE_CONFLICT.to_string(),
                     ],
                     ..Default::default()
                 }),
@@ -1198,16 +1231,25 @@ impl LanguageServer for PresembleLsp {
                 }));
             }
             // While the document is in conflict (ADR-065), both ways out are
-            // offered wherever the cursor is.
-            if let Some(rel) = self.rel_path(uri) {
-                let conflicted = self.has_disk_conflict(uri).await;
+            // offered: anywhere for the whole file, on its block for a block.
+            if let Some(rel) = self.rel_path(uri)
+                && let Some(conflict) = self.disk_conflict(uri).await
+            {
+                let doc = match self.grammar_for_uri(uri).await {
+                    Some((grammar, _)) => content::parse_and_assign(&src, &grammar).ok(),
+                    None => None,
+                };
+                let buffer = buffer::BufferDoc {
+                    text: &src,
+                    doc: doc.as_ref(),
+                };
                 actions.extend(buffer::conflict_offer(
                     &request_range,
-                    conflicted,
+                    Some(&conflict),
                     uri,
                     &rel,
                     version,
-                    &src,
+                    &buffer,
                     &file,
                 ));
             }
@@ -1346,6 +1388,31 @@ impl LanguageServer for PresembleLsp {
                     return Ok(None);
                 };
                 self.queue_and_republish(&rel, conductor::Command::ReloadDocument { path });
+            }
+            // One block conflict ends: the file's version, or the unsaved one.
+            // The conductor resolves one block; taking the file's version also
+            // replaces the block in the buffer, once the conductor has taken it.
+            buffer::RESOLVE_CONFLICT => {
+                let Some(resolution) = buffer::parse_resolution(&params.arguments) else {
+                    return Ok(None);
+                };
+                let Ok(uri) = Url::from_file_path(self.site_dir.join(&resolution.rel)) else {
+                    return Ok(None);
+                };
+                let client = self.client.clone();
+                let publisher = self.publisher.clone();
+                let handle = self.handle.clone();
+                let key = uri.to_string();
+                buffer::resolve_conflict(&self.sender, &key, resolution, move |edit| {
+                    handle.spawn(async move {
+                        if let Some(edit) = edit
+                            && let Err(e) = client.apply_edit(edit).await
+                        {
+                            eprintln!("presemble-lsp: the block edit was not applied: {e}");
+                        }
+                        publisher.publish_content_diagnostics(uri).await;
+                    });
+                });
             }
             // The unsaved edits win; the user said which file to overwrite.
             buffer::OVERWRITE_FILE => {

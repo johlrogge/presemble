@@ -49,6 +49,6 @@ pub use transform::{
 };
 pub use unfinished::{Hit, Unfinished, unfinished_markup};
 pub use validator::{
-    Location, NestedStep, Severity, ValidationDiagnostic, ValidationResult, validate,
-    validate_source,
+    Location, NestedStep, Severity, ValidationDiagnostic, ValidationResult, span_of_location,
+    validate, validate_source,
 };

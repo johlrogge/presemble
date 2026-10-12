@@ -183,10 +183,16 @@ impl DirtyDocs {
     }
 
     /// The document's last conflict is resolved: it is an ordinary unsaved
-    /// document again.
-    pub fn clear_conflict(&mut self, path: &Path) {
-        if let Some(state) = self.docs.get_mut(path) {
-            *state = Unsaved::Edited;
+    /// document again. Returns whether it was in conflict (the end to
+    /// announce).
+    #[must_use]
+    pub fn clear_conflict(&mut self, path: &Path) -> bool {
+        match self.docs.get_mut(path) {
+            Some(state @ Unsaved::ConflictsWithDisk { .. }) => {
+                *state = Unsaved::Edited;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -200,9 +206,14 @@ impl DirtyDocs {
     }
 
     /// Remove a document from the dirty set (after save or reload), clearing
-    /// any conflict with it.
-    pub fn clear(&mut self, path: &Path) {
-        self.docs.remove(path);
+    /// any conflict with it. Returns whether it was in conflict (the end to
+    /// announce).
+    #[must_use]
+    pub fn clear(&mut self, path: &Path) -> bool {
+        matches!(
+            self.docs.remove(path),
+            Some(Unsaved::ConflictsWithDisk { .. })
+        )
     }
 
     /// Check whether a document is dirty (edited or in conflict).
@@ -265,7 +276,10 @@ mod tests {
     fn mark_then_clear_then_not_contains() {
         let mut dirty = DirtyDocs::new();
         dirty.mark("content/post/hello.md");
-        dirty.clear(Path::new("content/post/hello.md"));
+        assert!(
+            !dirty.clear(Path::new("content/post/hello.md")),
+            "it was not in conflict"
+        );
         assert!(!dirty.contains(Path::new("content/post/hello.md")));
     }
 
@@ -349,9 +363,20 @@ mod tests {
     fn clear_clears_a_conflict() {
         let mut dirty = DirtyDocs::new();
         dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH, vec![]);
-        dirty.clear(Path::new("content/a.md"));
+        assert!(dirty.clear(Path::new("content/a.md")), "it was in conflict");
         assert!(!dirty.contains(Path::new("content/a.md")));
         assert!(!dirty.is_conflicted(Path::new("content/a.md")));
         assert_eq!(dirty.conflicts().count(), 0);
+    }
+
+    #[test]
+    fn clear_conflict_says_whether_there_was_one() {
+        let mut dirty = DirtyDocs::new();
+        dirty.mark("content/a.md");
+        assert!(!dirty.clear_conflict(Path::new("content/a.md")));
+        dirty.mark_conflict("content/a.md", SystemTime::UNIX_EPOCH, vec![]);
+        assert!(dirty.clear_conflict(Path::new("content/a.md")));
+        assert!(dirty.contains(Path::new("content/a.md")), "still unsaved");
+        assert!(!dirty.is_conflicted(Path::new("content/a.md")));
     }
 }

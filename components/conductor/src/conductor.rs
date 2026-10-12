@@ -106,6 +106,15 @@ fn saved_event<'a>(files: impl IntoIterator<Item = &'a PathBuf>) -> ConductorEve
     ConductorEvent::DocumentsSaved { files }
 }
 
+/// The event that tells subscribers the conflict of the document at
+/// site-relative `rel` with its file has ended.
+fn conflict_resolved(rel: &Path) -> ConductorEvent {
+    ConductorEvent::DiskConflict {
+        file: rel.to_string_lossy().to_string(),
+        state: crate::protocol::ConflictState::Resolved,
+    }
+}
+
 impl CommandResult {
     fn ok() -> Self {
         Self {
@@ -788,9 +797,12 @@ impl Conductor {
 
     /// The document at site-relative `rel` has no unsaved edits any more (it
     /// was saved, reloaded or settled): clear its dirty mark, any conflict,
-    /// and the base of its edits.
-    fn clear_unsaved(&self, rel: &Path) {
-        self.dirty_docs
+    /// and the base of its edits. Returns the end of its conflict to announce,
+    /// if it was in one.
+    #[must_use]
+    fn clear_unsaved(&self, rel: &Path) -> Option<ConductorEvent> {
+        let was_conflicted = self
+            .dirty_docs
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear(rel);
@@ -798,6 +810,7 @@ impl Conductor {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear(rel);
+        was_conflicted.then(|| conflict_resolved(rel))
     }
 
     /// Write a document's text and remember the resulting file as the base of
@@ -863,23 +876,76 @@ impl Conductor {
                 .record_disk_conflict(rel, Vec::new())
                 .into_iter()
                 .collect(),
-            editor_sync::DiskMerge::Merged {
-                mut events,
-                regions,
-            } => {
-                if regions.is_empty() {
-                    // Nothing conflicts (any more): the document is an
-                    // ordinary unsaved document, with the merged blocks in N.
-                    self.dirty_docs
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clear_conflict(rel);
-                } else {
-                    events.extend(self.record_disk_conflict(rel, regions));
-                }
-                events
+            editor_sync::DiskMerge::Merged { events, regions } => {
+                self.record_merge(rel, events, regions)
             }
         })
+    }
+
+    /// Record what a block-by-block merge came to: the remaining conflicts
+    /// (announced when their set changed), or, with none left, an ordinary
+    /// unsaved document with the merged blocks in N. Returns `events` with the
+    /// announcement.
+    fn record_merge(
+        &self,
+        rel: &Path,
+        mut events: Vec<ConductorEvent>,
+        regions: Vec<crate::protocol::ConflictRegion>,
+    ) -> Vec<ConductorEvent> {
+        if regions.is_empty() {
+            let ended = self
+                .dirty_docs
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear_conflict(rel);
+            events.extend(ended.then(|| conflict_resolved(rel)));
+        } else {
+            events.extend(self.record_disk_conflict(rel, regions));
+        }
+        events
+    }
+
+    /// Resolve the block conflict `id` of the document at `path` by taking
+    /// `take`'s version ([`Command::ResolveConflict`]). The other conflicts
+    /// of the document stay; the changed set is announced as any change of it
+    /// is, and the last resolution leaves an ordinary unsaved document (its
+    /// end announced as `Resolved`).
+    fn resolve_conflict(
+        &self,
+        path: &editorial_types::ContentPath,
+        id: crate::protocol::ConflictId,
+        take: crate::protocol::ConflictSide,
+    ) -> CommandResult {
+        let rel = PathBuf::from(path.as_str());
+        let current = self
+            .dirty_docs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .conflict_regions(&rel)
+            .map(|regions| regions.iter().map(|r| r.id).collect::<Vec<_>>());
+        match current {
+            None => return CommandResult::error(format!("{path} is not in conflict")),
+            Some(ids) if ids.is_empty() => {
+                return CommandResult::error(format!(
+                    "{path} conflicts as a whole: reload it, or save it to overwrite the file"
+                ));
+            }
+            Some(ids) if !ids.contains(&id) => {
+                return CommandResult::error(
+                    "the conflict has changed; look at the current ones".to_string(),
+                );
+            }
+            Some(_) => {}
+        }
+        match self.resolve_disk_conflict(&rel, id, take) {
+            Ok(editor_sync::DiskMerge::Merged { events, regions }) => {
+                CommandResult::ok_with_events(self.record_merge(&rel, events, regions))
+            }
+            Ok(editor_sync::DiskMerge::WholeDocument) => CommandResult::error(format!(
+                "{path} conflicts as a whole: reload it, or save it to overwrite the file"
+            )),
+            Err(e) => CommandResult::error(e),
+        }
     }
 
     /// Record that the document at site-relative `rel` conflicts with its file
@@ -900,7 +966,7 @@ impl Conductor {
             .mark_conflict(rel.to_path_buf(), disk_mtime, regions.clone())
             .then(|| ConductorEvent::DiskConflict {
                 file: rel.to_string_lossy().to_string(),
-                regions,
+                state: crate::protocol::ConflictState::of(regions),
             })
     }
 
@@ -4106,6 +4172,7 @@ impl Conductor {
             Command::EditorChanged { path, text } => self.editor_changed(path, text),
             Command::EditorClosed { path } => self.editor_closed(&path),
             Command::KeepMine { path, drift_id } => self.keep_mine(path, drift_id),
+            Command::ResolveConflict { path, id, take } => self.resolve_conflict(&path, id, take),
             Command::DocumentSaved { path } => {
                 if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
                     return CommandResult::error(format!("{path}: {e}"));
@@ -4230,7 +4297,7 @@ impl Conductor {
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .contains(&rel);
-                self.clear_unsaved(&rel);
+                let ended = self.clear_unsaved(&rel);
                 self.populate_node_store(&[rel]);
                 // An editor of it is given what N has now.
                 self.editor_follows_reload(&path);
@@ -4239,7 +4306,9 @@ impl Conductor {
                 // file change.
                 let (rebuilt_pages, failed_pages, new_errors) =
                     self.build_all_pages(template::OutputMode::Editorial);
-                let events = self.finalize_render(rebuilt_pages, failed_pages, new_errors, false);
+                let mut events =
+                    self.finalize_render(rebuilt_pages, failed_pages, new_errors, false);
+                events.extend(ended);
                 CommandResult {
                     response: Response::Reloaded {
                         discarded: was_dirty,
@@ -4396,7 +4465,9 @@ impl Conductor {
                     .conflicts()
                     .map(|p| crate::protocol::FileConflicts {
                         file: p.to_string_lossy().to_string(),
-                        regions: dirty.conflict_regions(p).unwrap_or_default().to_vec(),
+                        state: crate::protocol::ConflictState::of(
+                            dirty.conflict_regions(p).unwrap_or_default().to_vec(),
+                        ),
                     })
                     .collect();
                 files.sort_by(|a, b| a.file.cmp(&b.file));
@@ -4453,8 +4524,12 @@ impl Conductor {
                     if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
                         return CommandResult::error(format!("write error: {e}"));
                     }
-                    self.clear_unsaved(&rel_path);
-                    return CommandResult::ok_with_events(vec![saved_event([&rel_path])]);
+                    let ended = self.clear_unsaved(&rel_path);
+                    return CommandResult::ok_with_events(
+                        std::iter::once(saved_event([&rel_path]))
+                            .chain(ended)
+                            .collect(),
+                    );
                 }
                 CommandResult::error(format!("buffer not dirty: {path}"))
             }
@@ -4503,8 +4578,10 @@ impl Conductor {
                 // their conflict) and are reported after the remaining
                 // buffers have been saved.
                 let mut failures: Vec<String> = Vec::new();
-                // What was written to disk, for `DocumentsSaved`.
+                // What was written to disk, for `DocumentsSaved`, and the
+                // conflicts that ended with it.
                 let mut saved: Vec<PathBuf> = Vec::new();
+                let mut ended: Vec<ConductorEvent> = Vec::new();
                 for (rel_path, state) in &ned_docs {
                     let keep_dirty = |dirty: &RwLock<crate::dirty::DirtyDocs>| {
                         dirty
@@ -4550,6 +4627,10 @@ impl Conductor {
                         .write()
                         .unwrap_or_else(|e| e.into_inner())
                         .clear(rel_path);
+                    // A conflict saved over with consent has ended.
+                    if matches!(state, crate::dirty::Unsaved::ConflictsWithDisk { .. }) {
+                        ended.push(conflict_resolved(rel_path));
+                    }
                     saved.push(rel_path.clone());
                 }
 
@@ -4559,7 +4640,11 @@ impl Conductor {
                 if saved.is_empty() {
                     return CommandResult::ok();
                 }
-                CommandResult::ok_with_events(vec![saved_event(saved.iter())])
+                CommandResult::ok_with_events(
+                    std::iter::once(saved_event(saved.iter()))
+                        .chain(ended)
+                        .collect(),
+                )
             }
             Command::GetNedSuggestionFiles => {
                 let suggestions = self

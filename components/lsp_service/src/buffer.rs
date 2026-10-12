@@ -6,7 +6,9 @@
 //!
 //! Positions are LSP positions: lines, and UTF-16 code units in a line.
 
-use conductor::{Drift, DriftId, DriftKind, HeldRegion};
+use conductor::{
+    ConflictId, ConflictRegion, ConflictSide, ConflictState, Drift, DriftId, DriftKind, HeldRegion,
+};
 use content::sync::BufferEdit;
 use serde_json::json;
 use tower_lsp::lsp_types::*;
@@ -148,22 +150,210 @@ impl Drop for Sender {
     }
 }
 
-/// The conflict actions to offer for a code action request: both, wherever the
-/// cursor is, while the document is in conflict with the file on disk.
+/// What an editor knows of its document: the buffer's text and, when it
+/// parses, the document read from it (to find blocks by their location).
+pub struct BufferDoc<'a> {
+    pub text: &'a str,
+    pub doc: Option<&'a content::Document>,
+}
+
+/// The conflict actions to offer for a code action request, given the
+/// document's conflict with the file on disk (`None`: not in conflict). A
+/// whole-file conflict offers its two ways out wherever the cursor is; a block
+/// conflict offers its two on its block.
 pub fn conflict_offer(
-    _request: &Range,
-    conflicted: bool,
+    request: &Range,
+    conflict: Option<&ConflictState>,
     uri: &Url,
     rel: &str,
     version: i32,
-    buffer: &str,
+    buffer: &BufferDoc,
     file: &str,
 ) -> Vec<CodeActionOrCommand> {
-    if conflicted {
-        conflict_actions(uri, rel, version, buffer, file)
-    } else {
-        Vec::new()
+    match conflict {
+        None | Some(ConflictState::Resolved) => Vec::new(),
+        Some(ConflictState::WholeFile) => conflict_actions(uri, rel, version, buffer.text, file),
+        Some(ConflictState::Blocks(regions)) => regions
+            .iter()
+            .filter_map(|region| {
+                let range = region_range(buffer, region);
+                overlaps(&range, request).then(|| region_actions(uri, rel, version, range, region))
+            })
+            .flatten()
+            .collect(),
     }
+}
+
+/// The diagnostics for the document's conflict with the file on disk
+/// (`None` or `Resolved`: none). A whole-file conflict is one warning on the
+/// first line; a block conflict is a warning on its block in the buffer.
+pub fn conflict_diagnostics(
+    conflict: Option<&ConflictState>,
+    buffer: &BufferDoc,
+) -> Vec<Diagnostic> {
+    match conflict {
+        None | Some(ConflictState::Resolved) => Vec::new(),
+        Some(ConflictState::WholeFile) => vec![conflict_diagnostic()],
+        Some(ConflictState::Blocks(regions)) => regions
+            .iter()
+            .map(|region| Diagnostic {
+                range: region_range(buffer, region),
+                severity: Some(DiagnosticSeverity::WARNING),
+                source: Some("presemble".to_string()),
+                message: "This block changed on disk differently from the unsaved edits. Take the file's version of this block, or keep the unsaved version."
+                    .to_string(),
+                ..Default::default()
+            })
+            .collect(),
+    }
+}
+
+/// Where a conflict's block is in the buffer: the block its location (in N)
+/// names in the buffer's document, or the nearest one on its path, or the
+/// first line.
+pub fn region_range(buffer: &BufferDoc, region: &ConflictRegion) -> Range {
+    let (Some(doc), Some(location)) = (buffer.doc, &region.location) else {
+        return Range::default();
+    };
+    let mut location = content::Location::from(location);
+    loop {
+        if let Some(span) = content::span_of_location(doc, &location)
+            && let Some(slice) = buffer.text.get(span.start..span.end)
+        {
+            // Without the line break the parser leaves behind a block (the
+            // region's text, like the file's version of it, is trimmed).
+            let start = span.start + (slice.len() - slice.trim_start().len());
+            return lsp_range(buffer.text, &(start..start + slice.trim().len()));
+        }
+        if location.path.pop().is_none() {
+            return Range::default();
+        }
+    }
+}
+
+/// The buffer edit that comes with taking the file's version of a block: its
+/// range in the buffer becomes the file's text of it. Sent as the last
+/// argument of the command, and applied once the conductor has taken it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockEdit {
+    pub uri: Url,
+    pub version: i32,
+    pub range: Range,
+    pub text: String,
+}
+
+impl BlockEdit {
+    fn to_json(&self) -> serde_json::Value {
+        json!({
+            "uri": self.uri.to_string(),
+            "version": self.version,
+            "range": serde_json::to_value(self.range).unwrap_or_default(),
+            "text": self.text,
+        })
+    }
+
+    fn from_json(value: &serde_json::Value) -> Option<BlockEdit> {
+        Some(BlockEdit {
+            uri: Url::parse(value.get("uri")?.as_str()?).ok()?,
+            version: i32::try_from(value.get("version")?.as_i64()?).ok()?,
+            range: serde_json::from_value(value.get("range")?.clone()).ok()?,
+            text: value.get("text")?.as_str()?.to_string(),
+        })
+    }
+}
+
+/// The two ways out of a block conflict: each resolves that block alone, in
+/// the conductor (`rel` is the site-relative path of the file). Taking the
+/// file's version also carries the edit of the block in the buffer.
+fn region_actions(
+    uri: &Url,
+    rel: &str,
+    version: i32,
+    range: Range,
+    region: &ConflictRegion,
+) -> Vec<CodeActionOrCommand> {
+    let edit = BlockEdit {
+        uri: uri.clone(),
+        version,
+        range,
+        text: region.disk.clone(),
+    };
+    [
+        (TAKE_FILE_BLOCK, SIDE_DISK, Some(edit)),
+        (KEEP_UNSAVED_BLOCK, SIDE_UNSAVED, None),
+    ]
+    .into_iter()
+    .map(|(title, side, edit)| {
+        let mut arguments = vec![json!(rel), json!(region.id.to_string()), json!(side)];
+        if let Some(edit) = edit {
+            arguments.push(edit.to_json());
+        }
+        CodeActionOrCommand::CodeAction(CodeAction {
+            title: title.to_string(),
+            kind: Some(CodeActionKind::QUICKFIX),
+            command: Some(command(title, RESOLVE_CONFLICT, arguments)),
+            ..Default::default()
+        })
+    })
+    .collect()
+}
+
+/// A block resolution read from the arguments of a [`RESOLVE_CONFLICT`]
+/// command: the site-relative file, the command for the conductor, and the
+/// buffer edit to apply once it has been taken (taking the file's version).
+pub struct Resolution {
+    pub rel: String,
+    pub command: conductor::Command,
+    pub edit: Option<BlockEdit>,
+}
+
+/// The resolution the arguments of a [`RESOLVE_CONFLICT`] command spell.
+pub fn parse_resolution(arguments: &[serde_json::Value]) -> Option<Resolution> {
+    let text = |i: usize| arguments.get(i).and_then(|v| v.as_str());
+    let rel = text(0)?.to_string();
+    let path = conductor::editorial_types::ContentPath::parse(&rel).ok()?;
+    let id = parse_conflict_id(text(1)?)?;
+    let take = match text(2)? {
+        SIDE_DISK => ConflictSide::Disk,
+        SIDE_UNSAVED => ConflictSide::Unsaved,
+        _ => return None,
+    };
+    let edit = arguments.get(3).and_then(BlockEdit::from_json);
+    Some(Resolution {
+        rel,
+        command: conductor::Command::ResolveConflict { path, id, take },
+        edit,
+    })
+}
+
+/// Queue `resolution` for the conductor; when it has answered, `then` gets
+/// the buffer edit to apply: the block's file version, only once the
+/// conductor has taken it (so N holds that text when the edit reaches it as a
+/// change, and it lowers to nothing). `None` when there is nothing to apply.
+pub fn resolve_conflict(
+    sender: &Sender,
+    key: &str,
+    resolution: Resolution,
+    then: impl FnOnce(Option<WorkspaceEdit>) + Send + 'static,
+) {
+    let edit = resolution.edit;
+    sender.push(
+        key,
+        resolution.command,
+        Box::new(move |reply| {
+            let taken = matches!(reply, Ok(conductor::Response::Ok));
+            then(edit.filter(|_| taken).map(|edit| {
+                versioned_edit(
+                    &edit.uri,
+                    edit.version,
+                    vec![TextEdit {
+                        range: edit.range,
+                        new_text: edit.text,
+                    }],
+                )
+            }))
+        }),
+    );
 }
 
 // ── What the conductor answered ─────────────────────────────────────────────
@@ -182,6 +372,7 @@ pub struct Synced {
 pub const KEEP_MINE: &str = "presemble.keepMine";
 pub const RELOAD_DOCUMENT: &str = "presemble.reloadDocument";
 pub const OVERWRITE_FILE: &str = "presemble.overwriteFile";
+pub const RESOLVE_CONFLICT: &str = "presemble.resolveConflict";
 
 /// The titles of the code actions.
 pub const TAKE_CURRENT: &str = "Take the current version";
@@ -189,6 +380,12 @@ pub const KEEP_MINE_TITLE: &str = "Keep mine";
 pub const TAKE_FILE: &str = "Take the file on disk (discard unsaved edits)";
 pub const KEEP_EDITS: &str = "Keep the unsaved edits (overwrite the file)";
 pub const MATCH_FILE: &str = "Match the file on disk";
+pub const TAKE_FILE_BLOCK: &str = "Take the file's version of this block";
+pub const KEEP_UNSAVED_BLOCK: &str = "Keep the unsaved version";
+
+/// The side a [`RESOLVE_CONFLICT`] command takes, as spelled in its arguments.
+pub const SIDE_DISK: &str = "disk";
+pub const SIDE_UNSAVED: &str = "unsaved";
 
 /// The LSP range of the bytes `range` of `text`.
 pub fn lsp_range(text: &str, range: &std::ops::Range<usize>) -> Range {
@@ -309,6 +506,11 @@ pub fn sync_actions(uri: &Url, synced: &Synced, request: &Range) -> Vec<CodeActi
         }));
     }
     actions
+}
+
+/// The conflict id spelled in a command argument (`ConflictId`'s `Display`).
+pub fn parse_conflict_id(spelled: &str) -> Option<ConflictId> {
+    u64::from_str_radix(spelled, 16).ok().map(ConflictId)
 }
 
 /// The drift id spelled in a command argument (`DriftId`'s `Display`).
@@ -643,14 +845,18 @@ mod tests {
             start: Position { line, character: 0 },
             end: Position { line, character: 0 },
         };
+        let buffer = BufferDoc {
+            text: "mine\n",
+            doc: None,
+        };
         for line in [0, 1, 7, 400] {
             let actions = conflict_offer(
                 &at(line),
-                true,
+                Some(&ConflictState::WholeFile),
                 &uri(),
                 "content/post/a.md",
                 3,
-                "mine\n",
+                &buffer,
                 "disk\n",
             );
             assert_eq!(
@@ -663,11 +869,11 @@ mod tests {
         assert!(
             conflict_offer(
                 &at(0),
-                false,
+                None,
                 &uri(),
                 "content/post/a.md",
                 3,
-                "mine\n",
+                &buffer,
                 "disk\n"
             )
             .is_empty()
@@ -869,6 +1075,348 @@ mod tests {
             command_of(&actions[1]).arguments.as_deref(),
             Some(&[json!("content/post/a.md")][..])
         );
+    }
+
+    /// A block conflict of `file` on the body's block `index` (in N): the
+    /// paragraph "Beta disk.".
+    fn region(file: &str, index: usize) -> ConflictRegion {
+        let start = file.find("Beta disk.").expect("the block");
+        ConflictRegion {
+            id: ConflictId(0xab),
+            path: Vec::new(),
+            location: Some(conductor::BlockLocation {
+                container: conductor::BlockContainer::Body,
+                index,
+                path: Vec::new(),
+            }),
+            disk_range: start..start + "Beta disk.".len(),
+            disk: "Beta disk.".to_string(),
+        }
+    }
+
+    /// The document of a buffer, read with the post grammar.
+    fn read(buffer: &str) -> content::Document {
+        content::parse_and_assign(buffer, &grammar()).expect("the buffer parses")
+    }
+
+    fn blocks(regions: Vec<ConflictRegion>) -> ConflictState {
+        ConflictState::Blocks(regions)
+    }
+
+    #[test]
+    fn a_conflict_region_becomes_a_diagnostic_with_two_actions() {
+        let file = "# Title\n\n----\n\nAlpha.\n\nBeta disk.\n";
+        let buffer = "# Title\n\n----\n\nAlpha.\n\nBeta mine.\n";
+        let doc = read(buffer);
+        let buffer = BufferDoc {
+            text: buffer,
+            doc: Some(&doc),
+        };
+        let state = blocks(vec![region(file, 1)]);
+        let regions = Some(&state);
+        let diagnostics = conflict_diagnostics(regions, &buffer);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let at = Range {
+            start: Position {
+                line: 6,
+                character: 0,
+            },
+            end: Position {
+                line: 6,
+                character: 10,
+            },
+        };
+        assert_eq!(diagnostics[0].range, at);
+        assert_eq!(diagnostics[0].severity, Some(DiagnosticSeverity::WARNING));
+
+        // Two ways out, on the block.
+        let actions = conflict_offer(&at, regions, &uri(), "content/post/a.md", 3, &buffer, file);
+        assert_eq!(
+            actions.iter().map(title).collect::<Vec<_>>(),
+            [TAKE_FILE_BLOCK, KEEP_UNSAVED_BLOCK]
+        );
+        for (action, side) in actions.iter().zip([SIDE_DISK, SIDE_UNSAVED]) {
+            let command = command_of(action);
+            assert_eq!(command.command, RESOLVE_CONFLICT);
+            let arguments = command.arguments.clone().unwrap_or_default();
+            assert_eq!(
+                arguments[..3],
+                [
+                    json!("content/post/a.md"),
+                    json!("00000000000000ab"),
+                    json!(side)
+                ]
+            );
+        }
+        assert_eq!(
+            parse_conflict_id("00000000000000ab"),
+            Some(ConflictId(0xab))
+        );
+
+        // Away from the block: nothing.
+        let elsewhere = Range::default();
+        assert!(
+            conflict_offer(
+                &elsewhere,
+                regions,
+                &uri(),
+                "content/post/a.md",
+                3,
+                &buffer,
+                file
+            )
+            .is_empty()
+        );
+    }
+
+    /// The buffer has a paragraph above the conflicted block that the file
+    /// does not: the conflict still lands on its own block in the buffer, not
+    /// where the block is in the file.
+    #[test]
+    fn a_conflict_lands_on_its_block_in_the_buffer_when_blocks_above_differ() {
+        let file = "# Title\n\n----\n\nAlpha.\n\nBeta disk.\n";
+        let text = "# Title\n\n----\n\nAlpha.\n\nAdded above.\n\nBeta mine.\n";
+        let doc = read(text);
+        let buffer = BufferDoc {
+            text,
+            doc: Some(&doc),
+        };
+        let state = blocks(vec![region(file, 2)]);
+        let diagnostics = conflict_diagnostics(Some(&state), &buffer);
+        assert_eq!(
+            diagnostics.iter().map(|d| d.range).collect::<Vec<_>>(),
+            [Range {
+                start: Position {
+                    line: 8,
+                    character: 0
+                },
+                end: Position {
+                    line: 8,
+                    character: 10
+                },
+            }],
+            "exactly the block \"Beta mine.\""
+        );
+    }
+
+    /// A location the buffer has no block for (it no longer parses into one):
+    /// the nearest block on its path, or else the first line.
+    #[test]
+    fn a_conflict_without_its_block_in_the_buffer_falls_back() {
+        let file = "# Title\n\n----\n\n> Alpha.\n>\n> Beta disk.\n";
+        let text = "# Title\n\n----\n\n> Alpha.\n";
+        let doc = read(text);
+        let buffer = BufferDoc {
+            text,
+            doc: Some(&doc),
+        };
+        let mut nested = region(file, 0);
+        nested.location = Some(conductor::BlockLocation {
+            container: conductor::BlockContainer::Body,
+            index: 0,
+            path: vec![conductor::BlockStep::Block(1)],
+        });
+        // The quote, the nearest block on the way.
+        assert_eq!(
+            region_range(&buffer, &nested).start,
+            Position {
+                line: 4,
+                character: 0
+            }
+        );
+        // No document (the buffer does not parse), or no location: line 0.
+        let unparsed = BufferDoc { text, doc: None };
+        assert_eq!(region_range(&unparsed, &nested), Range::default());
+        nested.location = None;
+        assert_eq!(region_range(&buffer, &nested), Range::default());
+    }
+
+    /// GUARD: a whole-document conflict keeps the line-0 diagnostic and its two
+    /// ways out (reload, or save with consent).
+    #[test]
+    fn a_whole_document_conflict_keeps_its_actions() {
+        let buffer = BufferDoc {
+            text: "mine\n",
+            doc: None,
+        };
+        let diagnostics = conflict_diagnostics(Some(&ConflictState::WholeFile), &buffer);
+        assert_eq!(diagnostics, vec![conflict_diagnostic()]);
+        let actions = conflict_offer(
+            &Range::default(),
+            Some(&ConflictState::WholeFile),
+            &uri(),
+            "content/post/a.md",
+            3,
+            &buffer,
+            "disk\n",
+        );
+        assert_eq!(
+            actions.iter().map(title).collect::<Vec<_>>(),
+            [TAKE_FILE, KEEP_EDITS]
+        );
+        assert!(conflict_diagnostics(None, &buffer).is_empty());
+    }
+
+    /// A resolved conflict leaves no diagnostics and no actions behind.
+    #[test]
+    fn resolved_clears_the_conflict_diagnostics() {
+        let buffer = BufferDoc {
+            text: "mine\n",
+            doc: None,
+        };
+        assert!(conflict_diagnostics(Some(&ConflictState::Resolved), &buffer).is_empty());
+        assert!(
+            conflict_offer(
+                &Range::default(),
+                Some(&ConflictState::Resolved),
+                &uri(),
+                "content/post/a.md",
+                3,
+                &buffer,
+                "disk\n",
+            )
+            .is_empty()
+        );
+    }
+
+    /// A conductor that answers at once and logs what it is sent.
+    struct Logged(Arc<Mutex<Vec<String>>>);
+
+    impl Link for Logged {
+        fn send(&mut self, cmd: &conductor::Command) -> Result<conductor::Response, String> {
+            self.0.lock().unwrap().push(format!("{cmd:?}"));
+            Ok(conductor::Response::Ok)
+        }
+    }
+
+    /// Taking the file's version of a block: the conductor is told first, and
+    /// once it has answered, the block in the buffer becomes the file's text.
+    #[test]
+    fn taking_the_files_version_also_replaces_the_block_in_the_buffer() {
+        let file = "# Title\n\n----\n\nAlpha.\n\nBeta disk.\n";
+        let text = "# Title\n\n----\n\nAlpha.\n\nAdded above.\n\nBeta mine.\n";
+        let doc = read(text);
+        let buffer = BufferDoc {
+            text,
+            doc: Some(&doc),
+        };
+        let state = blocks(vec![region(file, 2)]);
+        let at = Range {
+            start: Position {
+                line: 8,
+                character: 2,
+            },
+            end: Position {
+                line: 8,
+                character: 2,
+            },
+        };
+        let actions = conflict_offer(
+            &at,
+            Some(&state),
+            &uri(),
+            "content/post/a.md",
+            3,
+            &buffer,
+            file,
+        );
+        let take = command_of(&actions[0]);
+        let resolution =
+            parse_resolution(take.arguments.as_deref().unwrap_or_default()).expect("a resolution");
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sender = Sender::start(Logged(log.clone()));
+        let (tx, rx) = mpsc::channel();
+        let seen = log.clone();
+        resolve_conflict(&sender, "a", resolution, move |edit| {
+            // The conductor had been told when the edit comes.
+            tx.send((seen.lock().unwrap().clone(), edit)).unwrap();
+        });
+        let (sent, edit) = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the resolution finishes");
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(
+            sent[0].starts_with("ResolveConflict") && sent[0].contains("Disk"),
+            "{sent:?}"
+        );
+        let edit = edit.expect("a buffer edit");
+        let changes = edit.document_changes.expect("versioned");
+        let DocumentChanges::Edits(edits) = changes else {
+            panic!("text edits");
+        };
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].text_document.version, Some(3));
+        let edits: Vec<TextEdit> = edits[0]
+            .edits
+            .iter()
+            .map(|e| match e {
+                OneOf::Left(e) => e.clone(),
+                OneOf::Right(e) => e.text_edit.clone(),
+            })
+            .collect();
+        assert_eq!(
+            edits,
+            [TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 8,
+                        character: 0
+                    },
+                    end: Position {
+                        line: 8,
+                        character: 10
+                    },
+                },
+                new_text: "Beta disk.".to_string(),
+            }]
+        );
+    }
+
+    /// Keeping the unsaved version only tells the conductor.
+    #[test]
+    fn keeping_the_unsaved_version_leaves_the_buffer() {
+        let file = "# Title\n\n----\n\nAlpha.\n\nBeta disk.\n";
+        let text = "# Title\n\n----\n\nAlpha.\n\nBeta mine.\n";
+        let doc = read(text);
+        let buffer = BufferDoc {
+            text,
+            doc: Some(&doc),
+        };
+        let state = blocks(vec![region(file, 1)]);
+        let actions = conflict_offer(
+            &Range {
+                start: Position {
+                    line: 6,
+                    character: 0,
+                },
+                end: Position {
+                    line: 6,
+                    character: 0,
+                },
+            },
+            Some(&state),
+            &uri(),
+            "content/post/a.md",
+            3,
+            &buffer,
+            file,
+        );
+        let keep = command_of(&actions[1]);
+        let resolution =
+            parse_resolution(keep.arguments.as_deref().unwrap_or_default()).expect("a resolution");
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let sender = Sender::start(Logged(log.clone()));
+        let (tx, rx) = mpsc::channel();
+        resolve_conflict(&sender, "a", resolution, move |edit| {
+            tx.send(edit).unwrap();
+        });
+        let edit = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the resolution finishes");
+        assert!(edit.is_none());
+        let sent = log.lock().unwrap().clone();
+        assert!(sent[0].contains("Unsaved"), "{sent:?}");
     }
 
     #[test]
