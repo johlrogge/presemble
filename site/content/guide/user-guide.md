@@ -706,6 +706,25 @@ Edits made in the browser and accepted suggestions are held in the conductor's d
 
 After a browser edit triggers a rebuild, the conductor resolves link expressions and cross-content references in the rebuilt page. Feature cards, author links, and any content that depends on linked documents render correctly without restarting the server.
 
+### Changes made outside Presemble
+
+Another program can change a file while it has unsaved edits in Presemble: a `sed`, a `git checkout`, an editor that is not connected. Your unsaved edits are never thrown away.
+
+- **The change is merged block by block.** Every block the other program changed and you did not takes its new text. The browser shows it at once; an editor that has the file open does not follow it yet, so reload the file there to see it. Every block you changed and it did not keeps yours. The document still has unsaved edits.
+- **Only a block changed in both places is a conflict.** That block is marked where it is: in the browser it gets an outline and a *Conflict* badge with the file's version of the block, and in your editor a warning. Resolve it there, on that block: *Take the file's version of this block* replaces your version with the file's, and *Keep the unsaved version* keeps yours. Your editor offers the same two code actions. The other blocks of the document are not touched.
+- **A comment is resolved with its block.** A comment changed in both places is a conflict too. Your editor shows it on the comment; the browser, which does not show comments, on the block the comment belongs to. Resolving it decides that block's comments; the block's own text is not touched.
+- **When the last block is resolved, the conflict is over.** The markers and the warning go, and the document is an ordinary document with unsaved edits again.
+
+Sometimes which block is which cannot be told, and then the whole file conflicts:
+
+- your unsaved edits started from a version of the file that had already changed on disk;
+- the file was deleted;
+- the other program added or removed a section, or moved `----` (sections are the document's slots).
+
+A whole-file conflict is shown as a notice in the browser and a warning on the first line in your editor, and is resolved as a whole. Reload the document to take the file (`presemble reload <site-dir> <file>`, or *Take the file on disk (discard unsaved edits)* in your editor), or save it to keep your edits: Presemble asks you to confirm that the file is overwritten (*Keep the unsaved edits (overwrite the file)* in your editor). Saving a deleted file creates it again.
+
+Saving while conflicts are still open works as it always has: you confirm that the file is overwritten, and Presemble writes your version of the document. That includes the blocks it merged in from the file.
+
 ### File watcher coverage
 
 The serve watcher monitors all source file types that affect the build. Changes to any of the following trigger an incremental rebuild and browser reload:
@@ -782,7 +801,7 @@ What you type in a content file reaches the site as you type it.
 - **A block changed in two places is a drift.** If you edit a block that was changed elsewhere since you began editing it, your version is not applied. The block gets a warning with two code actions: *Take the current version* replaces your text with the current one, and *Keep mine* makes your version the document's.
 - **An unfinished construct is held.** While a code fence (or an HTML block that has no end yet) is open, the editor shows an information message: the fence is not closed yet, and the blocks after it are unchanged until you close it. Closing the fence inserts one code block. Saving with the fence still open takes it as it stands.
 - **`:w` saves.** Saving writes the document. If something else changed the document meanwhile, the file gets the document's text, which includes those changes. If the document already reads as what you saved, the file stays exactly as you wrote it.
-- **A change from outside is a conflict.** If a program that is not Presemble (a `sed`, a `git checkout`) rewrites the file while the document has unsaved edits, the file shows a warning. Code actions, offered on any line, resolve it: *Take the file on disk (discard unsaved edits)* replaces the buffer with the file, and *Keep the unsaved edits (overwrite the file)* writes the document over it.
+- **A change from outside is merged.** If a program that is not Presemble (a `sed`, a `git checkout`) changes the file while the document has unsaved edits, the change is merged block by block. A block changed both there and here gets a warning with two code actions: *Take the file's version of this block* (which also replaces the block in your buffer) and *Keep the unsaved version*. When the whole file conflicts, the warning is on the first line and its two code actions, offered on any line, resolve it: *Take the file on disk (discard unsaved edits)* replaces the buffer with the file, and *Keep the unsaved edits (overwrite the file)* writes the document over it. See [Changes made outside Presemble](#changes-made-outside-presemble).
 - **Match the file on disk.** When the buffer and the file mean the same but are spelled differently (`*` and `-` list markers, say), this code action makes the buffer the file's text. It is not offered when the content differs.
 - **Formatting.** Formatting a content file rewrites it as the canonical markdown Presemble writes. With format on save, what you save is what Presemble would write.
 
@@ -791,10 +810,10 @@ What you type in a content file reaches the site as you type it.
 | Capability | Description |
 |---|---|
 | Completions | Slot names from the schema; for link slots, actual content files formatted as `[Title](/type/slug)` |
-| Diagnostics | Schema violations — missing slots, occurrence counts, capitalization, broken link references; blocks that were changed elsewhere (drift); constructs not closed yet; a conflict with the file on disk |
+| Diagnostics | Schema violations — missing slots, occurrence counts, capitalization, broken link references; blocks that were changed elsewhere (drift); constructs not closed yet; a block (or the whole file) in conflict with the file on disk |
 | Hover | Schema hint text for the slot at the cursor |
 | Go-to-definition | Navigates to the linked content file |
-| Code actions | Quickfix: capitalize first letter; insert missing slot snippet; resolve a drift; resolve a conflict; match the file on disk |
+| Code actions | Quickfix: capitalize first letter; insert missing slot snippet; resolve a drift; resolve a conflict, on its block or for the whole file; match the file on disk |
 | Formatting | Canonical markdown |
 
 ### Template file capabilities
