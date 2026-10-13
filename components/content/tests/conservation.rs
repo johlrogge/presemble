@@ -418,6 +418,20 @@ fn text_is_a_fixed_point() {
     });
 }
 
+/// Formatting formatted text changes nothing (`presemble fmt`, ADR-070).
+#[test]
+fn formatting_is_a_fixed_point() {
+    check_all("formatting fixed point", |src, grammar| {
+        let once = content::format_document(src, grammar).map_err(|e| e.to_string())?;
+        let twice = content::format_document(&once, grammar).map_err(|e| e.to_string())?;
+        if once == twice {
+            Ok(())
+        } else {
+            Err(format!("once:\n{once}\n--- twice:\n{twice}"))
+        }
+    });
+}
+
 // ── Editor sync (LSP-2, `content::sync`) ────────────────────────────────────
 
 /// The documents of two neighbouring seeds, as the editor's base text and the

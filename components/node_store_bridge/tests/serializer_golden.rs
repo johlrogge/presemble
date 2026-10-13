@@ -7,7 +7,7 @@
 ///   cargo test --package node_store_bridge --test serializer_golden
 use std::path::{Path, PathBuf};
 
-use content::parse_and_assign;
+use content::{format_document, parse_and_assign};
 use node_store::NodeStore;
 use node_store_bridge::content_bridge::document_to_store;
 use node_store_bridge::serialize_from_store;
@@ -334,6 +334,27 @@ fn site_documents() -> Vec<(PathBuf, String, Grammar)> {
     documents
 }
 
+/// Link-expression lookalikes next to link expressions, read with each grammar
+/// of the corpus.
+const LOOKALIKES: &[&str] = &[
+    // Lone links whose destination only looks like an expression.
+    "[p](->)\n",
+    "[p]((->a))\n",
+    "[p]((->a)) {#n}\n",
+    "[p]((->>%20:post%20(map%20:x))) {#news}\n",
+    "> [p](->)\n",
+    // A marked lookalike whose label spans two lines.
+    "[x\ny](:p) {#n}\n",
+    "> [x\n> y](:p) {#n}\n",
+    // Controls: these were always saved.
+    "[p](<(->a)>) {#n}\n",
+    "[p](:)\n",
+    "a [p]((->>%20:post)) {#n}\n",
+    "[x\ny](:p)\n",
+    "[x\ny](/p) {#n}\n",
+    "[x\ny](->> :post) {#n}\n",
+];
+
 /// Every document the parser reads can be saved: put in the store and
 /// serialized from it, for the conservation corpus, the site, the example
 /// sites, and the lookalikes of a link expression (a lone link whose
@@ -357,24 +378,7 @@ fn every_parsed_document_can_be_saved() {
                 &grammar,
             );
         }
-        for text in [
-            // Lone links whose destination only looks like an expression.
-            "[p](->)\n",
-            "[p]((->a))\n",
-            "[p]((->a)) {#n}\n",
-            "[p]((->>%20:post%20(map%20:x))) {#news}\n",
-            "> [p](->)\n",
-            // A marked lookalike whose label spans two lines.
-            "[x\ny](:p) {#n}\n",
-            "> [x\n> y](:p) {#n}\n",
-            // Controls: these were always saved.
-            "[p](<(->a)>) {#n}\n",
-            "[p](:)\n",
-            "a [p]((->>%20:post)) {#n}\n",
-            "[x\ny](:p)\n",
-            "[x\ny](/p) {#n}\n",
-            "[x\ny](->> :post) {#n}\n",
-        ] {
+        for text in LOOKALIKES {
             check(&format!("[{name}] {text:?}"), text, &grammar);
         }
     }
@@ -387,4 +391,61 @@ fn every_parsed_document_can_be_saved() {
         failures.len(),
         failures[0]
     );
+}
+
+/// The first line where `a` and `b` differ, with both lines.
+fn first_difference(a: &str, b: &str) -> String {
+    let (mut la, mut lb) = (a.lines(), b.lines());
+    let mut n = 1;
+    loop {
+        match (la.next(), lb.next()) {
+            (None, None) => return "the texts differ only in line endings".to_string(),
+            (x, y) if x == y => n += 1,
+            (x, y) => return format!("line {n}:\n  fmt:  {x:?}\n  save: {y:?}"),
+        }
+    }
+}
+
+/// Formatting a document gives exactly the text a save of it writes, for every
+/// document of the conservation corpus, the lookalikes, the site and the
+/// example sites.
+#[test]
+fn formatting_matches_what_a_save_writes() {
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0;
+    let mut check = |label: &str, text: &str, grammar: &Grammar| {
+        checked += 1;
+        let formatted = format_document(text, grammar).map_err(|e| e.to_string());
+        let save = saved(text, grammar);
+        match (formatted, save) {
+            (Ok(f), Ok(s)) if f == s => {}
+            (Ok(f), Ok(s)) => failures.push(format!(
+                "{label}: {}\n--- fmt ---\n{f}\n--- save ---\n{s}",
+                first_difference(&f, &s)
+            )),
+            (f, s) => failures.push(format!("{label}: fmt {f:?}, save {s:?}")),
+        }
+    };
+    for (name, grammar) in corpus::grammars() {
+        for seed in corpus::SEEDS {
+            check(
+                &format!("[{name}] seed {seed}"),
+                &corpus::gen_source(seed),
+                &grammar,
+            );
+        }
+        for text in LOOKALIKES {
+            check(&format!("[{name}] {text:?}"), text, &grammar);
+        }
+    }
+    for (path, text, grammar) in site_documents() {
+        check(&path.display().to_string(), &text, &grammar);
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {checked} documents format differently from a save; first:\n{}",
+        failures.len(),
+        failures[0]
+    );
+    assert_eq!(checked, 3060, "the corpus, lookalikes and site files");
 }

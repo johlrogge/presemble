@@ -4,6 +4,7 @@ mod block;
 mod diff;
 mod document;
 mod error;
+mod format;
 pub mod html;
 pub mod inline;
 mod link_expression;
@@ -32,6 +33,7 @@ pub use document::{
     List, ListKind, RefsToTarget, SlotMarker, SortDirection, Spacing,
 };
 pub use error::ContentError;
+pub use format::format_document;
 pub use inline::AsPlainText;
 pub use link_expression::{
     Candidate, LinkExpressionDiagnostic, LinkExpressionError, diagnose_paragraph, parse_thread,
