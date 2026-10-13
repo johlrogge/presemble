@@ -1,4 +1,4 @@
-use content::{ContentElement, Document, parse_and_assign, parse_document, serialize_document};
+use content::{parse_and_assign, serialize_document};
 use evaluator::{RootEnv, ned_primitives};
 use ned::selection::{self, Selection};
 use node_store::NodeStore;
@@ -188,9 +188,11 @@ fn round_trip_schema(path: &Path, store: &mut NodeStore) -> SchemaResult {
     }
 }
 
+/// The store round trip of a schema-assigned content file. Files with no
+/// schema never reach here: the store holds only schema-assigned documents.
 fn round_trip_content(
     path: &Path,
-    grammar: Option<&Grammar>,
+    grammar: &Grammar,
     store: &mut NodeStore,
     meta: Option<&DocumentMeta>,
 ) -> ContentResult {
@@ -207,71 +209,15 @@ fn round_trip_content(
         }
     };
 
-    // Parse the document — use parse_and_assign if we have a grammar, else parse_document.
-    let doc = if let Some(g) = grammar {
-        match parse_and_assign(&src, g) {
-            Ok(d) => d,
-            Err(e) => {
-                return ContentResult {
-                    path: display,
-                    preamble_slots: 0,
-                    body_elements: 0,
-                    diffs: vec![format!("parse error: {e:?}")],
-                };
-            }
-        }
-    } else {
-        match parse_document(&src) {
-            Ok(flat) => {
-                // FlatDocument has only elements; build a minimal Document with
-                // no preamble and all elements as body.
-                let has_separator = flat
-                    .elements
-                    .iter()
-                    .any(|e| matches!(e.node, ContentElement::Separator));
-                // Comments keep their host: the index among the kept
-                // (non-separator) elements before it.
-                let is_separator = |e: &schema::Spanned<ContentElement>| {
-                    matches!(e.node, ContentElement::Separator)
-                };
-                let comments = flat
-                    .comments
-                    .iter()
-                    .map(|(host, comment)| {
-                        let at = flat
-                            .elements
-                            .iter()
-                            .take(*host)
-                            .filter(|e| !is_separator(e))
-                            .count();
-                        content::AnchoredComment {
-                            anchor: content::CommentAnchor::Before(content::Container::Body, at),
-                            comment: comment.clone(),
-                        }
-                    })
-                    .collect();
-                let body: im::Vector<_> = flat
-                    .elements
-                    .into_iter()
-                    .filter(|e| !is_separator(e))
-                    .collect();
-                Document {
-                    preamble: im::Vector::new(),
-                    body,
-                    has_separator,
-                    separator_span: None,
-                    unassigned: Default::default(),
-                    comments,
-                }
-            }
-            Err(e) => {
-                return ContentResult {
-                    path: display,
-                    preamble_slots: 0,
-                    body_elements: 0,
-                    diffs: vec![format!("parse error: {e:?}")],
-                };
-            }
+    let doc = match parse_and_assign(&src, grammar) {
+        Ok(d) => d,
+        Err(e) => {
+            return ContentResult {
+                path: display,
+                preamble_slots: 0,
+                body_elements: 0,
+                diffs: vec![format!("parse error: {e:?}")],
+            };
         }
     };
 
@@ -506,6 +452,16 @@ pub fn run() {
             page_kind: page_kind.to_string(),
         };
 
+        // The store holds only schema-assigned documents: a body block can
+        // only be read back after `----` (`store_to_document`). A file with
+        // no schema is not converted, and a skip is not a failure.
+        let Some(grammar) = grammar else {
+            println!(
+                "  [SKIP] {}: no schema, the store holds only schema-assigned documents",
+                path.display()
+            );
+            continue;
+        };
         let result = round_trip_content(path, grammar, &mut store, Some(&meta));
         if result.diffs.is_empty() {
             println!(

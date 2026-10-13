@@ -267,6 +267,53 @@ fn a_field_of_another_document_without_as_has_no_editor_attributes() {
     assert!(!p.contains("data-presemble-address"), "{p}");
 }
 
+/// Bug 3: an empty body is filled from the browser like any empty slot: its
+/// placeholder carries the body's address and empty markdown.
+#[test]
+fn an_empty_body_placeholder_is_addressed_like_an_empty_slot() {
+    let tmp = TempDir::new().expect("temp dir");
+    let site = tmp.path().join("site");
+    for dir in ["schemas/post", "templates/post", "content/post"] {
+        fs::create_dir_all(site.join(dir)).unwrap();
+    }
+    fs::write(
+        site.join("schemas/post/item.md"),
+        "# Post title {#title}\noccurs\n: exactly once\n\n----\n\nThe body.\n",
+    )
+    .unwrap();
+    // As the site's post template: the body is inserted by a local template
+    // called through `juxt`.
+    fs::write(
+        site.join("templates/post/item.hiccup"),
+        "[:template {:presemble/define \"body\"} [:main [:presemble/insert {:data input.title :as \"h1\"}] [:presemble/insert {:data input.body}]]]\n\
+         [:html [:body ((juxt self/body) input)]]",
+    )
+    .unwrap();
+    fs::write(site.join("content/post/p.md"), "# A post\n").unwrap();
+    let site = fs::canonicalize(&site).unwrap();
+    publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("the site builds for serve");
+    let html =
+        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("post/p/index.html"))
+            .expect("the editorial post");
+    let placeholder = html
+        .split('<')
+        .find(|tag| {
+            tag.contains("presemble-suggestion") && tag.contains("data-presemble-slot=\"body\"")
+        })
+        .unwrap_or_else(|| panic!("a body placeholder in {html}"));
+    assert_eq!(
+        first_attr(placeholder, "data-presemble-address"),
+        Some("(ned/slot (ned/doc-by-path &quot;content/post/p.md&quot;) &quot;body&quot;)"),
+        "{placeholder}"
+    );
+    assert_eq!(
+        first_attr(placeholder, "data-presemble-md"),
+        Some(""),
+        "{placeholder}"
+    );
+}
+
 // ── Read-only validation tests (never call build) ────────────────────────────
 
 #[test]

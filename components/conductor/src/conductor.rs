@@ -3815,9 +3815,12 @@ impl Conductor {
         let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
         let target = match edit::resolve(&store, &sel, TargetKind::Block) {
             Ok(target) => target,
-            // The selection names a slot, not a block: an empty slot is filled
-            // by a block edit with an empty base (ADR-059 §10).
-            Err(edit::AddressError::WrongKind { ref found, .. }) if found == edit::SLOT_KIND => {
+            // The selection names a container, a slot or the body, not a
+            // block: an empty container is filled by a block edit with an
+            // empty base (ADR-059 §10).
+            Err(edit::AddressError::WrongKind { ref found, .. })
+                if found == edit::SLOT_KIND || found == edit::BODY_KIND =>
+            {
                 return self
                     .lower_fill_of_slot(&store, &sel, req)
                     .map(|lowering| (lowering, None));
@@ -3862,11 +3865,11 @@ impl Conductor {
         .map(|lowering| (lowering, body_idx))
     }
 
-    /// Lower a block edit whose selection is a slot container: the slot must be
-    /// empty, and the proposal is inserted into it
-    /// (`block_edit::lower_into_empty_slot`). The kind of block the slot holds,
-    /// which decides how the proposal reads (a heading slot's level), comes
-    /// from the schema.
+    /// Lower a block edit whose selection is a container, a slot or the body:
+    /// the container must be empty, and the proposal is inserted into it
+    /// (`block_edit::lower_into_empty_slot`). How the proposal reads comes
+    /// from the schema: the body takes body blocks (when the schema has a
+    /// body); a slot, the kind of block it holds (a heading slot's level).
     fn lower_fill_of_slot(
         &self,
         store: &node_store::NodeStore,
@@ -3884,7 +3887,7 @@ impl Conductor {
         else {
             return Err(refuse(
                 BlockEditCause::Unaddressable,
-                "the selection does not address a slot".to_string(),
+                "the selection does not address a slot or the body".to_string(),
             ));
         };
         let doc_file = node_store_bridge::content_bridge::find_attr_text(store, document, "file")
@@ -3898,39 +3901,58 @@ impl Conductor {
         if !store.children(container).is_empty() {
             return Err(refuse(
                 BlockEditCause::Drifted,
-                "the slot has blocks now; the edit was made against other content".to_string(),
+                "the container has blocks now; the edit was made against other content".to_string(),
             ));
         }
-        let slot_name = node_store_bridge::content_bridge::find_attr_text(store, container, "name")
-            .ok_or_else(|| {
-                refuse(
-                    BlockEditCause::Unaddressable,
-                    "the slot has no name".to_string(),
-                )
-            })?;
         let grammar = self
             .load_grammar_for_file(req.file.as_str())
             .map_err(|e| refuse(BlockEditCause::Unaddressable, e))?;
-        let slot = grammar
-            .preamble
-            .iter()
-            .find(|s| s.name.as_str() == slot_name)
-            .ok_or_else(|| {
-                refuse(
+        use node_store_bridge::block_edit::EmptyContainer;
+        let is_body = matches!(
+            store.get(container),
+            Some(node_store::Node::Element(name)) if store.resolve_name(*name) == edit::BODY_KIND
+        );
+        let empty = if is_body {
+            if grammar.body.is_none() {
+                return Err(refuse(
                     BlockEditCause::Unaddressable,
-                    format!("slot '{slot_name}' is not in the schema"),
-                )
-            })?;
-        let like = match &slot.element {
-            schema::Element::Heading { level } => content::ContentElement::heading_from_markdown(
-                schema::HeadingLevel::new(level.min.value()).unwrap_or(level.min),
-                "",
-            ),
-            _ => content::ContentElement::paragraph_from_markdown(""),
+                    "the schema has no body".to_string(),
+                ));
+            }
+            EmptyContainer::Body
+        } else {
+            let slot_name =
+                node_store_bridge::content_bridge::find_attr_text(store, container, "name")
+                    .ok_or_else(|| {
+                        refuse(
+                            BlockEditCause::Unaddressable,
+                            "the slot has no name".to_string(),
+                        )
+                    })?;
+            let slot = grammar
+                .preamble
+                .iter()
+                .find(|s| s.name.as_str() == slot_name)
+                .ok_or_else(|| {
+                    refuse(
+                        BlockEditCause::Unaddressable,
+                        format!("slot '{slot_name}' is not in the schema"),
+                    )
+                })?;
+            let like = match &slot.element {
+                schema::Element::Heading { level } => {
+                    content::ContentElement::heading_from_markdown(
+                        schema::HeadingLevel::new(level.min.value()).unwrap_or(level.min),
+                        "",
+                    )
+                }
+                _ => content::ContentElement::paragraph_from_markdown(""),
+            };
+            EmptyContainer::Slot { like }
         };
         node_store_bridge::block_edit::lower_into_empty_slot(
             &req.selection,
-            &like,
+            &empty,
             &req.base,
             &req.proposed,
         )
@@ -8679,6 +8701,37 @@ mod suggestion_accept_tests {
         assert_eq!(dirty, vec![FILE.to_string()]);
     }
 
+    /// Bug 3: a NED program that fills the body of a document read without
+    /// `----` saves the separator before the new block.
+    #[test]
+    fn a_ned_insert_into_a_body_read_without_a_separator_saves_one() {
+        let tmp = build_site();
+        std::fs::write(tmp.path().join(FILE), "# First Post\n").unwrap();
+        let conductor = make_conductor(&tmp);
+        let program = r#"(ned/insert-child (ned/slot (ned/doc-by-path "content/post/first.md") "body")
+             (ned/with-child (ned/mk-element "paragraph") (ned/mk-text "Fourth")))"#;
+        assert!(
+            matches!(
+                conductor.apply_ned_program(program).response,
+                Response::Applied { dirty_paths: 1, .. }
+            ),
+            "the insert applies"
+        );
+        let saved = conductor.handle_command(Command::SaveBuffer {
+            path: editorial_types::SitePath::parse(FILE).expect("valid"),
+            consent: Default::default(),
+        });
+        assert!(
+            matches!(saved.response, Response::Ok),
+            "{:?}",
+            saved.response
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(FILE)).unwrap(),
+            "# First Post\n\n----\n\nFourth\n"
+        );
+    }
+
     /// Bug 2: a change on disk rebuilds pages, but no edit caused it, so it
     /// names no page for the editors' browsers to follow.
     #[test]
@@ -10753,6 +10806,62 @@ mod block_edit_tests {
         );
     }
 
+    /// Bug 3: a post with no body (no `----`) has an empty body container; a
+    /// block edit at its address with an empty base fills it, and saving
+    /// writes the separator before the new body.
+    #[test]
+    fn block_edit_fills_an_empty_body_and_the_save_writes_the_separator() {
+        const POST: &str = "content/post/p.md";
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for dir in ["schemas/post", "templates/post", "content/post"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(
+            root.join("schemas/post/item.md"),
+            "# Post title {#title}\noccurs\n: exactly once\n\n\
+             Summary. {#summary}\noccurs\n: exactly once\n\n\
+             [<name>](/author/<name>) {#author}\noccurs\n: exactly once\n\n\
+             ----\n\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
+        std::fs::write(root.join(POST), "# T\n\nsum\n\n[a](/author/x)\n").unwrap();
+        let conductor = make_conductor(&tmp);
+
+        let result = conductor.handle_command(Command::BlockEdit(request(
+            POST,
+            &content::address::slot_address(POST, "body"),
+            "",
+            "Hello",
+            BlockEditIntent::Apply,
+        )));
+        assert!(
+            matches!(
+                response(&result),
+                BlockEditResponse::Done(BlockEditOutcome::Applied { .. })
+            ),
+            "{:?}",
+            response(&result)
+        );
+
+        let saved = conductor.handle_command(Command::SaveBuffer {
+            path: editorial_types::SitePath::parse(POST).expect("valid"),
+            consent: Default::default(),
+        });
+        assert!(
+            matches!(saved.response, Response::Ok),
+            "{:?}",
+            saved.response
+        );
+        let text = std::fs::read_to_string(root.join(POST)).expect("the post");
+        let separator = text
+            .find("----")
+            .unwrap_or_else(|| panic!("a separator in {text:?}"));
+        assert!(text[separator..].contains("Hello"), "{text:?}");
+        assert!(text.starts_with("# T\n"), "{text:?}");
+    }
+
     /// Bug 2: a block edit names its document's page for the editors'
     /// browsers to follow, whichever pages the edit rebuilt besides.
     #[test]
@@ -10898,11 +11007,22 @@ mod block_edit_tests {
         let tmp = build_site();
         let conductor = make_conductor(&tmp);
         let doc = r#"(ned/doc-by-path "content/post/first.md")"#;
+        // A container that has blocks: an edit made against its blocks with
+        // a non-empty base is out of date as a fill (bug 3: the body is a
+        // container to fill, as a slot is).
+        for intent in [BlockEditIntent::Apply, BlockEditIntent::Suggest] {
+            let result = edit(
+                &conductor,
+                &format!("(ned/body {doc})"),
+                "Alpha para.",
+                "Changed.",
+                intent,
+            );
+            assert_eq!(refused_cause(&result), BlockEditCause::Drifted);
+        }
         let bad_selections = [
             // A text node, not a block.
             format!("(ned/text-in {FIRST_PARAGRAPH})"),
-            // A container.
-            format!("(ned/body {doc})"),
             // Nothing.
             format!(r#"(ned/nth-of-kind (ned/children (ned/body {doc})) "paragraph" 9)"#),
             // Not evaluable.

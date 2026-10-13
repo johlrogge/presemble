@@ -427,21 +427,47 @@ pub fn lower(
     }))
 }
 
-/// Lower a block edit whose selection addresses an empty slot container
-/// (`container_selection`): the blocks proposed are inserted into the slot
-/// (ADR-059 §10, amended in stage 5b.3).
+/// The empty container a block edit fills, and how its proposal is read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EmptyContainer {
+    /// A preamble slot. `like` is the kind of block the slot holds, from the
+    /// grammar: a heading of the slot's level, or a paragraph for any other
+    /// kind. Its proposal is read through the Content projection.
+    Slot { like: ContentElement },
+    /// The body: its proposal is body blocks, read through the Block
+    /// projection (a heading keeps its `#` markers).
+    Body,
+}
+
+impl EmptyContainer {
+    /// The projection a proposal for this container is read through, and the
+    /// block it is read like.
+    fn projection(&self) -> (Projection, ContentElement) {
+        match self {
+            EmptyContainer::Slot { like } => (Projection::Content, like.clone()),
+            // Under the Block projection `like` is not read.
+            EmptyContainer::Body => (
+                Projection::Block,
+                ContentElement::paragraph_from_markdown(""),
+            ),
+        }
+    }
+}
+
+/// Lower a block edit whose selection addresses an empty container
+/// (`container_selection`), a slot or the body: the blocks proposed are
+/// inserted into it (ADR-059 §10, amended in stage 5b.3).
 ///
 /// The base must be empty (a client that saw blocks there is out of date:
-/// `Drifted`). `like` is the kind of block the slot holds, from the grammar:
-/// a heading of the slot's level, or a paragraph for any other kind. The
-/// proposed content goes through the Content projection, as for any slot edit.
-/// An empty proposal changes nothing. Apply and Suggest share this.
+/// `Drifted`). The proposal is read as `container` says. An empty proposal
+/// changes nothing. Apply and Suggest share this.
 pub fn lower_into_empty_slot(
     container_selection: &str,
-    like: &ContentElement,
+    container: &EmptyContainer,
     base: &BlockText,
     proposed: &BlockText,
 ) -> Result<Lowering, BlockEditError> {
+    let (projection, like) = container.projection();
     let base_is_empty = match base {
         BlockText::Markdown(md) => md.trim().is_empty(),
         BlockText::Edn(edn) => edn.trim().is_empty(),
@@ -457,7 +483,7 @@ pub fn lower_into_empty_slot(
             if md.trim().is_empty() {
                 return Ok(Lowering::NoChange);
             }
-            parse_markdown_projection(md, Projection::Content, like)
+            parse_markdown_projection(md, projection, &like)
                 .map_err(|e| refuse(BlockEditCause::Invalid, e.to_string()))?
         }
         BlockText::Edn(edn) => {
@@ -477,7 +503,7 @@ pub fn lower_into_empty_slot(
     let projected = elements
         .iter()
         .map(|el| {
-            project_markdown(el, Projection::Content).ok_or_else(|| {
+            project_markdown(el, projection).ok_or_else(|| {
                 refuse(
                     BlockEditCause::Invalid,
                     "this kind of block has no markdown",
@@ -1407,7 +1433,7 @@ mod tests {
             if name == "link-picker-empty-slot.json" {
                 let l = lower_into_empty_slot(
                     &request.selection,
-                    &like,
+                    &EmptyContainer::Slot { like: like.clone() },
                     &request.base,
                     &request.proposed,
                 );
@@ -1429,7 +1455,7 @@ mod tests {
     #[test]
     fn lower_into_empty_slot_inserts_the_proposed_blocks() {
         let sel = r#"(ned/slot (ned/doc-by-path "content/p.md") "title")"#;
-        let title_like = title("");
+        let title_like = EmptyContainer::Slot { like: title("") };
         let Ok(Lowering::Lowered(l)) =
             lower_into_empty_slot(sel, &title_like, &md(""), &md("Hello *World*"))
         else {
@@ -1456,6 +1482,58 @@ mod tests {
         );
         let drifted = lower_into_empty_slot(sel, &title_like, &md("Old"), &md("New")).unwrap_err();
         assert_eq!(drifted.cause, BlockEditCause::Drifted);
+    }
+
+    /// The browser's body fill (the `fill-empty-body` fixture) lowers to an
+    /// insertion of body blocks into the body container.
+    #[test]
+    fn the_fill_empty_body_fixture_lowers_into_the_body() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/serve/protocol/fill-empty-body.json");
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let request: editorial_types::BlockEditRequest =
+            serde_json::from_value(raw["request"].clone()).unwrap();
+        let Ok(Lowering::Lowered(l)) = lower_into_empty_slot(
+            &request.selection,
+            &EmptyContainer::Body,
+            &request.base,
+            &request.proposed,
+        ) else {
+            panic!("expected a lowering")
+        };
+        assert_eq!(l.selection, request.selection);
+        assert!(matches!(l.mutation, NedMutation::InsertChild(ref trees) if trees.len() == 2));
+    }
+
+    /// Bug 3: an empty body is filled with body blocks, read through the
+    /// Block projection: a heading keeps its level (3 here), and the preview
+    /// is the blocks' body markdown.
+    #[test]
+    fn lower_into_empty_body_inserts_body_blocks() {
+        let sel = r#"(ned/slot (ned/doc-by-path "content/p.md") "body")"#;
+        let Ok(Lowering::Lowered(l)) = lower_into_empty_slot(
+            sel,
+            &EmptyContainer::Body,
+            &md(""),
+            &md("### Intro\n\nHello"),
+        ) else {
+            panic!("expected a lowering")
+        };
+        assert_eq!(l.selection, sel);
+        assert_eq!(l.target, LoweredTarget::Container);
+        let NedMutation::InsertChild(trees) = &l.mutation else {
+            panic!("{:?}", l.mutation)
+        };
+        let blocks: Vec<_> = trees.iter().map(|t| tree_to_block(t).unwrap()).collect();
+        assert_eq!(
+            blocks,
+            vec![
+                ContentElement::heading_from_markdown(HeadingLevel::new(3).unwrap(), "Intro"),
+                paragraph("Hello"),
+            ]
+        );
+        assert_eq!(l.preview.proposed, pv("### Intro\n\nHello"));
     }
 
     /// The EDN fixture shows a heading as inline nodes; a change of its text

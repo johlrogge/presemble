@@ -1504,13 +1504,13 @@ fn record_attrs(
     attrs
 }
 
-/// The editor attributes of the placeholder of an empty slot (editorial output
-/// only): the address of the slot container, and empty markdown, so a block
-/// edit with an empty base fills the slot (ADR-059 §10). The body has no
-/// slot container to fill this way; nor does a document whose file is not
-/// known.
+/// The editor attributes of the placeholder of an empty slot or an empty body
+/// (editorial output only): the address of the container (`(ned/slot doc
+/// "body")` selects the body), and empty markdown, so a block edit with an
+/// empty base fills it (ADR-059 §10). A document whose file is not known has
+/// nothing to fill.
 fn empty_slot_editor_attrs(file: &str, slot_name: &str) -> Vec<(String, Form)> {
-    if file.is_empty() || slot_name == "body" {
+    if file.is_empty() {
         return Vec::new();
     }
     editor_attrs(

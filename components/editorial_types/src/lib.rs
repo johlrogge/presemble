@@ -923,6 +923,7 @@ mod tests {
                 "apply-body-paragraph.json",
                 "apply-slot-heading.json",
                 "drifted.json",
+                "fill-empty-body.json",
                 "forbidden-kind.json",
                 "link-picker-empty-slot.json",
                 "link-picker.json",

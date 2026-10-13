@@ -50,6 +50,10 @@ pub(crate) use content_store::{add_text_attr, content_element_to_store, link_tar
 // ── document_to_store ─────────────────────────────────────────────────────────
 
 /// Convert a [`Document`] into the node store, returning the root node ID.
+///
+/// `doc` is grammar-assigned (`content::parse_and_assign`): the store holds
+/// only grammar-assigned documents (ned_cli skips the others), so a body block
+/// can only be read back after `----` ([`store_to_document`]).
 pub fn document_to_store(
     doc: &Document,
     store: &mut NodeStore,
@@ -509,16 +513,27 @@ pub fn fill_semantic_content(
         }
     }
 
-    // Body reference
-    if grammar.body.is_some()
-        && let Some(body_id) = find_child_by_name(store, doc_root, "body")
-    {
+    // Body reference. An empty body is a placeholder, as an empty slot is,
+    // so the browser can fill it (bug 3).
+    if grammar.body.is_some() {
         let body_name = store.intern("body");
+        let body = find_child_by_name(store, doc_root, "body")
+            .filter(|&body_id| !store.children(body_id).is_empty());
+        let part = match body {
+            Some(body_id) => body_id,
+            None => {
+                let suggestion_elem_name = store.intern("suggestion");
+                let suggestion = store.add_node(Node::Element(suggestion_elem_name));
+                add_text_attr(store, suggestion, "hint", "Body content goes here.");
+                add_text_attr(store, suggestion, "slot-name", "body");
+                suggestion
+            }
+        };
         store.add_edge(
             sem,
             Edge::ConsistsOf {
                 name: body_name,
-                part: body_id,
+                part,
             },
         );
     }
@@ -656,8 +671,13 @@ fn decode_blocks(
 /// an unnamed slot gets an empty name (its blocks are still kept). Only a
 /// malformed block — a well-formedness violation — yields a
 /// [`DocumentDecodeError`]. Never panics.
+///
+/// The store holds only grammar-assigned documents (ned_cli skips the
+/// others), so a body block can only be read back after `----`: a document
+/// with body blocks has a separator, even one whose body was filled in N after
+/// it was read without one.
 pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, DocumentDecodeError> {
-    let has_separator = find_attr_bool(store, root, "has-separator").unwrap_or(false);
+    let read_with_separator = find_attr_bool(store, root, "has-separator").unwrap_or(false);
 
     let preamble_node = find_child_by_name(store, root, "preamble");
     let mut comments = im::Vector::new();
@@ -692,6 +712,7 @@ pub fn store_to_document(store: &NodeStore, root: NodeId) -> Result<Document, Do
         Some(body_node) => decode_blocks(store, body_node, Container::Body, &mut comments)?,
         None => im::Vector::new(),
     };
+    let has_separator = read_with_separator || !body.is_empty();
 
     Ok(Document {
         preamble,
@@ -900,10 +921,11 @@ mod tests {
             list_of("3. one\n\n   two\n4. three\n   - four"),
         ];
 
+        // As a parse builds it: body blocks follow `----`.
         let doc = Document {
             preamble: im::vector![],
             body: elements.into_iter().map(zero_spanned).collect(),
-            has_separator: false,
+            has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
             comments: im::Vector::new(),
@@ -1436,10 +1458,11 @@ mod tests {
             },
         ];
 
+        // As a parse builds it: body blocks follow `----`.
         let doc = Document {
             preamble: im::vector![],
             body: elements.into_iter().map(zero_spanned).collect(),
-            has_separator: false,
+            has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
             comments: im::Vector::new(),
@@ -1459,7 +1482,8 @@ mod tests {
                 &["Name", "Age", "City"],
                 &[&["Alice", "30", "Berlin"], &["Bob", "25", "Paris"]],
             ))],
-            has_separator: false,
+            // As a parse builds it: body blocks follow `----`.
+            has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
             comments: im::Vector::new(),
@@ -1467,6 +1491,34 @@ mod tests {
 
         let recovered = round_trip(&doc);
         compare_documents(&doc, &recovered);
+    }
+
+    /// Bug 3: a document read without a body (no `----`) whose body is then
+    /// filled in N has body blocks: it reads back with a separator, and its
+    /// text has `----` before them, or the body would read back as preamble.
+    #[test]
+    fn a_store_document_with_body_blocks_reads_back_with_a_separator() {
+        let grammar =
+            schema::parse_schema("# Title {#title}\noccurs\n: exactly once\n\n----\n\nBody.\n")
+                .expect("schema parses");
+        let doc = content::parse_and_assign("# T\n", &grammar).expect("parses");
+        assert!(!doc.has_separator);
+        let mut store = NodeStore::new();
+        let root = document_to_store(&doc, &mut store, None);
+        let body = find_child_by_name(&store, root, "body").expect("a body container");
+        let para = content_store::block_to_store(
+            &ContentElement::paragraph_from_markdown("Hello"),
+            &mut store,
+        );
+        store.add_edge(body, Edge::Child(para));
+
+        let read_back = store_to_document(&store, root).expect("decodes");
+        assert!(
+            read_back.has_separator,
+            "body blocks are read back after ----"
+        );
+        let text = serialize_from_store(&store, root).expect("serializes");
+        assert_eq!(text, "# T\n\n----\n\nHello\n");
     }
 
     // ── test 5: has_separator true and false ─────────────────────────────────
@@ -1496,14 +1548,16 @@ mod tests {
 
     #[test]
     fn round_trip_has_separator_false() {
+        // As a parse builds it: without `----` the body is empty, and a block
+        // no slot takes is unassigned.
         let doc = Document {
             preamble: im::vector![],
-            body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
-                "No separator"
-            ))],
+            body: im::Vector::new(),
             has_separator: false,
             separator_span: None,
-            unassigned: im::Vector::new(),
+            unassigned: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
+                "No separator"
+            ))],
             comments: im::Vector::new(),
         };
 
@@ -1519,7 +1573,8 @@ mod tests {
             body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
                 "Hello"
             ))],
-            has_separator: false,
+            // As a parse builds it: body blocks follow `----`.
+            has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
             comments: im::Vector::new(),
@@ -2601,7 +2656,8 @@ mod tests {
             body: im::vector![zero_spanned(ContentElement::paragraph_from_markdown(
                 "Hello"
             ))],
-            has_separator: false,
+            // As a parse builds it: body blocks follow `----`.
+            has_separator: true,
             separator_span: None,
             unassigned: im::Vector::new(),
             comments: im::Vector::new(),

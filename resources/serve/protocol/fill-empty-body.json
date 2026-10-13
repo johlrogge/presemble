@@ -1,0 +1,10 @@
+{
+  "request": {
+    "file": "content/post/hello.md",
+    "selection": "(ned/slot (ned/doc-by-path \"content/post/hello.md\") \"body\")",
+    "base": { "markdown": "" },
+    "proposed": { "markdown": "### Intro\n\nHello" },
+    "intent": "apply"
+  },
+  "response": { "done": { "applied": { "pages": ["/post/hello"] } } }
+}
