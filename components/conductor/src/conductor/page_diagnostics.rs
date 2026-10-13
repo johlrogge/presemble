@@ -290,8 +290,10 @@ impl PageDiagnostics {
         }
     }
 
-    /// The page script: the counts of every diagnostic, the unplaced ones,
-    /// and the conflicted blocks no element carries.
+    /// The page script: the page's own document (`file`, site-relative: what
+    /// its save state and leave hint are about, ADR-070), the counts of every
+    /// diagnostic, the unplaced ones, and the conflicted blocks no element
+    /// carries.
     fn script(&self, unplaced: &Unplaced) -> String {
         let count = |severity: Severity| {
             self.diagnostics
@@ -300,6 +302,7 @@ impl PageDiagnostics {
                 .count()
         };
         let page = json!({
+            "file": self.file,
             "errors": count(Severity::Error),
             "warnings": count(Severity::Warning),
             "unplaced": unplaced.diagnostics.iter().map(|d| diagnostic_json(d)).collect::<Vec<_>>(),
@@ -482,6 +485,59 @@ mod tests {
             .iter()
             .map(|d| d["message"].as_str().unwrap_or_default().to_string())
             .collect()
+    }
+
+    /// The page names its own document (ADR-070: what its save state and
+    /// leave hint are about), even where the first element with a
+    /// `data-presemble-file` belongs to another document: here a collection
+    /// page lists its items above its own heading.
+    #[test]
+    fn the_page_script_names_the_pages_own_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for dir in ["schemas/post", "templates/post", "content/post"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("schemas/post/item.md"), SCHEMA).unwrap();
+        std::fs::write(
+            root.join("schemas/post/index.md"),
+            "# Listing title {#title}\noccurs\n: exactly once\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
+        std::fs::write(
+            root.join("templates/post/index.hiccup"),
+            r#"[:html [:body
+  [:ul [:template {:data-each input.post} [:li [:presemble/insert {:data item.title :as "h2"}]]]]
+  [:presemble/insert {:data input.title :as "h1"}]]]"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("content/post/index.md"), "# Posts\n").unwrap();
+        std::fs::write(
+            root.join("content/post/x.md"),
+            "# First Item\n\n----\n\nBody.\n",
+        )
+        .unwrap();
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(root)
+            .build();
+        let conductor = Conductor::with_repo(root.to_path_buf(), repo).expect("conductor");
+
+        let html = conductor
+            .render_page("/post/", &RenderMode::View)
+            .expect("rendered");
+
+        let first = html
+            .split("data-presemble-file=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("an element with a file");
+        assert_eq!(first, "content/post/x.md", "an item comes first: {html}");
+        assert_eq!(
+            page_script(&html)["file"],
+            "content/post/index.md",
+            "{html}"
+        );
     }
 
     #[test]

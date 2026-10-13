@@ -80,6 +80,7 @@ function editorialMessageAction(message) {
     case 'conflict':
     case 'conflict-resolved':
     case 'suggestion-list-changed':
+    case 'save-state':
       return type;
     default:
       return 'ignore';
@@ -219,11 +220,15 @@ _toast('Page updated — will refresh when you finish editing',true);
 }
 return;
 }
-if(_reloadConcernsThisPage(m)){location.reload();}
-else if(m.primary){location.href=m.primary;}
+if(_reloadConcernsThisPage(m)){_selfReload=true;location.reload();}
+else if(m.primary){_selfReload=true;location.href=m.primary;}
 }
+// The page is reloading itself because the site was rebuilt: that is not the
+// editor leaving, so it sends no leave hint (the flush would cut short the
+// idle time auto-save waits for after every edit).
+var _selfReload=false;
 // Call at the end of every editor cleanup.
-function _onEditorClosed(){if(_pendingReload&&!_editorOpen()){location.reload();}}
+function _onEditorClosed(){if(_pendingReload&&!_editorOpen()){_selfReload=true;location.reload();}}
 function _wsConnect(){
 var sock=new WebSocket((location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/_presemble/editorial-ws');
 var opened=false;
@@ -279,6 +284,10 @@ return;
 }
 if(action==='conflict-resolved'){
 _conflictEnded(m.file);
+return;
+}
+if(action==='save-state'){
+_noteSaveState(m);
 return;
 }
 if(action==='suggestion-list-changed'){
@@ -585,8 +594,151 @@ window.addEventListener('load',_diagPlaceBadges);
 document.addEventListener('click',function(){document.querySelectorAll('.presemble-diag-open').forEach(function(b){b.classList.remove('presemble-diag-open');});});
 }
 }
-if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',function(){_diagRender();_conflictRender();});}
-else{_diagRender();_conflictRender();}
+// ── Save state (ADR-070) ──────────────────────────────────────────────────
+// The page's document is saved on its own (auto-save): a small indicator says
+// where it stands (Saved, Unsaved, Conflict, Save failed; the last save time
+// on hover). A failed save gets a banner with the error and Retry (an
+// explicit save of the document); it stays until a save succeeds. Leaving or
+// hiding the page asks for the document to be saved now; with auto-save off
+// the server saves nothing.
+// The page's own document, as the page script names it (not the first
+// element with a file: on a collection page that may be one of its items).
+var _pageFileCache;
+function _pageFile(){
+if(_pageFileCache!==undefined){return _pageFileCache;}
+_pageFileCache=null;
+var script=document.getElementById('presemble-diagnostics');
+if(script){
+try{var data=JSON.parse(script.textContent);if(data&&typeof data.file==='string'&&data.file){_pageFileCache=data.file;}}
+catch(err){console.warn('presemble: unreadable page script',err);}
+}
+return _pageFileCache;
+}
+var _saveIndicator=null;
+var _saveBanner=null;
+// The error of the last failed save, as announced.
+var _lastSaveError='';
+var _SAVE_LABELS={saved:'Saved',unsaved:'Unsaved',conflict:'Conflict',failed:'Save failed'};
+// The last save time of `file` (epoch ms), kept across the page's own reloads.
+function _lastSavedAt(file){var v=Number(sessionStorage.getItem('presemble-saved-at:'+file));return v>0?v:null;}
+function _showSaveState(file,state){
+if(!_SAVE_LABELS[state]){return;}
+if(!_saveIndicator){
+_saveIndicator=document.createElement('div');
+_saveIndicator.className='presemble-save-state';
+_saveIndicator.setAttribute('role','status');
+_saveIndicator.setAttribute('aria-live','polite');
+}
+if(!_saveIndicator.isConnected){document.body.appendChild(_saveIndicator);}
+_saveIndicator.textContent=_SAVE_LABELS[state];
+_saveIndicator.setAttribute('data-state',state);
+var at=_lastSavedAt(file);
+_saveIndicator.title=at?'Last saved '+new Date(at).toLocaleString():'Not saved since this page was opened';
+}
+// The banner of a failed save, in one of two modes: 'retry' (the error and
+// Retry), or 'confirm' (the file changed on disk: Overwrite it with the
+// edits, or Cancel; the choice the toolbar Save offers).
+function _showSaveBanner(file,error,mode){
+if(!_saveBanner){
+_saveBanner=document.createElement('div');
+_saveBanner.className='presemble-save-banner';
+_saveBanner.setAttribute('role','alert');
+var title=document.createElement('strong');
+title.textContent='Save failed';
+var detail=document.createElement('span');
+detail.className='presemble-save-banner-error';
+var buttons=document.createElement('span');
+buttons.className='presemble-save-banner-actions';
+_saveBanner.appendChild(title);
+_saveBanner.appendChild(detail);
+_saveBanner.appendChild(buttons);
+}
+// Updated in place: a failed save is announced again on every attempt. A
+// choice being offered stays until it is made.
+if(mode!=='confirm'&&_saveBanner.getAttribute('data-mode')==='confirm'&&_saveBanner.isConnected){return;}
+_saveBanner.setAttribute('data-file',file);
+_saveBanner.setAttribute('data-mode',mode||'retry');
+_saveBanner.querySelector('.presemble-save-banner-error').textContent=error?' '+error+' Your edits are kept.':' Your edits are kept.';
+var actions=_saveBanner.querySelector('.presemble-save-banner-actions');
+actions.textContent='';
+function button(label,onClick){
+var b=document.createElement('button');
+b.type='button';
+b.textContent=label;
+b.addEventListener('click',function(){onClick(b);});
+actions.appendChild(b);
+}
+if(mode==='confirm'){
+button('Overwrite the file',function(b){_retrySave(file,b,[file]);});
+button('Cancel',function(){
+// Nothing is saved: back to the failure and its Retry.
+_saveBanner.removeAttribute('data-mode');
+_showSaveBanner(file,_lastSaveError,'retry');
+});
+}else{
+button('Retry',function(b){_retrySave(file,b,null);});
+}
+if(!_saveBanner.isConnected){document.body.appendChild(_saveBanner);}
+}
+function _hideSaveBanner(){if(_saveBanner){_saveBanner.remove();_saveBanner.removeAttribute('data-mode');}}
+// Retry is an explicit save of the document (whatever auto-save says). If
+// the file changed on disk meanwhile, the banner offers the choice instead;
+// `overwrite` is the consent that names the file.
+function _retrySave(file,btn,overwrite){
+if(!file){return;}
+btn.disabled=true;
+var body={file:file};
+if(overwrite){body.overwriteConflicts=overwrite;}
+fetchJson('/_presemble/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+.then(function(data){
+// A success hides the banner when its `saved` state arrives.
+if(data.ok){return;}
+if(data.needsConfirmation){
+_showSaveBanner(file,file+' changed on disk while it has unsaved edits here. Overwrite it with your edits?','confirm');
+return;
+}
+_toast('Save failed: '+(data.error||'unknown error'));
+})
+.catch(function(err){_toast('Save failed: '+err.message);})
+.then(function(){btn.disabled=false;});
+}
+function _noteSaveState(m){
+var file=_pageFile();
+if(!file||m.file!==file){return;}
+if(m.state==='saved'&&typeof m.at==='number'){sessionStorage.setItem('presemble-saved-at:'+file,String(m.at));}
+_showSaveState(file,m.state);
+if(m.state==='failed'){_lastSaveError=m.error||'';_showSaveBanner(file,_lastSaveError,'retry');}
+else if(m.state==='saved'){_hideSaveBanner();}
+}
+// Where the page's document stands when the page opens: unsaved if listed,
+// in conflict if listed so, otherwise saved.
+function _fetchSaveState(){
+var file=_pageFile();
+if(!file){return;}
+Promise.all([fetchJson('/_presemble/dirty-buffers'),fetchJson('/_presemble/conflicts')])
+.then(function(lists){
+var dirty=Array.isArray(lists[0])?lists[0]:[];
+var conflicts=Array.isArray(lists[1])?lists[1]:[];
+// A state announced meanwhile is newer: keep it.
+if(_saveIndicator&&_saveIndicator.isConnected){return;}
+_showSaveState(file,conflicts.indexOf(file)>=0?'conflict':(dirty.indexOf(file)>=0?'unsaved':'saved'));
+})
+.catch(function(err){console.warn('presemble: save state fetch failed',err);});
+}
+// The leave hint, when the page is hidden or goes away: a beacon (it
+// outlives the page), or a keepalive request where there is none.
+function _flushPage(){
+if(_selfReload){return;}
+var file=_pageFile();
+if(!file){return;}
+var body=JSON.stringify({file:file});
+if(navigator.sendBeacon&&navigator.sendBeacon('/_presemble/flush',new Blob([body],{type:'text/plain'}))){return;}
+fetch('/_presemble/flush',{method:'POST',headers:{'Content-Type':'application/json'},body:body,keepalive:true}).catch(function(){});
+}
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden'){_flushPage();}});
+window.addEventListener('pagehide',function(){_flushPage();});
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',function(){_diagRender();_conflictRender();_fetchSaveState();});}
+else{_diagRender();_conflictRender();_fetchSaveState();}
 _fetchConflicts();
 _wsConnect();
 (function(){

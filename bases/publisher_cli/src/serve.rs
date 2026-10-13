@@ -991,6 +991,8 @@ fn app_router(state: AppState) -> Router {
             get(ned_suggestion_files_handler),
         )
         .route("/_presemble/save-all", post(save_all_handler))
+        .route("/_presemble/save", post(save_handler))
+        .route("/_presemble/flush", post(flush_handler))
         .route("/_presemble/templates", get(templates_handler))
         .route("/_presemble/scaffold", post(scaffold_handler))
         .route("/_presemble/font-moods", get(font_moods_handler))
@@ -1340,6 +1342,82 @@ async fn save_all_handler(
         state
             .conductor
             .send(&conductor::Command::SaveAllBuffers { consent }),
+    )
+}
+
+/// The body of `POST /_presemble/save` and `POST /_presemble/flush`: the
+/// page's document, site-relative; for a save, the files the user agreed to
+/// overwrite (ADR-065), as for `save-all`.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileRequest {
+    file: String,
+    #[serde(default)]
+    overwrite_conflicts: Vec<String>,
+}
+
+/// Read a [`FileRequest`] from a body sent as JSON or, by
+/// `navigator.sendBeacon`, as text: the content type is not looked at.
+fn file_request(
+    body: &[u8],
+) -> Result<
+    (
+        editorial_types::ContentPath,
+        editorial_types::ConflictConsent,
+    ),
+    String,
+> {
+    let request: FileRequest =
+        serde_json::from_slice(body).map_err(|e| format!("invalid request body: {e}"))?;
+    let path = editorial_types::ContentPath::parse(&request.file)
+        .map_err(|e| format!("not a content file: {}: {e}", request.file))?;
+    let consent = if request.overwrite_conflicts.is_empty() {
+        editorial_types::ConflictConsent::None
+    } else {
+        editorial_types::ConflictConsent::Overwrite(
+            request.overwrite_conflicts.into_iter().collect(),
+        )
+    };
+    Ok((path, consent))
+}
+
+/// `POST /_presemble/save`: save one document now (`Command::SaveBuffer`),
+/// as an explicit save does, whatever auto-save says. The save banner's
+/// Retry sends it. A document in conflict with its file answers
+/// `needsConfirmation` and writes nothing, unless `overwriteConflicts`
+/// names it.
+async fn save_handler(
+    _session: Session,
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::Json<EditResponse> {
+    let (path, consent) = match file_request(&body) {
+        Ok(request) => request,
+        Err(e) => return axum::Json(EditResponse::err(e)),
+    };
+    conductor_edit_response(state.conductor.send(&conductor::Command::SaveBuffer {
+        path: path.as_site_path().clone(),
+        consent,
+    }))
+}
+
+/// `POST /_presemble/flush`: the page is being left (ADR-070), so its
+/// document is saved now if auto-save may save it (`Command::FlushDirty`);
+/// with auto-save off, nothing is saved.
+async fn flush_handler(
+    _session: Session,
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::Json<EditResponse> {
+    // A flush never overwrites a conflict: any consent is not looked at.
+    let path = match file_request(&body) {
+        Ok((path, _)) => path,
+        Err(e) => return axum::Json(EditResponse::err(e)),
+    };
+    conductor_edit_response(
+        state
+            .conductor
+            .send(&conductor::Command::FlushDirty { file: Some(path) }),
     )
 }
 
@@ -6324,6 +6402,165 @@ mod tests {
             });
         });
         (triggers, builds, release)
+    }
+
+    /// POST `body` to `uri` of the served site as `content_type`, with the
+    /// session cookie when `session`; the status and the JSON answer.
+    async fn post_raw(
+        site: &ServedSite,
+        uri: &str,
+        content_type: &str,
+        body: &str,
+        session: bool,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", content_type);
+        if session {
+            req = req.header("cookie", test_session_cookie());
+        }
+        let resp = site
+            .app
+            .clone()
+            .oneshot(req.body(axum::body::Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn doc_on_disk(site: &ServedSite) -> String {
+        std::fs::read_to_string(site.root.join("content/test/doc.md")).unwrap()
+    }
+
+    const DOC: &str = r#"{"file":"content/test/doc.md"}"#;
+
+    /// The leave hint: what `navigator.sendBeacon` posts (a text body) is
+    /// taken, and the page's document is saved at once (auto-save is on).
+    #[tokio::test]
+    async fn the_flush_route_saves_the_pages_document() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, false);
+        apply_title_edit(&site, "Flushed Title").await;
+        assert!(!doc_on_disk(&site).contains("Flushed Title"));
+
+        let (status, val) = post_raw(
+            &site,
+            "/_presemble/flush",
+            "text/plain;charset=UTF-8",
+            DOC,
+            true,
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        assert_eq!(val["ok"], true, "{val}");
+        assert!(
+            doc_on_disk(&site).contains("Flushed Title"),
+            "{}",
+            doc_on_disk(&site)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_flush_route_requires_a_session() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, false);
+        apply_title_edit(&site, "Flushed Title").await;
+
+        let (status, _) =
+            post_raw(&site, "/_presemble/flush", "application/json", DOC, false).await;
+
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        assert!(
+            !doc_on_disk(&site).contains("Flushed Title"),
+            "nothing was saved"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_save_route_saves_one_file_and_refuses_what_is_not_one() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, false);
+        apply_title_edit(&site, "Retried Title").await;
+
+        let (status, val) =
+            post_raw(&site, "/_presemble/save", "application/json", DOC, true).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        assert_eq!(val["ok"], true, "{val}");
+        assert!(doc_on_disk(&site).contains("Retried Title"));
+
+        for bad in [
+            r#"{"file":"../outside.md"}"#,
+            r#"{"file":"schemas/test/item.md"}"#,
+            "{ not json",
+        ] {
+            for route in ["/_presemble/save", "/_presemble/flush"] {
+                let (status, val) = post_raw(&site, route, "application/json", bad, true).await;
+                assert_eq!(status, axum::http::StatusCode::OK, "{route} {bad}: {val}");
+                assert_eq!(val["ok"], false, "{route} {bad}: {val}");
+                assert!(
+                    val["error"].as_str().is_some_and(|e| !e.is_empty()),
+                    "{val}"
+                );
+            }
+        }
+    }
+
+    /// Retry of a document in conflict with its file: nothing is written, and
+    /// the answer asks for the choice; consent that names it overwrites.
+    #[tokio::test]
+    async fn the_save_route_needs_consent_to_overwrite_a_conflict() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, false);
+        apply_title_edit(&site, "Retried Title").await;
+        std::fs::write(site.root.join("content/test/doc.md"), "# Changed On Disk\n").unwrap();
+        site.client
+            .send(&conductor::Command::FileChanged {
+                paths: vec![editorial_types::SitePath::parse("content/test/doc.md").unwrap()],
+            })
+            .expect("the conductor takes the change");
+
+        let (_, refused) = post_raw(&site, "/_presemble/save", "application/json", DOC, true).await;
+        assert_eq!(refused["ok"], false, "{refused}");
+        assert_eq!(refused["needsConfirmation"], true, "{refused}");
+        assert_eq!(
+            refused["conflicts"],
+            serde_json::json!(["content/test/doc.md"]),
+            "{refused}"
+        );
+        assert_eq!(doc_on_disk(&site), "# Changed On Disk\n");
+
+        let (_, saved) = post_raw(
+            &site,
+            "/_presemble/save",
+            "application/json",
+            r#"{"file":"content/test/doc.md","overwriteConflicts":["content/test/doc.md"]}"#,
+            true,
+        )
+        .await;
+        assert_eq!(saved["ok"], true, "{saved}");
+        assert!(
+            doc_on_disk(&site).contains("Retried Title"),
+            "{}",
+            doc_on_disk(&site)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_save_route_requires_a_session() {
+        let site = served_site("# Test Title\n", TITLE_TEMPLATE, false);
+        apply_title_edit(&site, "Retried Title").await;
+
+        let (status, _) = post_raw(&site, "/_presemble/save", "application/json", DOC, false).await;
+
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        assert!(!doc_on_disk(&site).contains("Retried Title"));
     }
 
     #[test]

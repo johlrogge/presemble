@@ -448,6 +448,8 @@ assert_status_anon "schema URL without session is 401" GET "/_schema/index" "401
 assert_status_anon "login with bogus token is 401" GET "/_presemble/login?token=bogus.token" "401"
 assert_status_anon "published page without session is 200" GET "/" "200"
 assert_status_anon "session probe without session is 401" GET "/_presemble/session" "401"
+assert_status_anon "save without session is 401" POST "/_presemble/save" "401" '{"file":"content/index.md"}'
+assert_status_anon "flush without session is 401" POST "/_presemble/flush" "401" '{"file":"content/index.md"}'
 
 # WebSocket split (ADR-054): public live-reload socket vs session-gated
 # editorial socket. The 101 assertions rely on curl's -w '%{http_code}'
@@ -498,6 +500,11 @@ assert_curl "index page has data-presemble-file attr" "/" GET "" 'data-presemble
 assert_curl "collection page has index data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/index.md"'
 assert_curl "collection page has item data-presemble-file" "/post/" GET "" 'data-presemble-file="content/post/hello-world.md"'
 assert_curl "leaf page has data-presemble-file attr" "/post/hello-world" GET "" 'data-presemble-file="content/post/hello-world.md"'
+# The page script names the page's own document: what the save-state
+# indicator and the leave hint follow (ADR-070), on a collection page its own
+# index.md, not one of the items it lists.
+assert_curl "collection page script names its own index.md" "/post/" GET "" '"file":"content/post/index.md"'
+assert_curl "leaf page script names its own file" "/post/hello-world" GET "" '"file":"content/post/hello-world.md"'
 # The browser edits the canonical markdown and addresses by the emitted
 # address (ADR-059 section 10); the old stored-text attribute is gone.
 assert_curl "post title element carries its markdown" "/post/hello-world" GET "" \
@@ -535,6 +542,27 @@ assert_curl "dirty buffers after edit" "/_presemble/dirty-buffers" GET "" "conte
 log "Saving all buffers..."
 assert_curl "save all" "/_presemble/save-all" POST "" '"ok":true'
 assert_curl "no dirty buffers after save" "/_presemble/dirty-buffers" GET "" "[]"
+
+# ── Test: Saving one document, and the leave hint (ADR-070) ───────────────
+# The smoketest site has auto-save off: the leave hint (flush) saves nothing,
+# an explicit save of one document (the save banner's Retry) saves it.
+
+log "Testing the save and flush routes..."
+block_edit "edit index tagline again" "/" content/index.md tagline "Smoke Saved Once"
+assert_curl "flush answers ok" "/_presemble/flush" POST '{"file":"content/index.md"}' '"ok":true'
+FLUSH_BEACON=$(acurl -X POST "http://127.0.0.1:$PORT/_presemble/flush" -H 'Content-Type: text/plain;charset=UTF-8' \
+    -d '{"file":"content/index.md"}' 2>&1 || true)
+assert_contains "flush takes a beacon's text body" "$FLUSH_BEACON" '"ok":true'
+assert_curl "flush with auto-save off leaves the edit unsaved" "/_presemble/dirty-buffers" GET "" "content/index.md"
+assert_curl "save of one document answers ok" "/_presemble/save" POST '{"file":"content/index.md"}' '"ok":true'
+assert_curl "save of one document saved it" "/_presemble/dirty-buffers" GET "" "[]"
+if grep -qF "Smoke Saved Once" "$SITE_DIR/content/index.md"; then
+    pass "save of one document wrote the edit"
+else
+    fail "save of one document wrote the edit"
+fi
+assert_curl "save refuses a path outside the content" "/_presemble/save" POST '{"file":"../outside.md"}' '"ok":false'
+assert_curl "flush refuses a path outside the content" "/_presemble/flush" POST '{"file":"../outside.md"}' '"ok":false'
 
 # ── Test: nth-child scopes edit to one paragraph, leaves others intact ────
 
