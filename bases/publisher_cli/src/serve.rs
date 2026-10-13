@@ -2378,17 +2378,19 @@ async fn handle_lsp_ws(mut ws_socket: WebSocket, site_dir: std::path::PathBuf) {
     // - adapter_side: our bridge (write requests in, read responses out)
     let (lsp_side, adapter_side) = tokio::io::duplex(1024 * 64);
 
-    let conductor_client = conductor::ensure_conductor(&site_dir).unwrap_or_else(|e| {
-        // Log the error but don't abort the WebSocket connection — a stale
-        // connection attempt is better than a hard failure for in-browser LSP.
-        eprintln!("presemble: could not start conductor for WebSocket LSP: {e}");
-        // We cannot proceed without a conductor; create a placeholder by
-        // connecting to the URL (which may fail at the send level, handled gracefully).
-        conductor::ConductorClient::connect(&conductor::socket_url(&site_dir))
-            .expect("conductor socket unreachable after ensure_conductor failed")
-    });
-    let (service, lsp_socket) =
-        LspService::new(|client| PresembleLsp::new(client, site_dir, conductor_client));
+    // Without a conductor the language server still answers: it tells the
+    // editor why, and every request is answered empty.
+    let link = match conductor::ensure_conductor(&site_dir) {
+        Ok(client) => lsp_service::ConductorLink::Connected(client),
+        Err(e) => {
+            eprintln!("presemble: could not start conductor for WebSocket LSP: {e}");
+            lsp_service::ConductorLink::Unavailable(format!(
+                "no conductor for {}: {e}",
+                site_dir.display()
+            ))
+        }
+    };
+    let (service, lsp_socket) = LspService::new(|client| PresembleLsp::new(client, site_dir, link));
 
     // Split lsp_side for the Server (needs separate AsyncRead and AsyncWrite).
     let (lsp_read, lsp_write) = tokio::io::split(lsp_side);

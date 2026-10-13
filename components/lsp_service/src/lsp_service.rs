@@ -77,10 +77,53 @@ struct StoredDiagnostic {
     action: Option<SlotAction>,
 }
 
+/// The language server's line to the conductor, as it could be set up.
+pub enum ConductorLink {
+    Connected(conductor::ConductorClient),
+    /// No conductor could be reached; why, for the editor to show.
+    Unavailable(String),
+}
+
+/// The Presemble language server. Without a conductor it still runs: it
+/// tells the editor why (`window/showMessage`) and answers every request
+/// empty, rather than exiting and leaving the editor to guess.
 pub struct PresembleLsp {
+    inner: Inner,
+}
+
+enum Inner {
+    Connected(Box<Session>),
+    Unavailable { client: Client, reason: String },
+}
+
+/// What the editor is told when there is no conductor: an error naming the
+/// reason.
+pub fn unavailable_message(reason: &str) -> (MessageType, String) {
+    (
+        MessageType::ERROR,
+        format!(
+            "Presemble could not reach its conductor, so this editor gets no checks, completions or saving from it: {reason}"
+        ),
+    )
+}
+
+impl PresembleLsp {
+    pub fn new(client: Client, site_dir: std::path::PathBuf, link: ConductorLink) -> Self {
+        let inner = match link {
+            ConductorLink::Connected(conductor) => {
+                Inner::Connected(Box::new(Session::new(client, site_dir, conductor)))
+            }
+            ConductorLink::Unavailable(reason) => Inner::Unavailable { client, reason },
+        };
+        Self { inner }
+    }
+}
+
+/// The language server with a conductor.
+struct Session {
     client: Client,
     repo: site_repository::SiteRepository,
-    pub site_dir: std::path::PathBuf,
+    site_dir: std::path::PathBuf,
     doc_sources: Arc<Mutex<HashMap<String, String>>>,
     doc_diagnostics: Arc<Mutex<HashMap<String, Vec<StoredDiagnostic>>>>,
     conductor: Arc<Mutex<conductor::ConductorClient>>,
@@ -570,16 +613,16 @@ fn forward_event(event: conductor::ConductorEvent, publisher: &Publisher, sender
 
 /// The line to the conductor for the sender thread. The handlers share the
 /// client behind an async mutex; the thread takes it for the length of a send.
-struct ConductorLink(Arc<Mutex<conductor::ConductorClient>>);
+struct SenderLine(Arc<Mutex<conductor::ConductorClient>>);
 
-impl buffer::Link for ConductorLink {
+impl buffer::Link for SenderLine {
     fn send(&mut self, cmd: &conductor::Command) -> Result<conductor::Response, String> {
         self.0.blocking_lock().send(cmd)
     }
 }
 
-impl PresembleLsp {
-    pub fn new(
+impl Session {
+    fn new(
         client: Client,
         site_dir: std::path::PathBuf,
         conductor: conductor::ConductorClient,
@@ -591,7 +634,7 @@ impl PresembleLsp {
         let doc_sources = Arc::new(Mutex::new(HashMap::new()));
         let synced = Arc::new(Mutex::new(HashMap::new()));
         let versions = Arc::new(Mutex::new(HashMap::new()));
-        let sender = Arc::new(buffer::Sender::start(ConductorLink(conductor.clone())));
+        let sender = Arc::new(buffer::Sender::start(SenderLine(conductor.clone())));
         let handle = tokio::runtime::Handle::current();
         let publisher = Publisher {
             client: client.clone(),
@@ -1016,7 +1059,7 @@ fn full_doc_replacement(
 }
 
 #[async_trait]
-impl LanguageServer for PresembleLsp {
+impl LanguageServer for Session {
     async fn initialize(
         &self,
         _: InitializeParams,
@@ -1815,10 +1858,130 @@ fn separator_line(src: &str) -> Option<u32> {
         .map(|(i, _)| i as u32)
 }
 
+/// Every request goes to the session; without a conductor, the editor is
+/// told why once (on `initialized`) and every request is answered empty.
+#[async_trait]
+impl LanguageServer for PresembleLsp {
+    async fn initialize(
+        &self,
+        params: InitializeParams,
+    ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
+        match &self.inner {
+            Inner::Connected(session) => session.initialize(params).await,
+            Inner::Unavailable { .. } => Ok(InitializeResult::default()),
+        }
+    }
+
+    async fn initialized(&self, params: InitializedParams) {
+        match &self.inner {
+            Inner::Connected(session) => session.initialized(params).await,
+            Inner::Unavailable { client, reason } => {
+                let (kind, message) = unavailable_message(reason);
+                client.show_message(kind, message).await;
+            }
+        }
+    }
+
+    async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
+        match &self.inner {
+            Inner::Connected(session) => session.shutdown().await,
+            Inner::Unavailable { .. } => Ok(()),
+        }
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        if let Inner::Connected(session) = &self.inner {
+            session.did_open(params).await;
+        }
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        if let Inner::Connected(session) = &self.inner {
+            session.did_close(params).await;
+        }
+    }
+
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        if let Inner::Connected(session) = &self.inner {
+            session.did_change(params).await;
+        }
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        if let Inner::Connected(session) = &self.inner {
+            session.did_save(params).await;
+        }
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
+        match &self.inner {
+            Inner::Connected(session) => session.completion(params).await,
+            Inner::Unavailable { .. } => Ok(None),
+        }
+    }
+
+    async fn hover(&self, params: HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
+        match &self.inner {
+            Inner::Connected(session) => session.hover(params).await,
+            Inner::Unavailable { .. } => Ok(None),
+        }
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
+        match &self.inner {
+            Inner::Connected(session) => session.code_action(params).await,
+            Inner::Unavailable { .. } => Ok(None),
+        }
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
+        match &self.inner {
+            Inner::Connected(session) => session.formatting(params).await,
+            Inner::Unavailable { .. } => Ok(None),
+        }
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<GotoDefinitionResponse>> {
+        match &self.inner {
+            Inner::Connected(session) => session.goto_definition(params).await,
+            Inner::Unavailable { .. } => Ok(None),
+        }
+    }
+
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
+        match &self.inner {
+            Inner::Connected(session) => session.execute_command(params).await,
+            Inner::Unavailable { .. } => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn without_a_conductor_the_editor_is_told_why() {
+        let (kind, message) = unavailable_message("x is not a site directory");
+        assert_eq!(kind, MessageType::ERROR);
+        assert!(message.contains("x is not a site directory"), "{message}");
+    }
 
     #[test]
     fn lsp_ignores_a_file_outside_the_site() {

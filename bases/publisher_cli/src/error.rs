@@ -21,6 +21,9 @@ pub enum CliError {
     NotFormatted(usize),
     /// `presemble fmt`: files that could not be formatted.
     FormatFailed(usize),
+    /// The site directory given is not one (missing, not a directory, or
+    /// without `schemas/`); the message names the path.
+    SiteDir(String),
 }
 
 impl CliError {
@@ -52,6 +55,7 @@ impl fmt::Display for CliError {
             CliError::PagesFailed(n) => write!(f, "{n} page(s) failed to render"),
             CliError::NotFormatted(n) => write!(f, "{n} file(s) would be reformatted"),
             CliError::FormatFailed(n) => write!(f, "{n} file(s) could not be formatted"),
+            CliError::SiteDir(msg) => write!(f, "{msg}"),
         }
     }
 }

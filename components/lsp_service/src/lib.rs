@@ -1,4 +1,4 @@
 mod buffer;
 mod lsp_service;
 
-pub use lsp_service::PresembleLsp;
+pub use lsp_service::{ConductorLink, PresembleLsp};

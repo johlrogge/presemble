@@ -2,6 +2,7 @@ mod error;
 mod fmt;
 mod lsp;
 mod serve;
+mod site_dir;
 
 pub use template_registry::FileTemplateRegistry;
 
@@ -506,7 +507,8 @@ pub fn run() -> Result<(), CliError> {
         Some(Command::Fmt { site_dir, check }) => fmt::run_fmt(Path::new(&site_dir), check),
         Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
         Some(Command::Conductor { site_dir }) => {
-            editor_server::run_daemon(Path::new(&site_dir)).map_err(CliError::Render)
+            let site = site_dir::SiteDir::existing(Path::new(&site_dir))?;
+            editor_server::run_daemon(site.path()).map_err(CliError::Render)
         }
         Some(Command::Convert { input, to, output }) => {
             convert_template(Path::new(&input), &to, output.as_deref().map(Path::new))
