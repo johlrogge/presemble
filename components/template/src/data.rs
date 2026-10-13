@@ -255,18 +255,28 @@ pub fn image_record(src: &str, alt: &content::inline::Inlines) -> DataGraph {
 
 /// Create a synthesized link record for a content item.
 /// The `_source_slot` field tells the browser editor which grammar slot
-/// to write back to when the link text is edited. `title_editor` is the title
-/// heading's editor record (its address and its `Content` projection as
-/// markdown, [`title_editor`]); the link carries both, so the browser editor
-/// edits the title through the link as it does through the heading.
-pub fn synthesize_link(title: &str, url_path: &str, title_editor: Option<&DataGraph>) -> DataGraph {
+/// to write back to when the link text is edited: `title_slot`, the slot of
+/// the document's title heading (`schema::Grammar::title_slot`), whatever it
+/// is called; no source slot when the document has no title heading.
+/// `title_editor` is the title heading's editor record (its address and its
+/// `Content` projection as markdown, [`title_editor`]); the link carries both,
+/// so the browser editor edits the title through the link as it does through
+/// the heading.
+pub fn synthesize_link(
+    title: &str,
+    url_path: &str,
+    title_slot: Option<&str>,
+    title_editor: Option<&DataGraph>,
+) -> DataGraph {
     let mut link = DataGraph::new();
     link.insert("href", Value::Text(url_path.to_string()));
     link.insert("text", Value::Text(title.to_string()));
-    link.insert(
-        crate::constants::KEY_SOURCE_SLOT,
-        Value::Text("title".to_string()),
-    );
+    if let Some(slot) = title_slot {
+        link.insert(
+            crate::constants::KEY_SOURCE_SLOT,
+            Value::Text(slot.to_string()),
+        );
+    }
     if let Some(editor) = title_editor {
         for key in [
             crate::constants::KEY_EDITOR_ADDRESS,
@@ -280,11 +290,40 @@ pub fn synthesize_link(title: &str, url_path: &str, title_editor: Option<&DataGr
     link
 }
 
-/// The editor record of the `title` slot of `graph`, as `build_article_graph`
-/// puts it there in editorial output (`None` in published output, or when the
-/// slot has no heading).
-pub fn title_editor(graph: &DataGraph) -> Option<&DataGraph> {
-    let key = format!("{}title", crate::constants::KEY_EDITOR_PREFIX);
+/// The link record of the page whose graph is `graph`, at `url`: its text is
+/// the title heading's text, read from the slot `grammar` keeps it in
+/// (`schema::Grammar::title_slot`, whatever it is called), and it stands for
+/// that slot in the editor. Without a title heading (no grammar, or none in
+/// it, or the slot empty) the text is `fallback`.
+pub fn page_link(
+    graph: &DataGraph,
+    grammar: Option<&Grammar>,
+    url: &str,
+    fallback: &str,
+) -> DataGraph {
+    let slot = grammar
+        .and_then(Grammar::title_slot)
+        .map(|slot| slot.name.as_str());
+    // A title is its text in a string context, whatever it is made of.
+    let title = slot
+        .and_then(|slot| match graph.resolve(&[slot]) {
+            Some(v @ (Value::Text(_) | Value::Inlines(_))) => v.display_text(),
+            _ => None,
+        })
+        .unwrap_or_else(|| fallback.to_string());
+    synthesize_link(
+        &title,
+        url,
+        slot,
+        slot.and_then(|slot| title_editor(graph, slot)),
+    )
+}
+
+/// The editor record of the title slot `slot` of `graph`, as
+/// `build_article_graph` puts it there in editorial output (`None` in
+/// published output, or when the slot has no heading).
+pub fn title_editor<'g>(graph: &'g DataGraph, slot: &str) -> Option<&'g DataGraph> {
+    let key = format!("{}{slot}", crate::constants::KEY_EDITOR_PREFIX);
     match graph.resolve(&[key.as_str()]) {
         Some(Value::Record(record)) => Some(record),
         _ => None,
@@ -637,15 +676,15 @@ mod tests {
 
         let published = build_article_graph(&doc, &grammar, OutputMode::Published);
         assert!(
-            title_editor(&published).is_none(),
+            title_editor(&published, "title").is_none(),
             "published graph carries no editor record"
         );
 
         // The editorial graph's title editor record holds the heading's
         // `Content` projection; a title link made from it carries both keys.
         let editorial = build_article_graph(&doc, &grammar, OutputMode::Editorial);
-        let record = title_editor(&editorial).expect("the editorial graph has one");
-        let link = synthesize_link("Title", "/x", Some(record));
+        let record = title_editor(&editorial, "title").expect("the editorial graph has one");
+        let link = synthesize_link("Title", "/x", Some("title"), Some(record));
         match link.resolve(&[crate::constants::KEY_EDITOR_MD]) {
             Some(Value::Text(t)) => assert_eq!(t, "Title"),
             other => panic!("the title link should carry the heading's md, got {other:?}"),
@@ -658,7 +697,7 @@ mod tests {
 
     #[test]
     fn synthesize_link_without_a_title_editor_has_no_editor_keys() {
-        let link = synthesize_link("T", "/x", None);
+        let link = synthesize_link("T", "/x", Some("title"), None);
         assert!(link.resolve(&[crate::constants::KEY_EDITOR_MD]).is_none());
         assert!(
             link.resolve(&[crate::constants::KEY_EDITOR_ADDRESS])
@@ -874,7 +913,7 @@ mod tests {
 
     #[test]
     fn synthesize_link_has_href_text_and_source_slot() {
-        let link = synthesize_link("Hello World", "/article/hello-world", None);
+        let link = synthesize_link("Hello World", "/article/hello-world", Some("name"), None);
         match link.resolve(&["href"]) {
             Some(Value::Text(v)) => assert_eq!(v, "/article/hello-world"),
             other => panic!("expected href text, got {other:?}"),
@@ -883,10 +922,22 @@ mod tests {
             Some(Value::Text(v)) => assert_eq!(v, "Hello World"),
             other => panic!("expected text, got {other:?}"),
         }
+        // The source slot is the title heading's slot, whatever it is called.
         match link.resolve(&["_source_slot"]) {
-            Some(Value::Text(v)) => assert_eq!(v, "title"),
-            other => panic!("expected _source_slot=title, got {other:?}"),
+            Some(Value::Text(v)) => assert_eq!(v, "name"),
+            other => panic!("expected _source_slot=name, got {other:?}"),
         }
+    }
+
+    /// A document with no title heading has no slot a link stands for.
+    #[test]
+    fn synthesize_link_without_a_title_slot_has_no_source_slot() {
+        let link = synthesize_link("x", "/author/x", None, None);
+        assert!(
+            link.resolve(&[crate::constants::KEY_SOURCE_SLOT]).is_none(),
+            "{:?}",
+            link.resolve(&[crate::constants::KEY_SOURCE_SLOT])
+        );
     }
 
     #[test]

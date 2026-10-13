@@ -2158,10 +2158,11 @@ impl Conductor {
         // Build the DataGraph using the existing function.
         // For template-only pages (no associated schema), produce an empty DataGraph
         // so the template can still render with injected collection data.
-        let mut data = if let Some(ref src) = grammar_src
-            && let Ok(grammar) = schema::parse_schema(src)
-        {
-            template::build_article_graph(&doc, &grammar, template::OutputMode::Editorial)
+        let grammar = grammar_src
+            .as_deref()
+            .and_then(|src| schema::parse_schema(src).ok());
+        let mut data = if let Some(grammar) = &grammar {
+            template::build_article_graph(&doc, grammar, template::OutputMode::Editorial)
         } else {
             // No grammar (template-only page like the legacy root index).
             // Return an empty DataGraph; collection injection in build_all_pages
@@ -2177,14 +2178,10 @@ impl Conductor {
         data.insert("_presemble_file", template::Value::Text(presemble_file));
         data.insert("url", template::Value::Text(url.clone()));
 
-        // Synthesize link record
-        let title = match data.resolve(&["title"]) {
-            Some(v @ (template::Value::Text(_) | template::Value::Inlines(_))) => {
-                v.display_text().unwrap_or_default()
-            }
-            _ => url.split('/').next_back().unwrap_or("").to_string(),
-        };
-        let link = template::synthesize_link(&title, &url, template::title_editor(&data));
+        // The page's link reads its title heading, whatever its slot is
+        // called; a template-only page (no grammar) is named by its URL.
+        let fallback = url.split('/').next_back().unwrap_or("").to_string();
+        let link = template::page_link(&data, grammar.as_ref(), &url, &fallback);
         data.insert("link", template::Value::Record(link));
 
         Some(data)
@@ -6271,6 +6268,54 @@ mod node_store_index_tests {
             ),
             other => panic!("expected the title as inlines, got {other:?}"),
         }
+    }
+
+    /// Bug 5 (D5): the page link of the DataGraph (nREPL, evaluator queries)
+    /// reads the title heading, whatever its slot is called, and stands for
+    /// that slot.
+    #[test]
+    fn datagraph_for_document_link_reads_the_title_heading_whatever_its_slot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for dir in ["schemas/author", "templates/author", "content/author"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(
+            root.join("schemas/author/item.md"),
+            "# Author name {#name}\noccurs\n: exactly once\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("templates/author/item.hiccup"),
+            "[:main [:presemble/insert {:data input.link :as \"a\"}]]",
+        )
+        .unwrap();
+        std::fs::write(root.join("content/author/jo.md"), "# Joakim Ohlrogge\n").unwrap();
+        let conductor = make_conductor(&tmp);
+
+        let doc = conductor
+            .document_by_url("/author/jo")
+            .expect("the author page");
+        let data = conductor
+            .datagraph_for_document(doc)
+            .expect("its data graph");
+        let link = match data.resolve(&["link"]) {
+            Some(template::Value::Record(link)) => link.clone(),
+            other => panic!("expected the link record, got {other:?}"),
+        };
+        assert!(
+            matches!(link.resolve(&["text"]), Some(template::Value::Text(t)) if t == "Joakim Ohlrogge"),
+            "{:?}",
+            link.resolve(&["text"])
+        );
+        assert!(
+            matches!(
+                link.resolve(&[template::constants::KEY_SOURCE_SLOT]),
+                Some(template::Value::Text(s)) if s == "name"
+            ),
+            "{:?}",
+            link.resolve(&[template::constants::KEY_SOURCE_SLOT])
+        );
     }
 
     #[test]

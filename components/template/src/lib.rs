@@ -24,7 +24,8 @@ pub use constraints::{
 };
 pub use data::{
     Callable, DataGraph, OutputMode, SuggestionKind, Value, build_article_graph,
-    build_schema_included_by_json, inject_schema_included_by, synthesize_link, title_editor,
+    build_schema_included_by_json, inject_schema_included_by, page_link, synthesize_link,
+    title_editor,
 };
 pub use dom::{
     Form, UrlRewriter, extract_asset_paths, html_escape_attr, html_escape_text, parse_template_xml,

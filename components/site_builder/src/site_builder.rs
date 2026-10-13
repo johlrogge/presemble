@@ -182,14 +182,8 @@ pub fn build_graph(
             data.insert(KEY_PRESEMBLE_FILE, template::Value::Text(presemble_file));
             let url_path = site_index::url_for_stem_slug(schema_stem_str, &slug);
             data.insert("url", template::Value::Text(url_path.clone()));
-            // A title is its text in a string context, whatever it is made of.
-            let title = match data.resolve(&["title"]) {
-                Some(v @ (template::Value::Text(_) | template::Value::Inlines(_))) => {
-                    v.display_text().unwrap_or_default()
-                }
-                _ => slug.clone(),
-            };
-            let link = template::synthesize_link(&title, &url_path, template::title_editor(&data));
+            // The page's link reads its title heading, whatever its slot is called.
+            let link = template::page_link(&data, Some(&grammar), &url_path, &slug);
             data.insert("link", template::Value::Record(link));
 
             // Compute output path
@@ -306,13 +300,12 @@ pub fn build_graph(
             )
         };
         data.insert("url", template::Value::Text(url_path_str.clone()));
-        let title = match data.resolve(&["title"]) {
-            Some(v @ (template::Value::Text(_) | template::Value::Inlines(_))) => {
-                v.display_text().unwrap_or_default()
-            }
-            _ => schema_stem_str.to_string(),
-        };
-        let link = template::synthesize_link(&title, &url_path_str, template::title_editor(&data));
+        let link = template::page_link(
+            &data,
+            Some(&collection_grammar),
+            &url_path_str,
+            schema_stem_str,
+        );
         data.insert("link", template::Value::Record(link));
 
         let collection_content_path = repo.collection_content_path(stem);
@@ -437,6 +430,43 @@ mod tests {
         let pd = node.page_data().expect("should be a page node");
         assert_eq!(pd.page_kind, PageKind::Item);
         assert_eq!(pd.schema_stem.as_str(), "post");
+    }
+
+    /// Bug 5 (D5): a page's link reads its title heading, whatever the
+    /// grammar calls its slot, and stands for that slot.
+    #[test]
+    fn build_graph_page_link_reads_the_title_heading_whatever_its_slot() {
+        let repo = site_repository::SiteRepository::builder()
+            .schema("author", "# Author name {#name}\noccurs\n: exactly once\n")
+            .content("author", "jo", "# Joakim Ohlrogge\n")
+            .item_template("author", "<html><body></body></html>", false)
+            .build();
+        let result = build_graph(
+            &repo,
+            &std::path::PathBuf::from("/output"),
+            SourceAttachment::Omit,
+        );
+        let node = result
+            .graph
+            .get(&UrlPath::new("/author/jo"))
+            .expect("the author page");
+        let link = match node.page_data().unwrap().data.resolve(&["link"]) {
+            Some(template::Value::Record(link)) => link.clone(),
+            other => panic!("expected the link record, got {other:?}"),
+        };
+        assert!(
+            matches!(link.resolve(&["text"]), Some(template::Value::Text(t)) if t == "Joakim Ohlrogge"),
+            "{:?}",
+            link.resolve(&["text"])
+        );
+        assert!(
+            matches!(
+                link.resolve(&[template::constants::KEY_SOURCE_SLOT]),
+                Some(template::Value::Text(s)) if s == "name"
+            ),
+            "{:?}",
+            link.resolve(&[template::constants::KEY_SOURCE_SLOT])
+        );
     }
 
     #[test]

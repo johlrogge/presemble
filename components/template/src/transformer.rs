@@ -2600,7 +2600,12 @@ mod tests {
     #[test]
     fn synthesized_link_renders_with_source_slot_attribute() {
         let mut graph = DataGraph::new();
-        let link = crate::data::synthesize_link("Hello World", "/article/hello-world", None);
+        let link = crate::data::synthesize_link(
+            "Hello World",
+            "/article/hello-world",
+            Some("title"),
+            None,
+        );
         graph.insert("link", Value::Record(link));
 
         let src = r#"<presemble:insert data="(ref link)" />"#;
@@ -2676,6 +2681,7 @@ mod tests {
             let link = crate::data::synthesize_link(
                 "Hello src",
                 "/article/hello",
+                Some("title"),
                 Some(&title_editor_record("Hello *src*")),
             );
             graph.insert("link", Value::Record(link));
@@ -2766,6 +2772,7 @@ mod tests {
         let link = crate::data::synthesize_link(
             "Hello src",
             "/article/hello",
+            Some("title"),
             Some(&title_editor_record("Hello *src*")),
         );
         graph.insert("link", Value::Record(link));
@@ -2783,6 +2790,7 @@ mod tests {
         let link = crate::data::synthesize_link(
             "Hello src",
             "/article/hello",
+            Some("title"),
             Some(&title_editor_record("src")),
         );
         graph.insert("link", Value::Record(link));
@@ -2839,8 +2847,12 @@ mod tests {
             Some(v @ Value::Inlines(_)) => v.display_text().unwrap_or_default(),
             other => panic!("title should be inlines, got {other:?}"),
         };
-        let link =
-            crate::data::synthesize_link(&title, "/post/x", crate::data::title_editor(&input));
+        let link = crate::data::synthesize_link(
+            &title,
+            "/post/x",
+            Some("title"),
+            crate::data::title_editor(&input, "title"),
+        );
         input.insert("link", Value::Record(link));
         let mut graph = DataGraph::new();
         graph.insert("input", Value::Record(input));
@@ -3627,7 +3639,12 @@ mod tests {
         // A synthesized link record (with _source_slot) should carry
         // data-presemble-source-slot even when (text ..) is used.
         let mut graph = DataGraph::new();
-        let link = crate::data::synthesize_link("Hello World", "/article/hello-world", None);
+        let link = crate::data::synthesize_link(
+            "Hello World",
+            "/article/hello-world",
+            Some("title"),
+            None,
+        );
         graph.insert("link", Value::Record(link));
 
         let src = r#"<presemble:insert data="(text link)" as="h3" />"#;
@@ -5421,7 +5438,12 @@ mod tests {
                 crate::constants::KEY_PRESEMBLE_FILE,
                 Value::Text(file.to_string()),
             );
-            let link = crate::data::synthesize_link(title, "/x", crate::data::title_editor(&item));
+            let link = crate::data::synthesize_link(
+                title,
+                "/x",
+                Some("title"),
+                crate::data::title_editor(&item, "title"),
+            );
             item.insert("link", Value::Record(link));
             items.push(Value::Record(item));
         }
@@ -5731,6 +5753,7 @@ mod tests {
             Value::Record(crate::data::synthesize_link(
                 "Plain em title",
                 "/x",
+                Some("title"),
                 Some(&editor),
             )),
         );
