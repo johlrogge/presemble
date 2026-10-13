@@ -251,7 +251,8 @@ impl ConflictState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SaveState {
     /// The file holds the document as N has it; `at` is when the file was
-    /// written.
+    /// written. On the editorial websocket (`save-state`) it is sent as
+    /// milliseconds since the Unix epoch, a number.
     Saved { at: std::time::SystemTime },
     /// N holds edits the file does not have yet.
     Unsaved,

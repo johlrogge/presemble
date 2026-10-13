@@ -47,6 +47,12 @@ enum EditorialMessage {
     Conflict { file: String, scope: ConflictScope },
     /// A document's conflict with its file has ended.
     ConflictResolved { file: String },
+    /// A document's save state changed (ADR-070). Editorial only: a draft
+    /// file name never goes on the public socket.
+    SaveState {
+        file: String,
+        state: conductor::SaveState,
+    },
 }
 
 /// What of a document conflicts with its file (the browser marks blocks on
@@ -226,6 +232,29 @@ impl EditorialMessage {
                 r#"{{"type":"conflict-resolved","file":{}}}"#,
                 serde_json::Value::from(file.as_str())
             ),
+            EditorialMessage::SaveState { file, state } => {
+                let mut message = serde_json::json!({ "type": "save-state", "file": file });
+                let fields = message.as_object_mut().expect("an object");
+                let wire = match state {
+                    conductor::SaveState::Saved { at } => {
+                        // Milliseconds since the Unix epoch.
+                        let ms = at
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        fields.insert("at".to_string(), ms.into());
+                        "saved"
+                    }
+                    conductor::SaveState::Unsaved => "unsaved",
+                    conductor::SaveState::Conflict => "conflict",
+                    conductor::SaveState::Failed { error } => {
+                        fields.insert("error".to_string(), error.as_str().into());
+                        "failed"
+                    }
+                };
+                fields.insert("state".to_string(), wire.into());
+                message.to_string()
+            }
         }
     }
 }
@@ -262,8 +291,7 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
         // For open editors: the language server brings the buffer to the
         // canonical text; the browser shows N already.
         ConductorEvent::EditorCanonicalWanted { .. } => return None,
-        // Not carried to the browser yet (ADR-070, A3).
-        ConductorEvent::SaveState { .. } => return None,
+        ConductorEvent::SaveState { file, state } => EditorialMessage::SaveState { file, state },
         ConductorEvent::PagesRebuilt { pages, anchor } => {
             EditorialMessage::Reload { pages, anchor }
         }
@@ -742,17 +770,43 @@ fn start_publisher(
     let (tx, rx) = mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut next_version = 1;
-        while rx.recv().is_ok() {
-            while rx.recv_timeout(quiet).is_ok() {}
+        run_publisher(&rx, quiet, PUBLISH_MAX_WAIT, || {
             let dir = version_dir(&site_dir, next_version);
             next_version += 1;
             publish_next_version(&site_dir, &published, &channels, dir);
             published
                 .attempts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
+        });
     });
     PublishTrigger(tx)
+}
+
+/// The longest a burst of triggers can put a build off: however steadily
+/// they keep coming (auto-save saves a lot), the build starts by then.
+const PUBLISH_MAX_WAIT: Duration = Duration::from_secs(2);
+
+/// The published-build worker's loop: on a trigger, wait until no further
+/// trigger has come for `quiet`, but no longer than `max_wait` after the
+/// first, then `build`. Triggers that arrive during a build are coalesced
+/// into one build after it: at most one build runs and one waits. Ends when
+/// every trigger is gone.
+fn run_publisher(
+    triggers: &mpsc::Receiver<()>,
+    quiet: Duration,
+    max_wait: Duration,
+    mut build: impl FnMut(),
+) {
+    while triggers.recv().is_ok() {
+        let latest = std::time::Instant::now() + max_wait;
+        loop {
+            let left = latest.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || triggers.recv_timeout(quiet.min(left)).is_err() {
+                break;
+            }
+        }
+        build();
+    }
 }
 
 #[derive(Clone)]
@@ -6191,6 +6245,143 @@ mod tests {
                 Err(broadcast::error::TryRecvError::Empty)
             ),
             "nothing changed for the readers, so no reload"
+        );
+    }
+
+    // ── Auto-save in serve (ADR-070, A3) ────────────────────────────────────
+
+    #[test]
+    fn save_state_reaches_the_editorial_socket_only() {
+        let channels = BrowserChannels::new(16);
+        let mut editorial = channels.editorial.subscribe();
+        let mut public = channels.public.subscribe();
+        let (tx, _rx) = mpsc::channel();
+        let trigger = PublishTrigger(tx);
+        let at = std::time::UNIX_EPOCH + Duration::from_millis(1_791_880_028_168);
+        let file = "content/post/first.md";
+
+        for (state, expected) in [
+            (
+                conductor::SaveState::Saved { at },
+                serde_json::json!({"type": "save-state", "file": file, "state": "saved", "at": 1_791_880_028_168u64}),
+            ),
+            (
+                conductor::SaveState::Unsaved,
+                serde_json::json!({"type": "save-state", "file": file, "state": "unsaved"}),
+            ),
+            (
+                conductor::SaveState::Conflict,
+                serde_json::json!({"type": "save-state", "file": file, "state": "conflict"}),
+            ),
+            (
+                conductor::SaveState::Failed {
+                    error: "write error: Permission denied".to_string(),
+                },
+                serde_json::json!({"type": "save-state", "file": file, "state": "failed", "error": "write error: Permission denied"}),
+            ),
+        ] {
+            dispatch_conductor_event(
+                conductor::ConductorEvent::SaveState {
+                    file: file.to_string(),
+                    state: state.clone(),
+                },
+                &channels,
+                &trigger,
+            );
+            let message = editorial
+                .try_recv()
+                .unwrap_or_else(|e| panic!("{state:?} reaches the editors: {e:?}"));
+            let wire: serde_json::Value = serde_json::from_str(&message.to_json()).expect("JSON");
+            assert_eq!(wire, expected, "{state:?}");
+        }
+        assert!(
+            matches!(
+                public.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "the save state never reaches the readers"
+        );
+    }
+
+    /// The published-build worker over `quiet`/`max_wait`, whose builds report
+    /// when they start and finish only when the test lets them (each build
+    /// waits for one message on the returned sender, at most 10 s).
+    fn publisher_under_test(
+        quiet: Duration,
+        max_wait: Duration,
+    ) -> (
+        mpsc::Sender<()>,
+        mpsc::Receiver<std::time::Instant>,
+        mpsc::Sender<()>,
+    ) {
+        let (triggers, rx) = mpsc::channel();
+        let (started, builds) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            run_publisher(&rx, quiet, max_wait, || {
+                let _ = started.send(std::time::Instant::now());
+                let _ = released.recv_timeout(Duration::from_secs(10));
+            });
+        });
+        (triggers, builds, release)
+    }
+
+    #[test]
+    fn steady_triggers_still_build_within_the_maximum_wait() {
+        let (triggers, builds, release) = publisher_under_test(PUBLISH_QUIET, PUBLISH_MAX_WAIT);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first = std::time::Instant::now();
+        let feeder = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                // A trigger every 100 ms, for at most 5 s: never 400 ms quiet.
+                for _ in 0..50 {
+                    if stop.load(std::sync::atomic::Ordering::SeqCst) || triggers.send(()).is_err()
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+        };
+
+        let started = builds.recv_timeout(Duration::from_secs(3));
+
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = release.send(());
+        feeder.join().expect("the feeder ends");
+        let started = started.expect("a build started while the triggers kept coming");
+        let waited = started - first;
+        assert!(
+            waited <= PUBLISH_MAX_WAIT + Duration::from_millis(300),
+            "the build waited {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_triggers_builds_once_and_one_waits() {
+        let quiet = Duration::from_millis(20);
+        let (triggers, builds, release) = publisher_under_test(quiet, Duration::from_secs(1));
+        triggers.send(()).unwrap();
+        builds
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first build starts");
+
+        // While it runs, ten triggers, each after more than the quiet time.
+        for _ in 0..10 {
+            triggers.send(()).unwrap();
+            std::thread::sleep(quiet + Duration::from_millis(10));
+        }
+        release.send(()).unwrap();
+        builds
+            .recv_timeout(Duration::from_secs(5))
+            .expect("one build waited and starts");
+        release.send(()).unwrap();
+
+        // No more: they were all coalesced into that one.
+        assert!(
+            builds.recv_timeout(Duration::from_millis(500)).is_err(),
+            "more than one build waited"
         );
     }
 

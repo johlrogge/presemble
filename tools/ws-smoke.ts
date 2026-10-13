@@ -4,7 +4,8 @@
 //                             readers follow saves and file changes, never an
 //                             edit in progress
 //   /_presemble/editorial-ws  session cookie: reload with primary/anchor,
-//                             scroll, suggestion-list-changed, resync
+//                             scroll, suggestion-list-changed, conflict,
+//                             save-state, resync
 //
 // Covers what curl cannot: live-reload and suggestion-list broadcasts that the
 // serve process pushes over the browser sockets after editorial HTTP actions,
@@ -75,7 +76,26 @@ interface ConflictResolved {
   readonly file: string;
 }
 
-type WsMessage = Reload | SuggestionListChanged | Resync | Scroll | Conflict | ConflictResolved;
+/**
+ * A document's save state changed (ADR-070). Editorial only. `at` (saved
+ * only) is milliseconds since the Unix epoch; `error` (failed only) says why.
+ */
+interface SaveStateMessage {
+  readonly type: "save-state";
+  readonly file: string;
+  readonly state: "saved" | "unsaved" | "conflict" | "failed";
+  readonly at: number | null;
+  readonly error: string | null;
+}
+
+type WsMessage =
+  | Reload
+  | SuggestionListChanged
+  | Resync
+  | Scroll
+  | Conflict
+  | ConflictResolved
+  | SaveStateMessage;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -125,6 +145,24 @@ function parseWsMessage(raw: string): WsMessage | null {
       const { anchor } = parsed;
       if (!isRecord(anchor)) return null;
       return { type: "scroll", anchor };
+    }
+    case "save-state": {
+      const { file, state, at, error } = parsed;
+      if (typeof file !== "string") return null;
+      switch (state) {
+        case "saved":
+          if (typeof at !== "number" || error !== undefined) return null;
+          return { type: "save-state", file, state, at, error: null };
+        case "failed":
+          if (typeof error !== "string" || at !== undefined) return null;
+          return { type: "save-state", file, state, at: null, error };
+        case "unsaved":
+        case "conflict":
+          if (at !== undefined || error !== undefined) return null;
+          return { type: "save-state", file, state, at: null, error: null };
+        default:
+          return null;
+      }
     }
     default:
       return null;
@@ -312,6 +350,7 @@ function isEditorialOnly(m: WsMessage): boolean {
     case "suggestion-list-changed":
     case "conflict":
     case "conflict-resolved":
+    case "save-state":
       return true;
     case "reload":
       return m.anchor !== null || m.primary !== null;
@@ -327,6 +366,14 @@ function conflictFor(file: string): (m: WsMessage) => m is Conflict {
 function conflictResolvedFor(file: string): (m: WsMessage) => m is ConflictResolved {
   return (m: WsMessage): m is ConflictResolved =>
     m.type === "conflict-resolved" && m.file === file;
+}
+
+function saveStateFor(
+  file: string,
+  state: SaveStateMessage["state"],
+): (m: WsMessage) => m is SaveStateMessage {
+  return (m: WsMessage): m is SaveStateMessage =>
+    m.type === "save-state" && m.file === file && m.state === state;
 }
 
 /**
@@ -681,6 +728,10 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
         conflict.state === "blocks",
         `state=${JSON.stringify(conflict.state)}`,
       );
+      await editorialInbox.expect(
+        `ws: the conflict broadcasts save-state conflict for ${FILE}`,
+        saveStateFor(FILE, "conflict"),
+      );
       const refused = await http.post("/_presemble/save-all", {});
       check(
         "ws: save-all with a conflict needs confirmation",
@@ -723,6 +774,19 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
     } else {
       const saved = await http.post("/_presemble/save-all", {});
       expectOk("ws: save-all returns ok", saved);
+    }
+    // The save reaches the editors as the document's save state.
+    {
+      const m = await editorialInbox.expect(
+        `ws: saving broadcasts save-state saved for ${FILE}`,
+        saveStateFor(FILE, "saved"),
+      );
+      const now = Date.now();
+      check(
+        "ws: the saved state carries when, in ms since the epoch",
+        m.at !== null && m.at > now - 600_000 && m.at <= now + 60_000,
+        `at=${m.at} now=${now}`,
+      );
     }
 
     // 3c. The save is what reaches the readers: the published output is rebuilt

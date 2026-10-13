@@ -385,8 +385,8 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
     println!("Starting conductor for: {}", site_dir.display());
     println!("Socket: {url}");
 
-    // Create conductor with full site build
-    let conductor = Arc::new(Conductor::new(site_dir.to_path_buf())?);
+    // Create conductor with full site build, auto-save as the site says.
+    let conductor = Arc::new(open_conductor(site_dir)?);
 
     // Build a doc registry populated with primitive and macro docs.
     // Prelude docs are not yet available here (prelude requires a live conductor
@@ -439,6 +439,12 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
     pub_socket
         .listen(&pub_url)
         .map_err(|e| format!("failed to listen on {pub_url}: {e}"))?;
+
+    // Auto-save (ADR-070): ticks run on the writer like every other job.
+    start_ticker(jobs.clone(), TICK_EVERY);
+    // Ctrl-C and SIGTERM shut down through the writer, so unsaved documents
+    // are flushed first.
+    handle_signals(jobs.clone())?;
 
     println!("Conductor ready. Waiting for commands...");
 
@@ -511,6 +517,115 @@ fn serve_rep_socket(rep_socket: &nng::Socket, jobs: &Sender<Job>) {
     }
 }
 
+/// How often the ticker asks the writer to auto-save (ADR-070).
+const TICK_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The site's auto-save configuration: `autosave: { enabled, idle_ms }` in
+/// `.presemble/config.json` (the file `presemble build` and `serve` read
+/// their URL configuration from). Without the file or the key, auto-save is
+/// on, after 2000 ms.
+fn autosave_config(site_dir: &Path) -> Result<conductor::AutoSaveConfig, String> {
+    let path = site_dir.join(".presemble").join("config.json");
+    let mut config = conductor::AutoSaveConfig::default();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(config);
+    };
+    let invalid = |what: &str| format!("config error in {}: {what}", path.display());
+    let json: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| invalid(&e.to_string()))?;
+    let Some(autosave) = json.get("autosave") else {
+        return Ok(config);
+    };
+    let autosave = autosave
+        .as_object()
+        .ok_or_else(|| invalid("`autosave` must be an object"))?;
+    if let Some(enabled) = autosave.get("enabled") {
+        config.enabled = enabled
+            .as_bool()
+            .ok_or_else(|| invalid("`autosave.enabled` must be true or false"))?;
+    }
+    if let Some(idle) = autosave.get("idle-ms") {
+        let ms = idle
+            .as_u64()
+            .ok_or_else(|| invalid("`autosave.idle-ms` must be a whole number of milliseconds"))?;
+        config.idle = std::time::Duration::from_millis(ms);
+    }
+    Ok(config)
+}
+
+/// The conductor of a site, with auto-save configured from the site's config.
+fn open_conductor(site_dir: &Path) -> Result<Conductor, String> {
+    let config = autosave_config(site_dir)?;
+    let conductor = Conductor::new(site_dir.to_path_buf())?;
+    conductor.set_autosave(config);
+    Ok(conductor)
+}
+
+/// Start the ticker: every `every`, an `AutoSaveTick` on the writer. A tick
+/// whose saves failed is logged (the documents stay unsaved and are tried
+/// again). Ends when the writer is gone.
+fn start_ticker(jobs: Sender<Job>, every: std::time::Duration) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(every);
+            let (reply, result) = mpsc::channel();
+            if jobs.send(Job::Ipc(Command::AutoSaveTick, reply)).is_err() {
+                break;
+            }
+            match result.recv() {
+                Ok(CommandResult {
+                    response: Response::Error(e),
+                    ..
+                }) => eprintln!("auto-save: {e}"),
+                Ok(_) => {}
+                Err(_) => break, // the writer ended without answering
+            }
+        }
+    })
+}
+
+/// Shut the conductor down through the writer (a `Shutdown` job, so it
+/// flushes in order with everything before it); the warnings it answers with
+/// are printed to stderr and returned.
+fn request_shutdown(jobs: &Sender<Job>) -> Option<String> {
+    let (reply, result) = mpsc::channel();
+    jobs.send(Job::Ipc(Command::Shutdown, reply)).ok()?;
+    match result.recv().ok()?.response {
+        Response::Error(warnings) => {
+            for warning in warnings.split("; ") {
+                eprintln!("conductor: {warning}");
+            }
+            Some(warnings)
+        }
+        _ => None,
+    }
+}
+
+/// On SIGINT or SIGTERM, shut down through the writer (unsaved documents
+/// are flushed, and those that cannot be are named), then exit. A second
+/// signal while that runs exits at once.
+fn handle_signals(jobs: Sender<Job>) -> Result<(), String> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])
+        .map_err(|e| format!("cannot handle signals: {e}"))?;
+    std::thread::spawn(move || {
+        let mut shutting_down = false;
+        for _ in signals.forever() {
+            if shutting_down {
+                std::process::exit(130);
+            }
+            shutting_down = true;
+            eprintln!("conductor: shutting down (again to stop at once)");
+            let jobs = jobs.clone();
+            std::thread::spawn(move || {
+                request_shutdown(&jobs);
+                std::process::exit(0);
+            });
+        }
+    });
+    Ok(())
+}
+
 /// Legacy stub — kept so existing callers continue to compile.
 pub fn serve() -> Result<(), String> {
     todo!()
@@ -525,6 +640,7 @@ mod tests {
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
     const TEMPLATE: &str = r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert></body></html>"#;
     const FILE: &str = "content/post/first.md";
+    const OTHER: &str = "content/post/second.md";
 
     fn site() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -535,6 +651,7 @@ mod tests {
         std::fs::write(root.join("schemas/post/item.md"), SCHEMA).unwrap();
         std::fs::write(root.join("templates/post/item.html"), TEMPLATE).unwrap();
         std::fs::write(root.join(FILE), "# First Post\n\n----\n\nAlpha.\n").unwrap();
+        std::fs::write(root.join(OTHER), "# Second Post\n\n----\n\nBeta.\n").unwrap();
         tmp
     }
 
@@ -550,8 +667,17 @@ mod tests {
 
     impl Harness {
         fn start() -> Self {
+            Self::start_with_config(None)
+        }
+
+        /// Start over a site whose `.presemble/config.json` is `config`.
+        fn start_with_config(config: Option<&str>) -> Self {
             let site = site();
-            let conductor = Arc::new(Conductor::new(site.path().to_path_buf()).expect("conductor"));
+            if let Some(config) = config {
+                std::fs::create_dir_all(site.path().join(".presemble")).unwrap();
+                std::fs::write(site.path().join(".presemble/config.json"), config).unwrap();
+            }
+            let conductor = Arc::new(open_conductor(site.path()).expect("conductor"));
             let (jobs, queue) = mpsc::channel();
             let published = Arc::new(Mutex::new(Vec::new()));
             let writer = {
@@ -583,21 +709,27 @@ mod tests {
         fn ipc(&self, cmd: Command) -> CommandResult {
             let (reply, result) = mpsc::channel();
             self.jobs.send(Job::Ipc(cmd, reply)).unwrap();
-            result.recv().expect("the writer answers")
+            result
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the writer answers within 10 s")
         }
 
         /// Stop the writer (a `Shutdown` job) and wait until it has finished
         /// publishing, then return everything it published.
         fn finish(mut self) -> Vec<ConductorEvent> {
             let _ = self.ipc(Command::Shutdown);
-            self.writer.take().unwrap().join().expect("the writer ends");
+            assert!(writer_ends(&mut self), "the writer ends after a shutdown");
             self.published.lock().unwrap().clone()
         }
     }
 
     fn set_title(value: &str) -> String {
+        set_title_of(FILE, value)
+    }
+
+    fn set_title_of(file: &str, value: &str) -> String {
         format!(
-            r#"(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "{FILE}") "title"))) "{value}")"#
+            r#"(ned/set-text (ned/text-in (ned/children (ned/slot (ned/doc-by-path "{file}") "title"))) "{value}")"#
         )
     }
 
@@ -716,6 +848,190 @@ mod tests {
             .expect("refused");
         assert!(error.contains("step 2"), "{error}");
         assert!(harness.finish().is_empty());
+    }
+
+    // ── Auto-save in the host (ADR-070, A3) ─────────────────────────────────
+
+    fn on_disk(harness: &Harness) -> String {
+        std::fs::read_to_string(harness._site.path().join(FILE)).unwrap()
+    }
+
+    fn dirty(harness: &Harness) -> bool {
+        harness
+            .conductor
+            .dirty_docs()
+            .read()
+            .unwrap()
+            .contains(Path::new(FILE))
+    }
+
+    /// Wait until `done` holds, polling for at most 5 s.
+    fn wait_for(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        done()
+    }
+
+    const FAST: std::time::Duration = std::time::Duration::from_millis(10);
+
+    #[test]
+    fn the_ticker_saves_an_idle_document_end_to_end() {
+        let harness = Harness::start_with_config(Some(r#"{"autosave": {"idle-ms": 50}}"#));
+        let _ticker = start_ticker(harness.jobs.clone(), FAST);
+
+        harness
+            .handler()
+            .eval("s", &set_title("Saved By The Ticker"))
+            .expect("evals");
+
+        assert!(
+            wait_for(|| on_disk(&harness).starts_with("# Saved By The Ticker")),
+            "the edit was saved: {}",
+            on_disk(&harness)
+        );
+        assert!(!dirty(&harness));
+        let events = harness.finish();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ConductorEvent::DocumentsSaved { files } if files.iter().any(|f| f == FILE)
+            )),
+            "the save is published: {events:?}"
+        );
+    }
+
+    #[test]
+    fn auto_save_can_be_turned_off_in_config() {
+        let harness = Harness::start_with_config(Some(
+            r#"{"url-style": "root", "autosave": {"enabled": false, "idle-ms": 1}}"#,
+        ));
+        let _ticker = start_ticker(harness.jobs.clone(), FAST);
+
+        harness
+            .handler()
+            .eval("s", &set_title("Not Saved By Ticks"))
+            .expect("evals");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        assert!(
+            on_disk(&harness).starts_with("# First Post"),
+            "{}",
+            on_disk(&harness)
+        );
+        assert!(dirty(&harness));
+        // An explicit save still saves.
+        assert!(saved_text(&harness).starts_with("# Not Saved By Ticks"));
+        harness.finish();
+    }
+
+    #[test]
+    fn the_auto_save_configuration_defaults_and_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |config: &str| {
+            std::fs::create_dir_all(dir.path().join(".presemble")).unwrap();
+            std::fs::write(dir.path().join(".presemble/config.json"), config).unwrap();
+        };
+        let default = conductor::AutoSaveConfig::default();
+
+        // No file at all.
+        assert_eq!(autosave_config(dir.path()), Ok(default));
+        // A file without the key (only URL configuration).
+        write(r#"{"url-style": "root"}"#);
+        assert_eq!(autosave_config(dir.path()), Ok(default));
+        // Each field on its own.
+        write(r#"{"autosave": {"enabled": false}}"#);
+        assert_eq!(
+            autosave_config(dir.path()),
+            Ok(conductor::AutoSaveConfig {
+                enabled: false,
+                ..default
+            })
+        );
+        write(r#"{"autosave": {"idle-ms": 750}}"#);
+        assert_eq!(
+            autosave_config(dir.path()),
+            Ok(conductor::AutoSaveConfig {
+                idle: std::time::Duration::from_millis(750),
+                ..default
+            })
+        );
+        // A value of the wrong kind is an error that names the file.
+        for bad in [
+            r#"{"autosave": {"enabled": "yes"}}"#,
+            r#"{"autosave": {"idle-ms": -1}}"#,
+            r#"{"autosave": {"idle-ms": "2000"}}"#,
+            r#"{"autosave": true}"#,
+            "{ not json",
+        ] {
+            write(bad);
+            let error = autosave_config(dir.path()).expect_err(bad);
+            assert!(error.contains("config.json"), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn request_shutdown_flushes_through_the_writer_and_returns_the_warnings() {
+        let mut harness = Harness::start();
+        let handler = harness.handler();
+        // One document that can be saved...
+        handler
+            .eval("s", &set_title_of(OTHER, "Flushed At Shutdown"))
+            .expect("evals");
+        // ...and one in conflict with its file, which cannot.
+        handler.eval("s", &set_title("Edited Here")).expect("evals");
+        let outside = "# Edited Outside\n\n----\n\nAlpha.\n";
+        std::fs::write(harness._site.path().join(FILE), outside).unwrap();
+        harness.ipc(Command::FileChanged {
+            paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")],
+        });
+
+        let warnings = request_shutdown(&harness.jobs);
+
+        let warnings = warnings.expect("the conflicted document is warned about");
+        assert!(warnings.contains(FILE), "{warnings}");
+        assert!(
+            warnings.contains("unsaved edits will be lost"),
+            "{warnings}"
+        );
+        assert!(!warnings.contains(OTHER), "{warnings}");
+        assert!(
+            writer_ends(&mut harness),
+            "the writer ended on the shutdown"
+        );
+        let other = std::fs::read_to_string(harness._site.path().join(OTHER)).unwrap();
+        assert!(other.starts_with("# Flushed At Shutdown"), "{other}");
+        assert_eq!(on_disk(&harness), outside);
+    }
+
+    /// Whether the writer ends within 5 s (never blocks for good).
+    fn writer_ends(harness: &mut Harness) -> bool {
+        let writer = harness.writer.take().unwrap();
+        let ended = wait_for(|| writer.is_finished());
+        if ended {
+            writer.join().expect("the writer did not panic");
+        }
+        ended
+    }
+
+    #[test]
+    fn a_shutdown_with_nothing_lost_has_no_warnings() {
+        let mut harness = Harness::start();
+        harness
+            .handler()
+            .eval("s", &set_title("Saved At Shutdown"))
+            .expect("evals");
+
+        assert_eq!(request_shutdown(&harness.jobs), None);
+        assert!(
+            writer_ends(&mut harness),
+            "the writer ended on the shutdown"
+        );
+        assert!(on_disk(&harness).starts_with("# Saved At Shutdown"));
     }
 
     #[test]

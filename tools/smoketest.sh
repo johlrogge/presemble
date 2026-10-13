@@ -360,6 +360,12 @@ log "Site directory: $SITE_DIR"
 # conductor loads suggestions only at startup. Does not affect the empty-site
 # welcome page: is_source_empty only inspects schemas/ and content/.
 mkdir -p "$SITE_DIR/.presemble/suggestions/ned"
+# Auto-save off (ADR-070): the sections below check unsaved edits, conflicts
+# and explicit saves, which a save after 2 s idle would race. Auto-save itself
+# is covered end to end by editor_server's the_ticker_saves_an_idle_document_end_to_end.
+cat > "$SITE_DIR/.presemble/config.json" <<'JSON'
+{"autosave": {"enabled": false}}
+JSON
 cat > "$SITE_DIR/.presemble/suggestions/ned/sug-legacy-smoke.json" <<'JSON'
 {"id":"sug-legacy-smoke","author":{"Human":"smoketest"},"file":"content/post/hello-world.md","selection":"(ned/slot (ned/doc-by-path \"content/post/hello-world.md\") \"title\")","mutation":{"SetText":"Legacy Title"},"workspace_hash":"untracked","reason":"legacy slot-addressed","status":"Pending","created_at":"2026-01-01T00:00:00Z"}
 JSON

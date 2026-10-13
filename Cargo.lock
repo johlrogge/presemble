@@ -726,6 +726,7 @@ dependencies = [
  "nrepl",
  "schema",
  "serde_json",
+ "signal-hook",
  "site_index",
  "tempfile",
  "template",
