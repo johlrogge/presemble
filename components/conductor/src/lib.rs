@@ -19,7 +19,7 @@ pub use protocol::{
     BlockContainer, BlockLocation, BlockStep, BufferEdit, Command, ConductorEvent, ConflictId,
     ConflictRegion, ConflictSide, ConflictState, DependentFile, Drift, DriftId, DriftKind,
     FileClassification, FileConflicts, HeldRegion, LinkOption, PathStep, RenderMode, Response,
-    TextHash,
+    SaveState, TextHash,
 };
 
 #[cfg(test)]

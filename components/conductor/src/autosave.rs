@@ -113,6 +113,18 @@ pub fn due(now: Instant, docs: &[DocView], config: &AutoSaveConfig) -> Vec<Decis
         .collect()
 }
 
+/// The documents a flush saves (`Command::FlushDirty`, and shutdown): every
+/// one that can be saved now, without waiting for the idle time or for an
+/// open editor's canonical text (it is saved as N has it). A document in
+/// conflict with its file, or whose editor has a region N does not hold yet,
+/// is still not saved.
+pub fn flushable(docs: &[DocView]) -> Vec<PathBuf> {
+    docs.iter()
+        .filter(|doc| !doc.conflicted && doc.editor != EditorView::Unsettled)
+        .map(|doc| doc.path.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +219,28 @@ mod tests {
         assert_eq!(
             due(t + IDLE * 100, &[doc(t, EditorView::Closed)], &off),
             vec![]
+        );
+    }
+
+    #[test]
+    fn a_flush_skips_only_conflicted_and_unsettled_documents() {
+        let t = Instant::now();
+        let at = |name: &str, conflicted: bool, editor: EditorView| DocView {
+            path: PathBuf::from(name),
+            last_change: Some(t),
+            conflicted,
+            editor,
+        };
+        let docs = [
+            at("closed", false, EditorView::Closed),
+            at("canonical", false, EditorView::Canonical),
+            at("waiting", false, EditorView::Waiting { asked: None }),
+            at("unsettled", false, EditorView::Unsettled),
+            at("conflicted", true, EditorView::Closed),
+        ];
+        assert_eq!(
+            flushable(&docs),
+            ["closed", "canonical", "waiting"].map(PathBuf::from)
         );
     }
 

@@ -262,6 +262,8 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
         // For open editors: the language server brings the buffer to the
         // canonical text; the browser shows N already.
         ConductorEvent::EditorCanonicalWanted { .. } => return None,
+        // Not carried to the browser yet (ADR-070, A3).
+        ConductorEvent::SaveState { .. } => return None,
         ConductorEvent::PagesRebuilt { pages, anchor } => {
             EditorialMessage::Reload { pages, anchor }
         }

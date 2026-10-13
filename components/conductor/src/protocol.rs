@@ -245,6 +245,23 @@ impl ConflictState {
     }
 }
 
+/// Whether a document's edits are on disk (ADR-070), as announced by
+/// [`ConductorEvent::SaveState`]. There is no "saving": a save happens within
+/// one command, so no client could ever show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SaveState {
+    /// The file holds the document as N has it; `at` is when the file was
+    /// written.
+    Saved { at: std::time::SystemTime },
+    /// N holds edits the file does not have yet.
+    Unsaved,
+    /// The file changed on disk under the unsaved edits (ADR-065): they are
+    /// kept, and not saved until the conflict is resolved.
+    Conflict,
+    /// Saving the unsaved edits failed; they are kept and tried again.
+    Failed { error: String },
+}
+
 /// Which version of a conflicting block wins ([`Command::ResolveConflict`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConflictSide {
@@ -336,6 +353,16 @@ pub enum Command {
     /// for N's canonical text where the save waits for it. Sent by the host
     /// on the serial writer, every 250 ms.
     AutoSaveTick,
+    /// Save the named dirty document, or every dirty one, now (ADR-070):
+    /// without waiting for the idle time or for an open editor's canonical
+    /// text. A document in conflict with its file, or whose open editor has a
+    /// held or drifted region, is still not saved. Answered `Ok`, or `Error`
+    /// naming the saves that failed. With auto-save off it saves nothing
+    /// (answered `Ok`): only explicit saves write then.
+    FlushDirty {
+        #[serde(default)]
+        file: Option<editorial_types::ContentPath>,
+    },
     /// Editor cursor moved to a new position.
     CursorMoved {
         path: editorial_types::SitePath,
@@ -601,6 +628,10 @@ pub enum ConductorEvent {
     /// save writes what the editor shows. Announced again while the document
     /// waits. `file` is site-relative.
     EditorCanonicalWanted { file: String },
+    /// A document's save state changed (ADR-070): it got unsaved edits, was
+    /// saved, failed to save, or came into conflict with its file (or out of
+    /// it). `file` is site-relative.
+    SaveState { file: String, state: SaveState },
     /// Documents were written to disk by a save: what readers see (the
     /// published output) may have changed. `files` are site-relative paths.
     /// Not sent for a refused save or for an edit that was not saved.

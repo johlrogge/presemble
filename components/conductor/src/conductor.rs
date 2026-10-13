@@ -326,6 +326,10 @@ pub struct Conductor {
     // was last asked for it (`EditorCanonicalWanted`); forgotten once the
     // document has no unsaved edits.
     canonical_asked: RwLock<HashMap<PathBuf, std::time::Instant>>,
+    // The documents whose save state may have changed during the command,
+    // announced (`SaveState`) when it is done; with the error of a save of
+    // it that failed.
+    save_state_unannounced: RwLock<BTreeMap<PathBuf, Option<String>>>,
 }
 
 /// A document whose content changed, as input to
@@ -545,6 +549,7 @@ impl Conductor {
             clock: Arc::new(crate::autosave::SystemClock),
             autosave: RwLock::new(crate::autosave::AutoSaveConfig::default()),
             canonical_asked: RwLock::new(HashMap::new()),
+            save_state_unannounced: RwLock::new(BTreeMap::new()),
         };
 
         // Load persisted NED suggestions from disk (read only: a load never
@@ -825,6 +830,60 @@ impl Conductor {
         .collect()
     }
 
+    /// The save state of the document at site-relative `rel` may have changed
+    /// (ADR-070): it is announced, as it is then, when the command is done.
+    fn save_state_changed(&self, rel: &Path) {
+        self.save_state_unannounced
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(rel.to_path_buf())
+            .or_insert(None);
+    }
+
+    /// A save of the document at site-relative `rel` failed with `error`: if
+    /// it is still unsaved when the command is done, that is its save state.
+    fn save_failed(&self, rel: &Path, error: &str) {
+        self.save_state_unannounced
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(rel.to_path_buf(), Some(error.to_string()));
+    }
+
+    /// The announcements of the save states that may have changed since the
+    /// last ones, as they are now: in conflict, unsaved (or failed to save),
+    /// or saved (as of the file's last write).
+    fn take_save_states(&self) -> Vec<ConductorEvent> {
+        let changed = std::mem::take(
+            &mut *self
+                .save_state_unannounced
+                .write()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
+        changed
+            .into_iter()
+            .map(|(rel, failure)| {
+                let state = if dirty.is_conflicted(&rel) {
+                    crate::protocol::SaveState::Conflict
+                } else if dirty.contains(&rel) {
+                    match failure {
+                        Some(error) => crate::protocol::SaveState::Failed { error },
+                        None => crate::protocol::SaveState::Unsaved,
+                    }
+                } else {
+                    let at = std::fs::metadata(self.site_dir.join(&rel))
+                        .and_then(|m| m.modified())
+                        .unwrap_or_else(|_| std::time::SystemTime::now());
+                    crate::protocol::SaveState::Saved { at }
+                };
+                ConductorEvent::SaveState {
+                    file: rel.to_string_lossy().to_string(),
+                    state,
+                }
+            })
+            .collect()
+    }
+
     /// Mark the documents at site-relative `paths` unsaved. One that goes from
     /// saved to unsaved gets the base of its edits (ADR-065 amendment F2).
     fn mark_unsaved(&self, paths: &[PathBuf]) {
@@ -843,6 +902,7 @@ impl Conductor {
         };
         for rel in newly_unsaved {
             self.record_base(rel);
+            self.save_state_changed(rel);
         }
     }
 
@@ -880,11 +940,13 @@ impl Conductor {
     /// if it was in one.
     #[must_use]
     fn clear_unsaved(&self, rel: &Path) -> Option<ConductorEvent> {
-        let was_conflicted = self
-            .dirty_docs
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear(rel);
+        let was_conflicted = {
+            let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
+            if dirty.contains(rel) {
+                self.save_state_changed(rel);
+            }
+            dirty.clear(rel)
+        };
         self.disk_bases
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -911,6 +973,7 @@ impl Conductor {
             crate::site_resolve::resolve_in_site(&self.site_dir, &site_path).map_err(refuse)?;
         crate::self_write_tracker::write_source_file(&abs, text, &self.self_write_tracker)?;
         self.stamp_disk(rel);
+        self.save_state_changed(rel);
         Ok(())
     }
 
@@ -1051,9 +1114,12 @@ impl Conductor {
         }
         dirty
             .mark_conflict(rel.to_path_buf(), disk_mtime, regions.clone())
-            .then(|| ConductorEvent::DiskConflict {
-                file: rel.to_string_lossy().to_string(),
-                state: crate::protocol::ConflictState::of(regions),
+            .then(|| {
+                self.save_state_changed(rel);
+                ConductorEvent::DiskConflict {
+                    file: rel.to_string_lossy().to_string(),
+                    state: crate::protocol::ConflictState::of(regions),
+                }
             })
     }
 
@@ -4024,6 +4090,7 @@ impl Conductor {
     ) -> Result<(ProgramOutcome, Vec<ConductorEvent>), ProgramError> {
         let (outcome, mut events) = self.run_plan(plan)?;
         events.extend(self.take_model_changes());
+        events.extend(self.take_save_states());
         Ok((outcome, events))
     }
 
@@ -4286,6 +4353,7 @@ impl Conductor {
         }
         // What changed in N, for the editors that have it open (LSP-1).
         result.events.extend(self.take_model_changes());
+        result.events.extend(self.take_save_states());
         result
     }
 
@@ -4335,16 +4403,22 @@ impl Conductor {
                     match node_store_bridge::serialize_from_store(&store, root) {
                         Ok(text) => text,
                         Err(e) => {
-                            return CommandResult::error(format!("cannot save {path}: {e}"));
+                            let error = format!("cannot save {path}: {e}");
+                            self.save_failed(&rel_path, &error);
+                            return CommandResult::error(error);
                         }
                     }
                 }
                 None => {
-                    return CommandResult::error(format!("document not in store: {path}"));
+                    let error = format!("document not in store: {path}");
+                    self.save_failed(&rel_path, &error);
+                    return CommandResult::error(error);
                 }
             };
             if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
-                return CommandResult::error(format!("write error: {e}"));
+                let error = format!("write error: {e}");
+                self.save_failed(&rel_path, &error);
+                return CommandResult::error(error);
             }
             let ended = self.clear_unsaved(&rel_path);
             return CommandResult::ok_with_events(
@@ -4365,42 +4439,14 @@ impl Conductor {
     fn auto_save_tick(&self) -> CommandResult {
         let config = *self.autosave.read().unwrap_or_else(|e| e.into_inner());
         let now = self.clock.now();
-        let docs: Vec<crate::autosave::DocView> = {
-            let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
-            let mut paths: Vec<PathBuf> = dirty.iter().map(Path::to_path_buf).collect();
-            paths.sort();
-            paths
-                .into_iter()
-                .map(|path| crate::autosave::DocView {
-                    last_change: dirty.last_change(&path),
-                    conflicted: dirty.is_conflicted(&path),
-                    editor: crate::autosave::EditorView::Closed,
-                    path,
-                })
-                .collect()
-        };
-        let docs: Vec<crate::autosave::DocView> = docs
-            .into_iter()
-            .map(|doc| crate::autosave::DocView {
-                editor: self.editor_view(&doc.path),
-                ..doc
-            })
-            .collect();
+        let docs = self.doc_views(None);
 
         let mut events = Vec::new();
         let mut failures = Vec::new();
         for decision in crate::autosave::due(now, &docs, &config) {
             match decision {
                 crate::autosave::Decision::Save(rel) => {
-                    let Ok(path) = editorial_types::SitePath::parse(&rel.to_string_lossy()) else {
-                        continue;
-                    };
-                    let result =
-                        self.save_buffer(&path, &editorial_types::ConflictConsent::default());
-                    if let Response::Error(e) = &result.response {
-                        failures.push(format!("{}: {e}", rel.display()));
-                    }
-                    events.extend(result.events);
+                    self.save_for_auto_save(&rel, &mut events, &mut failures);
                 }
                 crate::autosave::Decision::AskForCanonical(rel) => {
                     self.canonical_asked
@@ -4413,6 +4459,122 @@ impl Conductor {
                 }
             }
         }
+        Self::saves_done(events, failures)
+    }
+
+    /// Save the dirty document at site-relative `rel`, or every dirty one,
+    /// now ([`Command::FlushDirty`], ADR-070): each that
+    /// [`crate::autosave::flushable`] allows, through
+    /// [`Conductor::save_buffer`] without consent. The saves that failed are
+    /// the answer's error. A flush is auto-save's: with auto-save off it saves
+    /// nothing and answers `Ok`.
+    fn flush_dirty(&self, rel: Option<&Path>) -> CommandResult {
+        if !self.autosave_enabled() {
+            return CommandResult::ok();
+        }
+        let mut events = Vec::new();
+        let mut failures = Vec::new();
+        for rel in crate::autosave::flushable(&self.doc_views(rel)) {
+            self.save_for_auto_save(&rel, &mut events, &mut failures);
+        }
+        Self::saves_done(events, failures)
+    }
+
+    /// Shut down ([`Command::Shutdown`]): with auto-save on, flush every
+    /// dirty document that can be saved, then warn about each one that is
+    /// still unsaved (in conflict with its file, or not saved for another
+    /// reason): its unsaved edits will be lost. With auto-save off nothing is
+    /// saved ("only when I say so"), and every unsaved document is warned
+    /// about. The warnings are logged and are the answer's error.
+    fn shutdown(&self) -> CommandResult {
+        let enabled = self.autosave_enabled();
+        let mut result = self.flush_dirty(None);
+        let warnings: Vec<String> = {
+            let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
+            let mut lost: Vec<&Path> = dirty.iter().collect();
+            lost.sort();
+            lost.into_iter()
+                .map(|rel| {
+                    if !enabled {
+                        return format!("unsaved edits to {} are lost", rel.display());
+                    }
+                    let why = if dirty.is_conflicted(rel) {
+                        "is in conflict with its file"
+                    } else {
+                        "could not be saved"
+                    };
+                    format!("{} {why}: its unsaved edits will be lost", rel.display())
+                })
+                .collect()
+        };
+        for warning in &warnings {
+            eprintln!("conductor: shutting down: {warning}");
+        }
+        if !warnings.is_empty() {
+            result.response = Response::Error(warnings.join("; "));
+        }
+        result
+    }
+
+    /// Whether auto-save is on: off, only an explicit save writes a document.
+    fn autosave_enabled(&self) -> bool {
+        self.autosave
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .enabled
+    }
+
+    /// What auto-save knows about each dirty document (only the one at `only`,
+    /// if given), sorted by path.
+    fn doc_views(&self, only: Option<&Path>) -> Vec<crate::autosave::DocView> {
+        let docs: Vec<crate::autosave::DocView> = {
+            let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
+            let mut paths: Vec<PathBuf> = dirty
+                .iter()
+                .filter(|path| only.is_none_or(|only| *path == only))
+                .map(Path::to_path_buf)
+                .collect();
+            paths.sort();
+            paths
+                .into_iter()
+                .map(|path| crate::autosave::DocView {
+                    last_change: dirty.last_change(&path),
+                    conflicted: dirty.is_conflicted(&path),
+                    editor: crate::autosave::EditorView::Closed,
+                    path,
+                })
+                .collect()
+        };
+        // The editor's state is read without holding the dirty documents.
+        docs.into_iter()
+            .map(|doc| crate::autosave::DocView {
+                editor: self.editor_view(&doc.path),
+                ..doc
+            })
+            .collect()
+    }
+
+    /// Save the document at site-relative `rel` for auto-save or a flush:
+    /// through [`Conductor::save_buffer`], without consent. Its events go to
+    /// `events`, a failure to `failures`.
+    fn save_for_auto_save(
+        &self,
+        rel: &Path,
+        events: &mut Vec<ConductorEvent>,
+        failures: &mut Vec<String>,
+    ) {
+        let Ok(path) = editorial_types::SitePath::parse(&rel.to_string_lossy()) else {
+            return;
+        };
+        let result = self.save_buffer(&path, &editorial_types::ConflictConsent::default());
+        if let Response::Error(e) = &result.response {
+            failures.push(format!("{}: {e}", rel.display()));
+        }
+        events.extend(result.events);
+    }
+
+    /// The answer to a run of saves: `Ok`, or `Error` naming those that failed.
+    fn saves_done(events: Vec<ConductorEvent>, failures: Vec<String>) -> CommandResult {
         CommandResult {
             response: if failures.is_empty() {
                 Response::Ok
@@ -4427,6 +4589,7 @@ impl Conductor {
     /// ended: the event that tells subscribers so. Its page is out of date.
     fn conflict_ended(&self, rel: &Path) -> ConductorEvent {
         self.conflict_changed(rel);
+        self.save_state_changed(rel);
         ConductorEvent::DiskConflict {
             file: rel.to_string_lossy().to_string(),
             state: crate::protocol::ConflictState::Resolved,
@@ -4468,7 +4631,7 @@ impl Conductor {
                 let errors = self.build_errors.read().unwrap_or_else(|e| e.into_inner());
                 CommandResult::with_response(Response::BuildErrors(errors.clone()))
             }
-            Command::Shutdown => CommandResult::ok(),
+            Command::Shutdown => self.shutdown(),
             Command::EditorOpened { path, text } => self.editor_opened(path, text),
             Command::EditorChanged { path, text } => self.editor_changed(path, text),
             Command::EditorClosed { path } => self.editor_closed(&path),
@@ -4786,6 +4949,9 @@ impl Conductor {
             }
             Command::SaveBuffer { path, consent } => self.save_buffer(&path, &consent),
             Command::AutoSaveTick => self.auto_save_tick(),
+            Command::FlushDirty { file } => {
+                self.flush_dirty(file.as_ref().map(|f| f.as_site_path().as_path()))
+            }
             Command::SaveAllBuffers { consent } => {
                 // The check comes first (ADR-065): if any document we would
                 // write is in conflict with the file on disk and the consent
@@ -4850,8 +5016,9 @@ impl Conductor {
                                 Err(e) => {
                                     drop(store);
                                     keep_dirty(&self.dirty_docs);
-                                    failures
-                                        .push(format!("cannot save {}: {e}", rel_path.display()));
+                                    let error = format!("cannot save {}: {e}", rel_path.display());
+                                    self.save_failed(rel_path, &error);
+                                    failures.push(error);
                                     continue;
                                 }
                             }
@@ -4862,16 +5029,20 @@ impl Conductor {
                                 rel_path.display()
                             );
                             keep_dirty(&self.dirty_docs);
-                            failures.push(format!(
+                            let error = format!(
                                 "cannot save {}: document not in store",
                                 rel_path.display()
-                            ));
+                            );
+                            self.save_failed(rel_path, &error);
+                            failures.push(error);
                             continue;
                         }
                     };
                     if let Err(e) = self.write_document(rel_path, text.as_bytes()) {
                         keep_dirty(&self.dirty_docs);
-                        failures.push(format!("write error for {}: {e}", rel_path.display()));
+                        let error = format!("write error for {}: {e}", rel_path.display());
+                        self.save_failed(rel_path, &error);
+                        failures.push(error);
                         continue;
                     }
                     // Saved: its edits have no base any more. (One kept dirty
