@@ -39,6 +39,11 @@ default:
 serve dir="site" session="manual":
     cargo polylith cargo --profile dev run --bin presemble -- serve {{ dir }} --dev-session={{ session }}
 
+# Production-grade build (live profile: fs_site_repository, --release) for manual testing and judging perceived performance.
+[group('develop')]
+serve-release dir="site" session="manual":
+    cargo polylith cargo --profile live run --release --bin presemble -- serve {{ dir }} --dev-session={{ session }}
+
 # Never `pkill -f presemble`: that kills the devenv shell.
 # Stop a running `presemble serve`.
 [group('develop')]

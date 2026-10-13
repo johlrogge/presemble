@@ -8,9 +8,10 @@ language-servers = ["presemble-lsp", "marksman"]
 name = "html"
 language-servers = ["presemble-lsp"]
 
+# Paths are relative to the repo root: start hx there. target/debug is refreshed by just serve/test/smoketest.
 [language-server.presemble-lsp]
-command = "presemble"
-args = ["lsp", "demo/"]
+command = "target/debug/presemble"
+args = ["lsp", "site/"]
 
 [language-server.rust-analyzer]
 config.cargo.buildScripts.enable = true
