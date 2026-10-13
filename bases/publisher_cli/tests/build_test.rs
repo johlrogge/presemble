@@ -204,6 +204,69 @@ fn a_template_chooses_a_references_label_with_an_expression() {
     assert!(link.contains(">Joakim Ohlrogge</a>"), "{link}");
 }
 
+/// The value of attribute `name` in the first element of `html` that has it.
+fn first_attr<'h>(html: &'h str, name: &str) -> Option<&'h str> {
+    html.split(&format!("{name}=\""))
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+}
+
+/// 5c: a field of another document, inserted editable (`:as`), names that
+/// document's file: its address is inside the author's file, and a click must
+/// send an edit of that file, not of the post.
+#[test]
+fn an_editable_field_of_another_document_names_that_documents_file() {
+    let (_tmp, site) = author_and_post_site();
+    let site = fs::canonicalize(&site).unwrap();
+    fs::write(
+        site.join("templates/post/item.hiccup"),
+        "[:main [:presemble/insert {:data input.author.name :as \"span\"}]]",
+    )
+    .unwrap();
+    publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("the site builds for serve");
+    let html =
+        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("post/p/index.html"))
+            .expect("the editorial post");
+    let span = html
+        .split("<span ")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_else(|| panic!("a span in {html}"));
+    let address = first_attr(span, "data-presemble-address")
+        .unwrap_or_else(|| panic!("an address on {span}"));
+    assert!(address.contains("content/author/jo.md"), "{address}");
+    assert_eq!(
+        first_attr(span, "data-presemble-file"),
+        Some("content/author/jo.md"),
+        "{span}"
+    );
+}
+
+/// ADR-067 §3: a value placed without `as` is not editable in place.
+#[test]
+fn a_field_of_another_document_without_as_has_no_editor_attributes() {
+    let (_tmp, site) = author_and_post_site();
+    let site = fs::canonicalize(&site).unwrap();
+    fs::write(
+        site.join("templates/post/item.hiccup"),
+        "[:main [:p {:class \"by\"} (text input.author.name)]]",
+    )
+    .unwrap();
+    publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("the site builds for serve");
+    let html =
+        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("post/p/index.html"))
+            .expect("the editorial post");
+    let p = html
+        .split("<p class=\"by\"")
+        .nth(1)
+        .and_then(|rest| rest.split("</p>").next())
+        .unwrap_or_else(|| panic!("the byline in {html}"));
+    assert!(p.contains("Joakim Ohlrogge"), "{p}");
+    assert!(!p.contains("data-presemble-address"), "{p}");
+}
+
 // ── Read-only validation tests (never call build) ────────────────────────────
 
 #[test]
