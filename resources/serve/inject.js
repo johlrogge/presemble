@@ -86,6 +86,33 @@ function editorialMessageAction(message) {
       return 'ignore';
   }
 }
+
+// What the page at `pathname` does with a reload message:
+//   {kind:'reload'}          reload in place
+//   {kind:'navigate', url}   go to the page the edit was made on
+//   {kind:'none'}            nothing
+// The server answers a page at several paths (`/post/`, `/post`,
+// `/post/index.html`), so paths are compared in one form: without a trailing
+// `index.html`, then without a trailing `/` (except `/` itself).
+function reloadDecision(message, pathname) {
+  var m = message || {};
+  var pages = m.pages;
+  if (m.resync || !pages || !pages.length) return { kind: 'reload' };
+  var here = _samePagePath(pathname);
+  for (var i = 0; i < pages.length; i++) {
+    if (_samePagePath(pages[i]) === here) return { kind: 'reload' };
+  }
+  if (m.primary) return { kind: 'navigate', url: m.primary };
+  return { kind: 'none' };
+}
+
+// One form for every path the server answers a page at (see reloadDecision).
+function _samePagePath(path) {
+  var p = String(path);
+  if (p.slice(-'index.html'.length) === 'index.html') p = p.slice(0, -'index.html'.length);
+  if (p.length > 1 && p.charAt(p.length - 1) === '/') p = p.slice(0, -1);
+  return p === '' ? '/' : p;
+}
 // END protocol-builders
 
 // Single source of truth for the heading text used in scroll anchors (ADR-046).
@@ -207,21 +234,18 @@ function parsePresembleHash(hash) {
 // --- Live-reload socket + reload deferral while an editor is open ---
 var _wsAttempts=0;var _wsLost=false;var _pendingReload=false;
 function _editorOpen(){return !!document.querySelector('.presemble-editing,.presemble-body-editor');}
-// A reload concerns this page when: it is a resync (lagged socket or reconnect
-// after loss), `pages` is missing/empty (full rebuild → reload in place), or
-// this page is listed in `pages`.
-function _reloadConcernsThisPage(m){return !!m.resync||!m.pages||!m.pages.length||m.pages.indexOf(location.pathname)!==-1;}
 function _requestReload(m){
+var decision=reloadDecision(m,location.pathname);
 if(_editorOpen()){
 // Never navigate away from an open editor; defer a same-page reload until it closes.
-if(_reloadConcernsThisPage(m)){
+if(decision.kind==='reload'){
 _pendingReload=true;
 _toast('Page updated — will refresh when you finish editing',true);
 }
 return;
 }
-if(_reloadConcernsThisPage(m)){_selfReload=true;location.reload();}
-else if(m.primary){_selfReload=true;location.href=m.primary;}
+if(decision.kind==='reload'){_selfReload=true;location.reload();}
+else if(decision.kind==='navigate'){_selfReload=true;location.href=decision.url;}
 }
 // The page is reloading itself because the site was rebuilt: that is not the
 // editor leaving, so it sends no leave hint (the flush would cut short the

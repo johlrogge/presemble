@@ -1,0 +1,10 @@
+{
+  "message": {
+    "type": "reload",
+    "pages": ["/post/b"],
+    "primary": "/post/b"
+  },
+  "action": "reload",
+  "pathname": "/post/a",
+  "decision": { "kind": "navigate", "url": "/post/b" }
+}

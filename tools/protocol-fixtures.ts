@@ -24,6 +24,9 @@
 //   editorialMessageAction(message) — what the page does with a message of
 //   the editorial socket — gives the fixture's `action`. A type the page does
 //   not know is ignored, never a reload.
+//   reloadDecision(message, pathname) — when the fixture carries `pathname`
+//   and `decision`: what the page opened at `pathname` does with the reload
+//   (reload in place, navigate to a url, or nothing).
 //
 // Output: `PASS <fixture>` per fixture, `FAIL <fixture> <what>` per mismatch,
 // `SKIP <fixture>` per skipped fixture.
@@ -72,12 +75,23 @@ interface Builders {
   interpretBlockEditResponse(response: unknown): Outcome;
   /** What the page does with a message of the editorial socket. */
   editorialMessageAction(message: unknown): string;
+  /** What the page opened at `pathname` does with a reload message. */
+  reloadDecision(message: unknown, pathname: string): ReloadDecision;
 }
+
+type ReloadDecision =
+  | { readonly kind: "reload" }
+  | { readonly kind: "navigate"; readonly url: string }
+  | { readonly kind: "none" };
 
 /** A message of the editorial socket and what the page must do with it. */
 interface EditorialFixture {
   readonly message: unknown;
   readonly action: string;
+  /** The page's `location.pathname`, for a reload decision. */
+  readonly pathname?: string;
+  /** What the page at `pathname` does with the reload. */
+  readonly decision?: ReloadDecision;
 }
 
 interface Fixture {
@@ -122,7 +136,7 @@ function loadBuilders(): Builders {
   }
   const region = source.slice(start, end);
   const factory = new Function(
-    `${region}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction };`,
+    `${region}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision };`,
   );
   return factory() as Builders;
 }
@@ -196,14 +210,32 @@ function main(): number {
     const fixture = JSON.parse(
       read(`../resources/serve/protocol/editorial/${name}.json`),
     ) as EditorialFixture;
+    let ok = true;
     const action = builders.editorialMessageAction(fixture.message);
-    if (action === fixture.action) {
-      console.log(`PASS editorial/${name}`);
-    } else {
-      failures += 1;
+    if (action !== fixture.action) {
+      ok = false;
       console.log(
         `FAIL editorial/${name} action: expected ${show(fixture.action)}, got ${show(action)}`,
       );
+    }
+    if ((fixture.pathname === undefined) !== (fixture.decision === undefined)) {
+      ok = false;
+      console.log(`FAIL editorial/${name}: \`pathname\` and \`decision\` go together`);
+    } else if (fixture.pathname !== undefined) {
+      const decision = builders.reloadDecision(fixture.message, fixture.pathname);
+      if (show(decision) !== show(fixture.decision)) {
+        ok = false;
+        console.log(
+          `FAIL editorial/${name} decision at ${show(fixture.pathname)}: expected ${
+            show(fixture.decision)
+          }, got ${show(decision)}`,
+        );
+      }
+    }
+    if (ok) {
+      console.log(`PASS editorial/${name}`);
+    } else {
+      failures += 1;
     }
   }
   return failures === 0 ? 0 : 1;

@@ -1,0 +1,10 @@
+{
+  "message": {
+    "type": "reload",
+    "pages": ["/", "/post/", "/post/a"],
+    "primary": "/"
+  },
+  "action": "reload",
+  "pathname": "/post",
+  "decision": { "kind": "reload" }
+}
