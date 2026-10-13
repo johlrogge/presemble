@@ -1148,11 +1148,13 @@ fn sole_legacy_link_expression(events: &ParagraphEvents) -> Option<Spanned<Conte
         return None;
     }
     let inner = &events[first + 1..last];
+    // A line break in the label is a space: a label is one line.
     let inner_text = || {
         inner
             .iter()
             .filter_map(|(e, _)| match e {
                 Event::Text(t) | Event::Code(t) => Some(t.as_ref()),
+                Event::SoftBreak | Event::HardBreak => Some(" "),
                 _ => None,
             })
             .collect::<String>()
@@ -4065,6 +4067,42 @@ headings
     #[test]
     fn parse_link_text_empty() {
         assert_eq!(super::parse_link_text(""), crate::document::LinkText::Empty);
+    }
+
+    /// A line break in a link expression's label (soft, or hard with a
+    /// backslash or two trailing spaces) is a space: the label is one line, and
+    /// nothing of it is lost on the way to disk.
+    #[test]
+    fn a_line_break_in_a_link_expression_label_becomes_a_space() {
+        for (source, label, written) in [
+            ("[x\ny](:p)\n", "x y", "[x y](:p)"),
+            ("[x\\\ny](:p)\n", "x y", "[x y](:p)"),
+            ("[x  \ny](:p)\n", "x y", "[x y](:p)"),
+            // Already on one line: unchanged.
+            ("[x y](:p)\n", "x y", "[x y](:p)"),
+            (
+                "[Latest](->> :post (take 2))\n",
+                "Latest",
+                "[Latest](->> :post (take 2))",
+            ),
+        ] {
+            let doc = parse_document(source).expect("parses");
+            assert_eq!(doc.elements.len(), 1, "{source:?}: {doc:?}");
+            let element = &doc.elements[0].node;
+            match element {
+                ContentElement::LinkExpression { text, .. } => assert_eq!(
+                    text,
+                    &crate::document::LinkText::Label(label.to_string()),
+                    "{source:?}"
+                ),
+                other => panic!("{source:?} is not a link expression: {other:?}"),
+            }
+            assert_eq!(
+                crate::serializer::serialize_element(element),
+                written,
+                "{source:?}"
+            );
+        }
     }
 
     #[test]
