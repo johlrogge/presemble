@@ -625,6 +625,27 @@ presemble init <dir>
 
 Scaffolds a hello-world site with a `note` schema, one content file, matching templates, and a minimal stylesheet.
 
+### Formatting a site
+
+```
+presemble fmt <site-dir>
+presemble fmt --check <site-dir>
+```
+
+`presemble fmt` writes every file the way a save writes it: canonical markers, minimal escapes, comments and HTML blocks kept. It writes only the files whose text changes and prints one line for each, then a summary. Invalid content is formatted too. A file it cannot format (one with no schema, or one that cannot be read) is reported as `path: error: …`, and the other files are still formatted.
+
+`--check` writes nothing. It lists the files that would change (`path: would be reformatted`) and the same summary.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Nothing went wrong; with `--check`, every file is already canonical |
+| 1 | `--check` found files that would change |
+| 2 | A file could not be formatted (this wins over 1) |
+
+Run it before editing a hand-written site, so the formatting changes land in their own commit. A running `presemble serve` takes the changes without conflicts: a document with no unsaved edits takes the new text, and one with unsaved edits merges it block by block (see [Changes made outside Presemble](#changes-made-outside-presemble)).
+
+`presemble fmt` formats content files today; templates and schemas will follow once they have a canonical form.
+
 ## Serving
 
 ```

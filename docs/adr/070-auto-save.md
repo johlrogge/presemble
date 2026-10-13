@@ -71,6 +71,31 @@ Proposed
 10. **Crash protection** is the idle window: at most about `idle_ms` of edits.
     There is no journal.
 
+### Done: `presemble fmt` (decision 4)
+
+- `presemble fmt [--check] <site-dir>` writes every content file with the
+  canonical serializer a save uses: `content::format_document` reads the file
+  with its grammar (the item or collection schema, as the conductor picks it)
+  and writes it with `serialize_document`. Invalid content is formatted too.
+- That this is exactly what a save writes is proven by
+  `formatting_matches_what_a_save_writes`: for 3060 documents (the
+  conservation corpus under both of its grammars, link-expression lookalikes,
+  and every content file of the site and the example sites), formatting gives
+  the same text as putting the document in the store and serializing it from
+  there. `formatting_is_a_fixed_point` shows formatting formatted text changes
+  nothing. Building this showed that some parsed documents could not be saved
+  at all; that was fixed first (every parsed document can now be saved).
+- Only files whose text changes are written, each through a temporary dot file
+  and a rename, so a running serve sees one change and takes it like any
+  outside write (ADR-065): merged block by block, without a conflict.
+- `--check` writes nothing and lists the files that would change. Exit codes:
+  0 nothing to do, 1 `--check` found changes, 2 a file could not be formatted
+  (2 wins over 1).
+
+**Future: templates and schemas.** `presemble fmt` is built to format other kinds of file: each kind needs only a canonical writer. Templates and schemas are intended to follow. Each needs its own decision first (a later ADR):
+- **Templates:** the hiccup reader skips `;` comments, so writing a template back would drop them. Comments must be kept, as content's are (trivia), before templates can be formatted safely. Whether HTML templates keep their comments needs the same check, and the canonical form of each syntax (hiccup, HTML) must be fixed.
+- **Schemas:** there is no schema writer at all yet, only a parser, and the parser is permissive (Wave 4). A canonical schema form needs both: a strict reading, and a writer that round-trips it.
+
 ## Out of scope
 
 Undo belongs on N and gets its own ADR; auto-save only makes the file follow
