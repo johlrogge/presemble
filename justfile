@@ -86,6 +86,24 @@ site-build-example name="blog":
     {{ just_executable() }} --justfile {{ justfile() }} site-build "$site"
     echo "Temp output: $tmp/output/{{ name }}"
 
+# Format a site's content canonically (presemble fmt).
+[group('develop')]
+site-fmt dir="site":
+    cargo polylith cargo --profile dev run --bin presemble -- fmt {{ dir }}
+
+# Check that the content of site/ and every example site is canonical, as CI does.
+[group('develop')]
+site-fmt-check:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    worst=0
+    for dir in site example-sites/*/; do
+      cargo polylith cargo --profile dev run -q --bin presemble -- fmt --check "${dir%/}"
+      code=$?
+      if [ "$code" -gt "$worst" ]; then worst=$code; fi
+    done
+    exit "$worst"
+
 # Copies the build output of <dir> (built with site-build) into a fresh temp
 # dir and prints its path. Use it to keep a "before" output: `presemble build`
 # always writes to <parent-of-dir>/output/<dir-name>/, which the next build
