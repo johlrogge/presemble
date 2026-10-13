@@ -4,3 +4,6 @@
 
 # style: format the workspace with rustfmt
 bd12e95a9410d2790c69309a7787222e5a90b881
+
+# style(site): format the site's content with presemble fmt
+ee12785c4ae8c36e919897e6a62b050413df3f39
