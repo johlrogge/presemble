@@ -1,0 +1,9 @@
+{
+  "message": {
+    "type": "save-state",
+    "file": "content/post/hello-world.md",
+    "state": "saved",
+    "at": 1791880028168
+  },
+  "action": "ignore"
+}

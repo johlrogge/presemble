@@ -20,6 +20,11 @@
 // Fixtures marked `"browser": false` (EDN requests, which only the Rust side
 // speaks) are skipped, not checked.
 //
+// Also checked, per fixture in resources/serve/protocol/editorial/:
+//   editorialMessageAction(message) — what the page does with a message of
+//   the editorial socket — gives the fixture's `action`. A type the page does
+//   not know is ignored, never a reload.
+//
 // Output: `PASS <fixture>` per fixture, `FAIL <fixture> <what>` per mismatch,
 // `SKIP <fixture>` per skipped fixture.
 // Exit 0 if everything matches, 1 otherwise.
@@ -65,6 +70,14 @@ interface Builders {
     reason?: string,
   ): BlockEditRequest;
   interpretBlockEditResponse(response: unknown): Outcome;
+  /** What the page does with a message of the editorial socket. */
+  editorialMessageAction(message: unknown): string;
+}
+
+/** A message of the editorial socket and what the page must do with it. */
+interface EditorialFixture {
+  readonly message: unknown;
+  readonly action: string;
 }
 
 interface Fixture {
@@ -88,9 +101,9 @@ function read(relative: string): string {
   return Deno.readTextFileSync(new URL(relative, import.meta.url));
 }
 
-/** Every fixture name in resources/serve/protocol/, so a new one is checked too. */
-function fixtureNames(): string[] {
-  const dir = new URL("../resources/serve/protocol/", import.meta.url);
+/** Every fixture name in resources/serve/protocol/`sub`, so a new one is checked too. */
+function fixtureNames(sub = ""): string[] {
+  const dir = new URL(`../resources/serve/protocol/${sub}`, import.meta.url);
   const names: string[] = [];
   for (const entry of Deno.readDirSync(dir)) {
     if (entry.isFile && entry.name.endsWith(".json")) {
@@ -109,7 +122,7 @@ function loadBuilders(): Builders {
   }
   const region = source.slice(start, end);
   const factory = new Function(
-    `${region}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse };`,
+    `${region}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction };`,
   );
   return factory() as Builders;
 }
@@ -177,6 +190,20 @@ function main(): number {
       console.log(`PASS ${name}`);
     } else {
       failures += 1;
+    }
+  }
+  for (const name of fixtureNames("editorial/")) {
+    const fixture = JSON.parse(
+      read(`../resources/serve/protocol/editorial/${name}.json`),
+    ) as EditorialFixture;
+    const action = builders.editorialMessageAction(fixture.message);
+    if (action === fixture.action) {
+      console.log(`PASS editorial/${name}`);
+    } else {
+      failures += 1;
+      console.log(
+        `FAIL editorial/${name} action: expected ${show(fixture.action)}, got ${show(action)}`,
+      );
     }
   }
   return failures === 0 ? 0 : 1;

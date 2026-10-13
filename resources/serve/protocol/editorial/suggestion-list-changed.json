@@ -1,0 +1,7 @@
+{
+  "message": {
+    "type": "suggestion-list-changed",
+    "file": "content/post/hello-world.md"
+  },
+  "action": "suggestion-list-changed"
+}

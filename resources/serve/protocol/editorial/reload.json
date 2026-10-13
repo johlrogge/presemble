@@ -1,0 +1,8 @@
+{
+  "message": {
+    "type": "reload",
+    "pages": ["/post/hello-world"],
+    "primary": "/post/hello-world"
+  },
+  "action": "reload"
+}

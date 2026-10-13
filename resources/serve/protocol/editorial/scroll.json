@@ -1,0 +1,13 @@
+{
+  "message": {
+    "type": "scroll",
+    "anchor": {
+      "kind": "structural",
+      "file": "content/post/hello-world.md",
+      "slot": "body",
+      "node-kind": "paragraph",
+      "offset": 0
+    }
+  },
+  "action": "scroll"
+}

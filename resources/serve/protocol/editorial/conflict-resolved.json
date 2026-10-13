@@ -1,0 +1,7 @@
+{
+  "message": {
+    "type": "conflict-resolved",
+    "file": "content/post/hello-world.md"
+  },
+  "action": "conflict-resolved"
+}

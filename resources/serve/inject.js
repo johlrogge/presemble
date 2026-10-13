@@ -66,6 +66,25 @@ function interpretBlockEditResponse(response) {
   }
   return { kind: 'refused', cause: 'unknown', message: 'Unexpected response from the server.' };
 }
+
+// What the page does with a message of the editorial socket: the name of the
+// action for each type it knows, and 'ignore' for any other. A type the page
+// does not know is never taken as a reload: that would reload every open
+// editor page, and could drop what is being typed.
+function editorialMessageAction(message) {
+  var type = message && message.type;
+  switch (type) {
+    case 'reload':
+    case 'scroll':
+    case 'resync':
+    case 'conflict':
+    case 'conflict-resolved':
+    case 'suggestion-list-changed':
+      return type;
+    default:
+      return 'ignore';
+  }
+}
 // END protocol-builders
 
 // Single source of truth for the heading text used in scroll anchors (ADR-046).
@@ -229,7 +248,12 @@ window.addEventListener('scroll',function(){if(_presembleScrolling){return;}_use
 function _wsOnMessage(e){
 var m;
 try{m=JSON.parse(e.data);}catch(err){console.warn('presemble: bad ws message',err);return;}
-if(m.type==='scroll'){
+var action=editorialMessageAction(m);
+if(action==='ignore'){
+console.debug('presemble: ignoring an editorial message the page does not act on',m.type);
+return;
+}
+if(action==='scroll'){
 if(m.anchor&&typeof m.anchor==='object'){
 var el=_findByStructuralAnchor(m.anchor);
 if(el){
@@ -245,23 +269,24 @@ console.warn('presemble: legacy string anchor ignored');
 }
 return;
 }
-if(m.type==='resync'){
+if(action==='resync'){
 _requestReload({resync:true});
 return;
 }
-if(m.type==='conflict'){
+if(action==='conflict'){
 _noteConflict(m.file,m.state);
 return;
 }
-if(m.type==='conflict-resolved'){
+if(action==='conflict-resolved'){
 _conflictEnded(m.file);
 return;
 }
-if(m.type==='suggestion-list-changed'){
+if(action==='suggestion-list-changed'){
 if(window._fetchSuggestionFiles){window._fetchSuggestionFiles();}
 if(window._fetchSuggestionCount){window._fetchSuggestionCount();}
 return;
 }
+// action === 'reload'
 if(m.anchor){sessionStorage.setItem('presemble-anchor',JSON.stringify(m.anchor));}
 _requestReload(m);
 }

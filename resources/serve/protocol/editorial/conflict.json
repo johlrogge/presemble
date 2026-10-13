@@ -1,0 +1,8 @@
+{
+  "message": {
+    "type": "conflict",
+    "file": "content/post/hello-world.md",
+    "state": "blocks"
+  },
+  "action": "conflict"
+}
