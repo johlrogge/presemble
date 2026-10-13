@@ -286,3 +286,105 @@ fn serializer_reaches_fixed_point_on_all_fixtures() {
         all_files.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// `presemble fmt` writes what a save writes
+// ---------------------------------------------------------------------------
+
+/// The conservation corpus of `content`'s tests (`content/tests/corpus`),
+/// shared by path: the file is compiled into the tests of both crates, so it
+/// must stay free of crate-private items (only public `schema` and `std`).
+#[path = "../../content/tests/corpus/mod.rs"]
+mod corpus;
+
+/// What a save of the unchanged document writes: the document in the store,
+/// serialized.
+fn saved(text: &str, grammar: &Grammar) -> Result<String, String> {
+    let doc = parse_and_assign(text, grammar).map_err(|e| e.to_string())?;
+    let mut store = NodeStore::new();
+    let root = document_to_store(&doc, &mut store, None);
+    serialize_from_store(&store, root).map_err(|e| e.to_string())
+}
+
+/// The site's and every example site's content files, each with its grammar.
+fn site_documents() -> Vec<(PathBuf, String, Grammar)> {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+    let mut sites = vec![workspace_root.join("site")];
+    let mut examples: Vec<PathBuf> = std::fs::read_dir(workspace_root.join("example-sites"))
+        .expect("example-sites")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("content").is_dir())
+        .collect();
+    examples.sort();
+    sites.extend(examples);
+    let mut documents = Vec::new();
+    for site in &sites {
+        for path in collect_content_files(site) {
+            let grammar = grammar_for_file(&path, site)
+                .unwrap_or_else(|| panic!("no grammar for {}", path.display()));
+            let text = std::fs::read_to_string(&path).expect("content file readable");
+            documents.push((path, text, grammar));
+        }
+    }
+    assert!(!documents.is_empty(), "no content files under {sites:?}");
+    documents
+}
+
+/// Every document the parser reads can be saved: put in the store and
+/// serialized from it, for the conservation corpus, the site, the example
+/// sites, and the lookalikes of a link expression (a lone link whose
+/// destination only begins like one, a marked one whose label spans lines)
+/// next to the ones that are link expressions.
+#[test]
+fn every_parsed_document_can_be_saved() {
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0;
+    let mut check = |label: &str, text: &str, grammar: &Grammar| {
+        checked += 1;
+        if let Err(e) = saved(text, grammar) {
+            failures.push(format!("{label}: {e}\n--- source ---\n{text}"));
+        }
+    };
+    for (name, grammar) in corpus::grammars() {
+        for seed in corpus::SEEDS {
+            check(
+                &format!("[{name}] seed {seed}"),
+                &corpus::gen_source(seed),
+                &grammar,
+            );
+        }
+        for text in [
+            // Lone links whose destination only looks like an expression.
+            "[p](->)\n",
+            "[p]((->a))\n",
+            "[p]((->a)) {#n}\n",
+            "[p]((->>%20:post%20(map%20:x))) {#news}\n",
+            "> [p](->)\n",
+            // A marked lookalike whose label spans two lines.
+            "[x\ny](:p) {#n}\n",
+            "> [x\n> y](:p) {#n}\n",
+            // Controls: these were always saved.
+            "[p](<(->a)>) {#n}\n",
+            "[p](:)\n",
+            "a [p]((->>%20:post)) {#n}\n",
+            "[x\ny](:p)\n",
+            "[x\ny](/p) {#n}\n",
+            "[x\ny](->> :post) {#n}\n",
+        ] {
+            check(&format!("[{name}] {text:?}"), text, &grammar);
+        }
+    }
+    for (path, text, grammar) in site_documents() {
+        check(&path.display().to_string(), &text, &grammar);
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {checked} parsed documents cannot be saved; first:\n{}",
+        failures.len(),
+        failures[0]
+    );
+}

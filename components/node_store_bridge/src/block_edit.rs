@@ -374,7 +374,13 @@ pub fn lower(
         _ => None,
     };
     if let Some((content, current, ctx)) = same_container {
-        let mutation = match text_only_change(current, content, ctx) {
+        let marker = match current_el {
+            ContentElement::Heading { marker, .. } | ContentElement::Paragraph { marker, .. } => {
+                marker.as_ref()
+            }
+            _ => None,
+        };
+        let mutation = match text_only_change(current, content, ctx, marker) {
             Some((search, replace)) => NedMutation::SearchReplace { search, replace },
             None => NedMutation::SetInlines(content_store::inlines_to_tree(content)),
         };
@@ -501,6 +507,7 @@ fn text_only_change(
     current: &content::inline::Inlines,
     proposed: &content::inline::Inlines,
     ctx: content::inline::InlineContext,
+    marker: Option<&content::SlotMarker>,
 ) -> Option<(String, String)> {
     const ATOM: char = '\u{fffc}';
     let (old, new) = (current.edit_text(), proposed.edit_text());
@@ -512,7 +519,9 @@ fn text_only_change(
     if search.contains(ATOM) || replace.contains(ATOM) {
         return None;
     }
-    let applied = current.search_replace(&search, &replace, ctx).ok()?;
+    let applied = current
+        .search_replace(&search, &replace, ctx, marker)
+        .ok()?;
     (&applied == proposed).then_some((search, replace))
 }
 

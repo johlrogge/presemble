@@ -177,12 +177,21 @@ fn diagnosed_as_link_expression(written: &str, ctx: InlineContext) -> bool {
     ctx == InlineContext::Paragraph && crate::link_expression::diagnose_paragraph(written).is_some()
 }
 
-pub(super) fn check_writable(inlines: &Inlines, ctx: InlineContext) -> Result<(), NotWritable> {
+pub(super) fn check_writable(
+    inlines: &Inlines,
+    ctx: InlineContext,
+    marker: Option<&crate::SlotMarker>,
+) -> Result<(), NotWritable> {
     let err = NotWritable { ctx };
     let written = serialize_inlines(inlines, ctx);
     // A paragraph that reads as a link expression or carries a slot marker is
-    // not a paragraph of inlines (ADR-058, ADR-060).
-    let sole_link_expression = ctx == InlineContext::Paragraph && is_sole_link_expression(inlines);
+    // not a paragraph of inlines (ADR-058, ADR-060). A lone link whose
+    // destination begins like a link expression is the cheap filter: only
+    // then is the paragraph written as a save writes it, with its marker, and
+    // read back.
+    let sole_link_expression = ctx == InlineContext::Paragraph
+        && is_sole_link_expression(inlines)
+        && !reads_back_as_the_paragraph(inlines, marker);
     if sole_link_expression || block_level_meaning(&written, ctx) {
         return Err(err);
     }
@@ -190,6 +199,20 @@ pub(super) fn check_writable(inlines: &Inlines, ctx: InlineContext) -> Result<()
         Ok(back) if &back == inlines => Ok(()),
         _ => Err(err),
     }
+}
+
+/// Whether the paragraph of `inlines` and `marker`, written as a save writes
+/// it, reads back as exactly that paragraph: one block, no comments, the same
+/// content and marker.
+fn reads_back_as_the_paragraph(inlines: &Inlines, marker: Option<&crate::SlotMarker>) -> bool {
+    let paragraph = crate::ContentElement::Paragraph {
+        content: inlines.clone(),
+        marker: marker.cloned(),
+    };
+    let written = crate::serializer::serialize_element(&paragraph);
+    crate::parse_document(&written).is_ok_and(|back| {
+        back.comments.is_empty() && back.elements.len() == 1 && back.elements[0].node == paragraph
+    })
 }
 
 /// A paragraph that is one link whose destination is a link expression
@@ -1159,7 +1182,7 @@ mod tests {
                 InlineContext::Paragraph,
             ),
         ] {
-            assert_eq!(run.check_writable(InlineContext::Paragraph), Ok(()));
+            assert_eq!(run.check_writable(InlineContext::Paragraph, None), Ok(()));
         }
     }
 
@@ -1175,7 +1198,7 @@ mod tests {
             serialize_inlines(&run, InlineContext::Paragraph),
             "a \\<b c=*x*>"
         );
-        assert_eq!(run.check_writable(InlineContext::Paragraph), Ok(()));
+        assert_eq!(run.check_writable(InlineContext::Paragraph, None), Ok(()));
         // A `>` in a later HTML node, code span or link destination counts too.
         let html = Inline::Html(InlineHtml::new("</b>").unwrap());
         let run = Inlines::new(vec![t("a <b"), em("x"), html], InlineContext::Paragraph);
@@ -1206,7 +1229,7 @@ mod tests {
         assert_eq!(text_para("a _\tb"), "a _\tb");
         assert_eq!(write("a\tb"), "a\tb");
         let tree = Inlines::new(vec![t("a\tb")], InlineContext::Paragraph);
-        assert_eq!(tree.check_writable(InlineContext::Paragraph), Ok(()));
+        assert_eq!(tree.check_writable(InlineContext::Paragraph, None), Ok(()));
         // Other invisible characters are still entities.
         assert_eq!(text_para("a\u{1}b"), "a&#x1;b");
     }
@@ -1251,7 +1274,7 @@ mod tests {
             InlineContext::Paragraph,
         );
         assert_eq!(
-            tree.check_writable(InlineContext::Paragraph),
+            tree.check_writable(InlineContext::Paragraph, None),
             Err(NotWritable {
                 ctx: InlineContext::Paragraph
             })
@@ -1264,7 +1287,7 @@ mod tests {
             ],
             InlineContext::Paragraph,
         );
-        assert_eq!(tree.check_writable(InlineContext::Paragraph), Ok(()));
+        assert_eq!(tree.check_writable(InlineContext::Paragraph, None), Ok(()));
         // Two code spans that touch share a fence (the parser never produces
         // them; a mutation that would is refused).
         let code = |s: &str| Inline::Code(s.to_string());
@@ -1272,12 +1295,12 @@ mod tests {
             vec![t("x "), code("a"), code("b")],
             InlineContext::Paragraph,
         );
-        assert!(tree.check_writable(InlineContext::Paragraph).is_err());
+        assert!(tree.check_writable(InlineContext::Paragraph, None).is_err());
         // Two emphases that touch are one (N9).
         let em = |s: &str| Inline::Emph(Inlines::new(vec![t(s)], InlineContext::Paragraph));
         let tree = Inlines::new(vec![t("x "), em("a"), em("b")], InlineContext::Paragraph);
         assert_eq!(tree.as_slice().len(), 2);
-        assert_eq!(tree.check_writable(InlineContext::Paragraph), Ok(()));
+        assert_eq!(tree.check_writable(InlineContext::Paragraph, None), Ok(()));
         // A link whose destination reads as a link expression is not a link on disk.
         let link = Inline::Link {
             destination: LinkDestination::new("->> :post"),
@@ -1285,7 +1308,47 @@ mod tests {
             text: Inlines::new(vec![t("x")], InlineContext::LinkText),
         };
         let tree = Inlines::new(vec![link], InlineContext::Paragraph);
-        assert!(tree.check_writable(InlineContext::Paragraph).is_err());
+        assert!(tree.check_writable(InlineContext::Paragraph, None).is_err());
+    }
+
+    /// The content and marker of the one paragraph `source` parses to.
+    fn parsed_paragraph(source: &str) -> (Inlines, Option<crate::SlotMarker>) {
+        let flat = crate::parse_document(source).expect("parses");
+        match flat.elements.iter().map(|e| &e.node).collect::<Vec<_>>()[..] {
+            [crate::ContentElement::Paragraph { content, marker }] => {
+                (content.clone(), marker.clone())
+            }
+            ref other => panic!("{source:?} is not one paragraph: {other:?}"),
+        }
+    }
+
+    /// A lone link whose destination only begins like a link expression
+    /// (`->`, `(->a)`) is a link on disk: the parser reads it as one, so the
+    /// store must be able to hold it.
+    #[test]
+    fn a_sole_link_whose_destination_only_looks_like_an_expression_is_writable() {
+        for source in ["[p](->)\n", "[p]((->a))\n", "[p]((->a)) {#n}\n"] {
+            let (content, marker) = parsed_paragraph(source);
+            assert_eq!(
+                content.check_writable(InlineContext::Paragraph, marker.as_ref()),
+                Ok(()),
+                "{source:?}: {content:?}"
+            );
+        }
+    }
+
+    /// A marked link expression whose label spans two lines is not read as a
+    /// link expression; it is a marker paragraph holding one link, and its
+    /// marker keeps it from reading as an expression.
+    #[test]
+    fn a_marked_link_expression_lookalike_spanning_lines_is_writable() {
+        let (content, marker) = parsed_paragraph("[x\ny](:p) {#n}\n");
+        assert!(marker.is_some());
+        assert_eq!(
+            content.check_writable(InlineContext::Paragraph, marker.as_ref()),
+            Ok(()),
+            "{content:?}"
+        );
     }
 
     /// Where a tag or comment would open an HTML block:
@@ -1308,7 +1371,7 @@ mod tests {
         for items in not_writable {
             let tree = Inlines::new(items.clone(), InlineContext::Paragraph);
             assert_eq!(
-                tree.check_writable(InlineContext::Paragraph),
+                tree.check_writable(InlineContext::Paragraph, None),
                 Err(NotWritable {
                     ctx: InlineContext::Paragraph
                 }),
@@ -1332,7 +1395,7 @@ mod tests {
         for items in writable {
             let tree = Inlines::new(items.clone(), InlineContext::Paragraph);
             assert_eq!(
-                tree.check_writable(InlineContext::Paragraph),
+                tree.check_writable(InlineContext::Paragraph, None),
                 Ok(()),
                 "{items:?}"
             );
@@ -1347,7 +1410,7 @@ mod tests {
             InlineContext::Paragraph,
         );
         assert_eq!(
-            tree.check_writable(InlineContext::Paragraph),
+            tree.check_writable(InlineContext::Paragraph, None),
             Err(NotWritable {
                 ctx: InlineContext::Paragraph
             })
@@ -1358,7 +1421,7 @@ mod tests {
         );
         // At the start of the emphasis it reads back (the opener is followed by
         // the backslash, which is punctuation, and preceded by a space).
-        assert_eq!(tree.check_writable(InlineContext::Paragraph), Ok(()));
+        assert_eq!(tree.check_writable(InlineContext::Paragraph, None), Ok(()));
         // In the middle of the emphasis it is fine.
         let tree = Inlines::new(
             vec![
@@ -1368,7 +1431,7 @@ mod tests {
             ],
             InlineContext::Paragraph,
         );
-        assert_eq!(tree.check_writable(InlineContext::Paragraph), Ok(()));
+        assert_eq!(tree.check_writable(InlineContext::Paragraph, None), Ok(()));
     }
 
     #[test]

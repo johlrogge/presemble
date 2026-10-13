@@ -22,8 +22,8 @@ use crate::access::{
     add_child_element, add_child_text, add_text_attr, find_attr_text, make_element,
 };
 use crate::block::{BlockDecodeError, node_to_tree, tree_contains_existing};
-use content::Comment;
 use content::inline::{AssetRef, Inline, InlineContext, InlineHtml, Inlines, LinkDestination};
+use content::{Comment, SlotMarker};
 use ned::NodeTree;
 use node_store::{Edge, Node, NodeId, NodeStore};
 
@@ -329,7 +329,13 @@ pub fn inlines_from_store(
         return Err(BlockDecodeError::NotNormalForm { node: container });
     }
     inlines
-        .check_writable(ctx)
+        .check_writable(ctx, container_marker(store, container).as_ref())
         .map_err(|_| BlockDecodeError::NotWritable { node: container })?;
     Ok(inlines)
+}
+
+/// The slot marker of the paragraph or heading `container`, if it has one: the
+/// content is written with it, so it is part of whether the content reads back.
+pub(crate) fn container_marker(store: &NodeStore, container: NodeId) -> Option<SlotMarker> {
+    find_attr_text(store, container, "marker").and_then(|name| SlotMarker::new(&name))
 }

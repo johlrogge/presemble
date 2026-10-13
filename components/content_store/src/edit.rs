@@ -20,7 +20,9 @@ use crate::block::{
     BLOCK_CONTAINER_KINDS, BLOCK_KINDS, BlockDecodeError, INLINE_CONTAINER_KINDS, TEXT_BLOCK_KINDS,
     block_from_node, block_to_store, inline_context_of, tree_to_block,
 };
-use crate::inline_store::{inlines_from_store, inlines_from_tree, inlines_to_store};
+use crate::inline_store::{
+    container_marker, inlines_from_store, inlines_from_tree, inlines_to_store,
+};
 
 /// Element names an inline Text node can sit under, below its container: the
 /// nodes whose children `InlinePath` descends through.
@@ -554,8 +556,9 @@ pub fn prepare(
             let ctx = container_context(store, block)?;
             let current = container_inlines(store, block, ctx)?;
             check_not_split(ctx, replace)?;
+            let marker = container_marker(store, block);
             let edited = current
-                .search_replace(search, replace, ctx)
+                .search_replace(search, replace, ctx, marker.as_ref())
                 .map_err(|e| match e {
                     SearchReplaceError::NotFound => EditError::SearchNotFound,
                     SearchReplaceError::NotUnique(occurrences) => {
@@ -564,7 +567,7 @@ pub fn prepare(
                     SearchReplaceError::SpansAtom => EditError::SpansAtom,
                     SearchReplaceError::NotWritable => EditError::InlinesNotWritable,
                 })?;
-            return set_inlines(block, document, ctx, &current, edited);
+            return set_inlines(store, block, document, ctx, &current, edited);
         }
         (NedMutation::SetInlines(trees), Target::TextScope { block, .. }) => {
             let ctx = container_context(store, block)?;
@@ -573,7 +576,7 @@ pub fn prepare(
                 BlockDecodeError::ExistingNode => EditError::ExistingNode,
                 other => EditError::Payload(other),
             })?;
-            return set_inlines(block, document, ctx, &current, edited);
+            return set_inlines(store, block, document, ctx, &current, edited);
         }
         (NedMutation::Delete, Target::Block { block, .. }) => (block, Change::Delete { block }),
         (
@@ -754,13 +757,14 @@ fn set_text_in_container(
     let edited = current
         .with_text_at(&path, value, ctx)
         .ok_or_else(|| no_text(store, block))?;
-    set_inlines(block, document, ctx, &current, edited)
+    set_inlines(store, block, document, ctx, &current, edited)
 }
 
 /// The edit that makes `block`'s content `edited`: refused when it would not
-/// be written back as itself (or leaves a paragraph empty), and a no-change
-/// when it equals `current`.
+/// be written back as itself with the block's marker (or leaves a paragraph
+/// empty), and a no-change when it equals `current`.
 fn set_inlines(
+    store: &NodeStore,
     block: NodeId,
     document: NodeId,
     ctx: InlineContext,
@@ -774,7 +778,7 @@ fn set_inlines(
         return Err(EditError::EmptiesParagraph);
     }
     edited
-        .check_writable(ctx)
+        .check_writable(ctx, container_marker(store, block).as_ref())
         .map_err(|_| EditError::InlinesNotWritable)?;
     Ok(PreparedEdit {
         footprint: block,

@@ -568,6 +568,28 @@ fn search_replace_refuses_match_spanning_atom() {
     assert!(f.prepare_scope(&m).is_ok());
 }
 
+/// A paragraph that would be one link to a link expression reads back as a
+/// link expression, not a paragraph: the edit is refused, with or without the
+/// lookalikes that a save can write now (F1).
+#[test]
+fn a_sole_link_that_would_read_back_as_an_expression_is_still_refused() {
+    let f = fixture_with_paragraph("Hello");
+    let inlines =
+        content::inline::parse_inlines("[x](:p)", content::inline::InlineContext::Paragraph)
+            .unwrap();
+    let m = NedMutation::SetInlines(crate::inlines_to_tree(&inlines));
+    // The payload is decoded strictly, so it is refused there already.
+    let err = f.prepare_paragraph_scope(&m).expect_err("refused");
+    assert!(
+        matches!(
+            err,
+            EditError::InlinesNotWritable
+                | EditError::Payload(BlockDecodeError::NotWritable { .. })
+        ),
+        "{err:?}"
+    );
+}
+
 #[test]
 fn set_inlines_replaces_heading_content() {
     let mut f = fixture_with_title("Old");

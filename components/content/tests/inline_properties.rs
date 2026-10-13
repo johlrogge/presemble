@@ -628,7 +628,7 @@ fn inline_round_trip_on_generated_writable_trees() {
                 Err(e) => panic!("seed {seed} in {ctx:?}: {e}: wrote {written:?} for {tree:?}"),
             }
             assert_eq!(
-                tree.check_writable(ctx),
+                tree.check_writable(ctx, None),
                 Ok(()),
                 "seed {seed} in {ctx:?}: {written:?}"
             );
@@ -923,7 +923,7 @@ fn search_replace_result_is_normalised_and_writable() {
             let count = count_overlapping(text, search);
             let what = format!("seed {seed} in {ctx:?}: {search:?} -> {replace:?} in {tree:?}");
 
-            match tree.search_replace(search, replace, ctx) {
+            match tree.search_replace(search, replace, ctx, None) {
                 Ok(result) => {
                     ok += 1;
                     assert_eq!(count, 1, "{what}");
@@ -936,7 +936,11 @@ fn search_replace_result_is_normalised_and_writable() {
                         result,
                         "not normalised: {what}"
                     );
-                    assert_eq!(result.check_writable(ctx), Ok(()), "not writable: {what}");
+                    assert_eq!(
+                        result.check_writable(ctx, None),
+                        Ok(()),
+                        "not writable: {what}"
+                    );
                     assert_eq!(
                         count_kept_nodes(result.as_slice()),
                         count_kept_nodes(tree.as_slice()),
@@ -955,7 +959,7 @@ fn search_replace_result_is_normalised_and_writable() {
                         padded.extend(tree.as_slice().iter().cloned());
                         padded.push(text_node("§"));
                         let padded = Inlines::new(padded, ctx);
-                        if let Ok(edited) = padded.search_replace(search, replace, ctx) {
+                        if let Ok(edited) = padded.search_replace(search, replace, ctx, None) {
                             let stripped = strip_sentinels(edited.as_slice().to_vec())
                                 .unwrap_or_else(|| panic!("sentinels lost: {what}"));
                             assert_eq!(
@@ -1032,7 +1036,7 @@ fn parsed_trees_are_writable() {
                 continue;
             };
             checked += 1;
-            if tree.check_writable(ctx).is_err() {
+            if tree.check_writable(ctx, None).is_err() {
                 failures.push(format!(
                     "{source:?} in {ctx:?}: parsed {tree:?}, wrote {:?}",
                     serialize_inlines(&tree, ctx)

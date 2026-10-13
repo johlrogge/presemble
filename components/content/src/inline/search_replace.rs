@@ -52,6 +52,7 @@ pub(super) fn search_replace(
     search: &str,
     replace: &str,
     ctx: InlineContext,
+    marker: Option<&crate::SlotMarker>,
 ) -> Result<Inlines, SearchReplaceError> {
     let edit = inlines.edit_text();
     let text = edit.as_str();
@@ -95,7 +96,7 @@ pub(super) fn search_replace(
     let items = rewrite(inlines.as_slice(), &new_text, &mut Vec::new());
     let result = Inlines::new(items, ctx);
     result
-        .check_writable(ctx)
+        .check_writable(ctx, marker)
         .map_err(|_| SearchReplaceError::NotWritable)?;
     Ok(result)
 }
@@ -182,7 +183,7 @@ mod tests {
         replace: &str,
     ) -> Result<Vec<Inline>, SearchReplaceError> {
         run(items)
-            .search_replace(search, replace, P)
+            .search_replace(search, replace, P, None)
             .map(|r| r.as_slice().to_vec())
     }
 
@@ -328,7 +329,7 @@ mod tests {
         assert_eq!(got, vec![t("see "), link(vec![]), t(" now")]);
         let tree = run(got);
         assert_eq!(serialize_inlines(&tree, P), "see [](y) now");
-        assert_eq!(tree.check_writable(P), Ok(()));
+        assert_eq!(tree.check_writable(P, None), Ok(()));
         // Emptied emphasis inside the link is removed, the link is not.
         let got = replaced(
             vec![t("a "), link(vec![em(vec![t("x")])]), t(" b")],
@@ -373,7 +374,7 @@ mod tests {
             }],
             P,
         );
-        let got = got.search_replace("a", "", P).unwrap();
+        let got = got.search_replace("a", "", P, None).unwrap();
         let [Inline::Link { text, .. }] = got.as_slice() else {
             panic!("{got:?}")
         };
@@ -447,14 +448,14 @@ mod tests {
         // cannot be written is refused.
         let heading = Inlines::new(vec![t("a b")], InlineContext::Heading);
         let got = heading
-            .search_replace("b", "x\ny", InlineContext::Heading)
+            .search_replace("b", "x\ny", InlineContext::Heading, None)
             .unwrap();
         assert_eq!(got.as_slice(), &[t("a x y")]);
         // `a` + emph(`.b`) + `c` cannot be written.
         let tree = run(vec![t("a "), em(vec![t(".b")]), t("c")]);
-        assert_eq!(tree.check_writable(P), Ok(()));
+        assert_eq!(tree.check_writable(P, None), Ok(()));
         assert_eq!(
-            tree.search_replace(" ", "", P),
+            tree.search_replace(" ", "", P, None),
             Err(SearchReplaceError::NotWritable)
         );
     }

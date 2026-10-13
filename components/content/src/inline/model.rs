@@ -116,22 +116,31 @@ impl Inlines {
     /// `parse(serialize(t)) == t` (ADR-059 §7). Some normal-form trees cannot
     /// be written, because of CommonMark's flanking rules (`a` + emph(`.b`) +
     /// `c`), because raw HTML would open an HTML block, and so on.
-    pub fn check_writable(&self, ctx: InlineContext) -> Result<(), NotWritable> {
-        serialize::check_writable(self, ctx)
+    ///
+    /// `marker` is the slot marker of the paragraph the content is written in
+    /// (always `None` outside a paragraph): it is part of how a paragraph reads.
+    pub fn check_writable(
+        &self,
+        ctx: InlineContext,
+        marker: Option<&crate::SlotMarker>,
+    ) -> Result<(), NotWritable> {
+        serialize::check_writable(self, ctx, marker)
     }
 
     /// Replace the one occurrence of `search` in the edit text by `replace`
     /// (ADR-059 §9). The replacement is literal text and takes the formatting
     /// of the first matched character; nodes the match covers are removed or
     /// trimmed, atoms and comments are kept. The result is normalised for
-    /// `ctx` and must be writable there.
+    /// `ctx` and must be writable there, in a paragraph with `marker` (see
+    /// [`Inlines::check_writable`]).
     pub fn search_replace(
         &self,
         search: &str,
         replace: &str,
         ctx: InlineContext,
+        marker: Option<&crate::SlotMarker>,
     ) -> Result<Inlines, SearchReplaceError> {
-        search_replace::search_replace(self, search, replace, ctx)
+        search_replace::search_replace(self, search, replace, ctx, marker)
     }
 
     /// A copy with the `Text` node at `path` set to `value` (literal text),
