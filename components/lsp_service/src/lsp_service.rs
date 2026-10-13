@@ -64,6 +64,14 @@ fn content_path_for(
     conductor::editorial_types::ContentPath::parse(site_path.as_str()).ok()
 }
 
+/// What an open buffer asks the conductor for: its update from N (LSP-1), or
+/// the edits to N's canonical text (ADR-070).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorAsk {
+    Update,
+    Canonical,
+}
+
 struct StoredDiagnostic {
     lsp_diag: Diagnostic,
     action: Option<SlotAction>,
@@ -108,6 +116,9 @@ struct Publisher {
     /// Each file's conflict with the file on disk, as the conductor last said
     /// (its events; what it listed when the file was opened).
     conflicts: Arc<Mutex<buffer::ConflictView>>,
+    /// Each file's save state, as the conductor last said (ADR-070): a failed
+    /// save shows on the document until it is saved.
+    save_states: Arc<Mutex<buffer::SaveStateView>>,
     conductor: Arc<Mutex<conductor::ConductorClient>>,
     /// The queue to the conductor (held weakly: the server owns it).
     sender: std::sync::Weak<buffer::Sender>,
@@ -179,20 +190,43 @@ impl Publisher {
         }
     }
 
+    /// A `SaveState` event (ADR-070): a failed save shows on the document, and
+    /// goes once it is saved.
+    async fn save_state_changed(&self, file: String, state: conductor::SaveState) {
+        self.save_states.lock().await.apply(&file, state);
+        if let Some(uri) = self.open_uri(&file).await {
+            self.publish_content_diagnostics(uri).await;
+        }
+    }
+
     /// A `DocumentModelChanged` event: an open buffer of the file asks for its
     /// update, once nothing it typed is still on its way.
     async fn model_changed(&self, file: String) {
         let (Some(uri), Some(sender)) = (self.open_uri(&file).await, self.sender.upgrade()) else {
             return;
         };
-        let Some(job) = self.update_job(&uri) else {
+        let Some(job) = self.editor_job(&uri, EditorAsk::Update) else {
             return;
         };
         sender.request_update(uri.as_str(), &job);
     }
 
-    /// How to ask for the update of the open document behind `uri`.
-    fn update_job(&self, uri: &Url) -> Option<buffer::UpdateJob> {
+    /// An `EditorCanonicalWanted` event (ADR-070): an open buffer of the file
+    /// asks for the edits to N's canonical text, once nothing it typed is
+    /// still on its way; the change that follows lets auto-save save it.
+    async fn canonical_wanted(&self, file: String) {
+        let (Some(uri), Some(sender)) = (self.open_uri(&file).await, self.sender.upgrade()) else {
+            return;
+        };
+        let Some(job) = self.editor_job(&uri, EditorAsk::Canonical) else {
+            return;
+        };
+        sender.request_canonical(uri.as_str(), &job);
+    }
+
+    /// How to ask for the update (or the canonical text) of the open document
+    /// behind `uri`.
+    fn editor_job(&self, uri: &Url, ask: EditorAsk) -> Option<buffer::UpdateJob> {
         let path = content_path_for(&self.site_dir, &uri.to_file_path().ok()?)?;
         let publisher = self.clone();
         let uri = uri.clone();
@@ -201,21 +235,30 @@ impl Publisher {
             let uri = uri.clone();
             let done: buffer::Done = Box::new(move |reply| {
                 let handle = publisher.handle.clone();
-                handle.spawn(async move { publisher.apply_update(uri, reply).await });
+                handle.spawn(async move { publisher.apply_update(uri, reply, ask).await });
             });
-            (
-                conductor::Command::GetEditorUpdate { path: path.clone() },
-                done,
-            )
+            let path = path.clone();
+            let cmd = match ask {
+                EditorAsk::Update => conductor::Command::GetEditorUpdate { path },
+                EditorAsk::Canonical => conductor::Command::GetEditorCanonical { path },
+            };
+            (cmd, done)
         }))
     }
 
     /// Apply an update the conductor answered to the buffer, when the buffer
     /// as it is now (the client's latest notification) is the text it was
     /// computed for; at that notification's version, so the client still
-    /// refuses it if it has moved on. Otherwise it is asked for again: now,
-    /// or once the buffer's text is idle.
-    async fn apply_update(&self, uri: Url, reply: Result<conductor::Response, String>) {
+    /// refuses it if it has moved on. Otherwise an update is asked for again:
+    /// now, or once the buffer's text is idle. The canonical text is not: the
+    /// buffer changed, so auto-save waits for the idle time again and the
+    /// conductor asks for it again then.
+    async fn apply_update(
+        &self,
+        uri: Url,
+        reply: Result<conductor::Response, String>,
+        ask: EditorAsk,
+    ) {
         let (last_hash, edits) = match reply {
             Ok(conductor::Response::EditorUpdate { last_hash, edits }) => (last_hash, edits),
             Ok(conductor::Response::Error(e)) | Err(e) => {
@@ -225,7 +268,7 @@ impl Publisher {
             Ok(_) => return,
         };
         let key = uri.to_string();
-        let (Some(sender), Some(job)) = (self.sender.upgrade(), self.update_job(&uri)) else {
+        let (Some(sender), Some(job)) = (self.sender.upgrade(), self.editor_job(&uri, ask)) else {
             return;
         };
         // Checked against the buffer as it is now (the client's latest
@@ -233,6 +276,7 @@ impl Publisher {
         let decision = self.buffers.lock().await.decide(&key, last_hash, &edits);
         match decision {
             buffer::UpdateDecision::Nothing => {}
+            buffer::UpdateDecision::Stale if ask == EditorAsk::Canonical => {}
             buffer::UpdateDecision::Stale => sender.request_update(&key, &job),
             buffer::UpdateDecision::Apply { version, edits } => {
                 let applied = matches!(
@@ -241,7 +285,7 @@ impl Publisher {
                         .await,
                     Ok(ApplyWorkspaceEditResponse { applied: true, .. })
                 );
-                if !applied {
+                if !applied && ask == EditorAsk::Update {
                     let now = self.buffers.lock().await.get(&key).map(|b| b.version);
                     if now == Some(version) {
                         // Refused for no reason the buffer shows.
@@ -358,6 +402,11 @@ impl Publisher {
                 doc: doc.as_ref(),
             };
             diags.extend(buffer::conflict_diagnostics(conflict.as_ref(), &buffer));
+        }
+        // ADR-070: a save that failed shows until the document is saved.
+        if let Some(rel) = self.rel_of(&uri) {
+            let save_states = self.save_states.lock().await;
+            diags.extend(buffer::save_diagnostics(save_states.failure(&rel)));
         }
         self.client.publish_diagnostics(uri, diags, None).await;
     }
@@ -491,6 +540,28 @@ fn forward_event(event: conductor::ConductorEvent, publisher: &Publisher, sender
                 }),
             )
         }
+        conductor::ConductorEvent::EditorCanonicalWanted { file } => {
+            let publisher = publisher.clone();
+            let wanted = file.clone();
+            (
+                file,
+                Box::new(move |_| {
+                    let handle = publisher.handle.clone();
+                    handle.spawn(async move { publisher.canonical_wanted(wanted).await });
+                }),
+            )
+        }
+        conductor::ConductorEvent::SaveState { file, state } => {
+            let publisher = publisher.clone();
+            let changed = file.clone();
+            (
+                file,
+                Box::new(move |_| {
+                    let handle = publisher.handle.clone();
+                    handle.spawn(async move { publisher.save_state_changed(changed, state).await });
+                }),
+            )
+        }
         _ => return,
     };
     // Keyed by the file: only the queue's order matters for a task.
@@ -531,6 +602,7 @@ impl PresembleLsp {
             versions: versions.clone(),
             buffers: Arc::new(Mutex::new(buffer::OpenBuffers::default())),
             conflicts: Arc::new(Mutex::new(buffer::ConflictView::default())),
+            save_states: Arc::new(Mutex::new(buffer::SaveStateView::default())),
             conductor: conductor.clone(),
             sender: Arc::downgrade(&sender),
             handle: handle.clone(),

@@ -328,6 +328,13 @@ pub enum Command {
     /// What the open editor of a document should do to its buffer to read as
     /// N again: answered with [`Response::EditorUpdate`].
     GetEditorUpdate { path: editorial_types::ContentPath },
+    /// What the open editor of a document should do to its buffer to hold N's
+    /// canonical text (ADR-070, asked for after `EditorCanonicalWanted`): the
+    /// format edits from the editor's last text to it, with the hash of the
+    /// text they apply to, answered as [`Response::EditorUpdate`]. No edits
+    /// while the editor has a held or drifted region (that text is the
+    /// editor's until it resolves it). No open editor: no hash and no edits.
+    GetEditorCanonical { path: editorial_types::ContentPath },
     /// Editor saved a document (from LSP did_save). When the file holds the
     /// editor's latest text this is a flush of N (held regions are lowered as
     /// they stand; N's text is written if it holds others' changes).

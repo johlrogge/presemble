@@ -368,6 +368,27 @@ fn the_editor_is_asked_again_while_the_document_waits() {
     assert_eq!(w.on_disk(), CONTENT, "never saved");
 }
 
+/// The editor typed after it was asked (the canonical edits were dropped, as
+/// they were computed for a text it has left): its next pause asks again at
+/// once, not 5×idle after the last ask.
+#[test]
+fn a_new_pause_after_a_dropped_canonical_edit_asks_again_at_once() {
+    let w = World::new();
+    let typed = waiting_editor(&w);
+    w.advance(IDLE);
+    assert_eq!(asks_for_canonical(&w.tick()), 1, "asked once it is idle");
+
+    // The user types on; the canonical edits are dropped.
+    w.editor_types(&typed.replace("Alpha changed.", "Alpha changed again."));
+    w.advance(IDLE - Duration::from_millis(1));
+    assert_eq!(asks_for_canonical(&w.tick()), 0, "still typing");
+
+    w.advance(Duration::from_millis(1));
+    let result = w.tick();
+    assert_eq!(asks_for_canonical(&result), 1, "the new pause asks at once");
+    assert!(!saved(&result));
+}
+
 #[test]
 fn closing_the_editor_lets_the_document_auto_save() {
     let w = World::new();
@@ -485,6 +506,90 @@ fn an_auto_save_merges_an_outside_change_first() {
     assert!(disk.contains("# Edited Here"), "our edit: {disk}");
     assert!(disk.contains("Beta outside."), "the outside change: {disk}");
     assert!(!w.dirty());
+}
+
+// ── A4: bringing the editor to the canonical text ──────────────────────────
+
+impl World {
+    fn editor_answer(&self, cmd: Command) -> (Option<crate::protocol::TextHash>, String) {
+        match self.conductor.handle_command(cmd).response {
+            Response::EditorUpdate { last_hash, edits } => {
+                (last_hash, apply_wire_edits(&self.editor_last(), &edits))
+            }
+            other => panic!("expected an editor update, got {other:?}"),
+        }
+    }
+
+    fn editor_last(&self) -> String {
+        self.conductor
+            .editors
+            .read()
+            .unwrap()
+            .get(&path())
+            .map(|state| state.last.clone())
+            .expect("an open editor")
+    }
+}
+
+fn apply_wire_edits(text: &str, edits: &[crate::protocol::BufferEdit]) -> String {
+    let edits: Vec<content::sync::BufferEdit> = edits
+        .iter()
+        .map(|e| content::sync::BufferEdit {
+            range: e.range.clone(),
+            text: e.text.clone(),
+        })
+        .collect();
+    content::sync::apply_edits(text, &edits)
+}
+
+/// The editor update of LSP-1 leaves text that reads as N alone, so it does
+/// not bring an editor to the canonical text: `GetEditorCanonical` does.
+#[test]
+fn get_editor_canonical_takes_the_editors_text_to_the_canonical_text() {
+    let w = World::new();
+    let typed = waiting_editor(&w);
+
+    let (update_hash, updated) = w.editor_answer(Command::GetEditorUpdate { path: path() });
+    assert_eq!(update_hash, Some(crate::protocol::TextHash::of(&typed)));
+    assert_eq!(updated, typed, "the update leaves the `*` bullets alone");
+
+    let (hash, canonical) = w.editor_answer(Command::GetEditorCanonical { path: path() });
+    assert_eq!(hash, Some(crate::protocol::TextHash::of(&typed)));
+    assert_eq!(canonical, w.canonical());
+
+    // The editor takes it; the next tick after the idle time saves.
+    w.editor_types(&canonical);
+    w.advance(IDLE);
+    let result = w.tick();
+    assert!(saved(&result), "{:?}", result.events);
+    assert_eq!(w.on_disk(), canonical);
+}
+
+#[test]
+fn get_editor_canonical_leaves_an_unsettled_editor_alone() {
+    let held = World::new();
+    held_editor(&held);
+    let drifted = World::new();
+    drifted_editor(&drifted);
+    for (what, w) in [("held", &held), ("drifted", &drifted)] {
+        let (hash, text) = w.editor_answer(Command::GetEditorCanonical { path: path() });
+        assert!(hash.is_some(), "{what}");
+        assert_eq!(text, w.editor_last(), "{what}: no edits");
+    }
+
+    // No open editor: nothing.
+    let closed = World::new();
+    match closed
+        .conductor
+        .handle_command(Command::GetEditorCanonical { path: path() })
+        .response
+    {
+        Response::EditorUpdate { last_hash, edits } => {
+            assert_eq!(last_hash, None);
+            assert!(edits.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 // ── A2: flushing, shutdown, save state ─────────────────────────────────────

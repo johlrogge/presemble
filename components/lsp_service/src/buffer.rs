@@ -48,6 +48,9 @@ struct State {
     in_flight: Option<(String, bool)>,
     /// The files whose editor update is wanted once their text is idle.
     wanted: std::collections::HashMap<String, UpdateJob>,
+    /// The files whose canonical text is wanted once their text is idle
+    /// (ADR-070); beside an update, not instead of it.
+    canonical_wanted: std::collections::HashMap<String, UpdateJob>,
     stopped: bool,
 }
 
@@ -60,16 +63,20 @@ impl State {
             || self.jobs.iter().any(|j| j.latest_wins && j.key == key)
     }
 
-    /// Queue the file's update, unless one already waits (it will be computed
-    /// for the same text).
+    /// Queue the file's update (or canonical text), unless one of the same
+    /// kind already waits (it will be computed for the same text).
     fn queue_update(&mut self, key: &str, job: &UpdateJob) {
+        let (cmd, done) = job();
+        let kind = std::mem::discriminant(&cmd);
         let waiting = self.jobs.iter().any(|j| {
-            j.key == key && matches!(j.cmd, Some(conductor::Command::GetEditorUpdate { .. }))
+            j.key == key
+                && j.cmd
+                    .as_ref()
+                    .is_some_and(|c| std::mem::discriminant(c) == kind)
         });
         if waiting {
             return;
         }
-        let (cmd, done) = job();
         self.jobs.push_back(Job {
             key: key.to_string(),
             latest_wins: false,
@@ -140,11 +147,13 @@ impl Sender {
                     state.in_flight = None;
                     // A text taken and none behind it: the file's text is idle,
                     // and an update wanted for it is asked for now (LSP-1).
-                    if text
-                        && !state.text_pending(&key)
-                        && let Some(update) = state.wanted.remove(&key)
-                    {
-                        state.queue_update(&key, &update);
+                    if text && !state.text_pending(&key) {
+                        if let Some(update) = state.wanted.remove(&key) {
+                            state.queue_update(&key, &update);
+                        }
+                        if let Some(canonical) = state.canonical_wanted.remove(&key) {
+                            state.queue_update(&key, &canonical);
+                        }
                     }
                 }
                 worker.wake.notify_all();
@@ -200,6 +209,21 @@ impl Sender {
         self.shared.wake.notify_all();
     }
 
+    /// Ask the conductor for the edits that bring the buffer of the file at
+    /// `key` to N's canonical text (ADR-070): as an update is, at once when
+    /// none of its text is queued or on its way, otherwise once its last text
+    /// has been taken. It is wanted beside an update, not instead of it.
+    pub fn request_canonical(&self, key: &str, job: &UpdateJob) {
+        let mut state = self.shared.lock();
+        if state.text_pending(key) {
+            state.canonical_wanted.insert(key.to_string(), job.clone());
+        } else {
+            state.queue_update(key, job);
+        }
+        drop(state);
+        self.shared.wake.notify_all();
+    }
+
     /// Ask for the update of the file at `key` again the next time its text
     /// is idle (a text taken): an update the editor refused for no reason the
     /// buffer shows is not asked for again at once.
@@ -219,6 +243,27 @@ impl Sender {
             cmd: None,
             done,
         });
+    }
+
+    /// Wait until nothing is queued and nothing is in flight, for at most
+    /// `limit`; whether it got there.
+    #[cfg(test)]
+    pub fn wait_idle_for(&self, limit: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        let mut state = self.shared.lock();
+        while !state.jobs.is_empty() || state.busy {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = self
+                .shared
+                .wake
+                .wait_timeout(state, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        true
     }
 
     /// Wait until nothing is queued and nothing is in flight.
@@ -327,6 +372,49 @@ impl ConflictView {
     pub fn state(&self, file: &str) -> Option<&ConflictState> {
         self.by_file.get(file)
     }
+}
+
+/// Each file's save state, as the conductor last said (ADR-070): a save that
+/// failed shows on the document until a later state replaces it.
+#[derive(Debug, Default)]
+pub struct SaveStateView {
+    failed: std::collections::HashMap<String, String>,
+}
+
+impl SaveStateView {
+    /// A `SaveState` event for site-relative `file`.
+    pub fn apply(&mut self, file: &str, state: conductor::SaveState) {
+        match state {
+            conductor::SaveState::Failed { error } => {
+                self.failed.insert(file.to_string(), error);
+            }
+            _ => {
+                self.failed.remove(file);
+            }
+        }
+    }
+
+    /// Why the last save of `file` failed, while that is its state.
+    pub fn failure(&self, file: &str) -> Option<&str> {
+        self.failed.get(file).map(String::as_str)
+    }
+}
+
+/// The diagnostic of a save that failed (`None`: none): an error on the first
+/// line, saying why. The edits are kept and the save is tried again.
+pub fn save_diagnostics(failure: Option<&str>) -> Vec<Diagnostic> {
+    failure
+        .map(|error| Diagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("presemble".to_string()),
+            message: format!(
+                "The edits are not saved: {error}. They are kept, and the save is tried again."
+            ),
+            ..Default::default()
+        })
+        .into_iter()
+        .collect()
 }
 
 // ── Updates from N (LSP-1) ──────────────────────────────────────────────────
@@ -1780,6 +1868,107 @@ mod tests {
                 },
                 new_text: "Beta".to_string(),
             }]
+        );
+    }
+
+    // ── the canonical text and the save state (ADR-070, A4) ─────────────────
+
+    /// A canonical job that the conductor is asked for as `GetEditorCanonical`.
+    fn canonical_job(rig: &Rig) -> UpdateJob {
+        let replies = rig.replies.clone();
+        Arc::new(move || {
+            let replies = replies.clone();
+            (
+                conductor::Command::GetEditorCanonical {
+                    path: conductor::editorial_types::ContentPath::parse("content/post/a.md")
+                        .expect("a content path"),
+                },
+                Box::new(move |_| replies.lock().unwrap().push("canonical".to_string())) as Done,
+            )
+        })
+    }
+
+    fn is_canonical(line: &str) -> bool {
+        line.starts_with("GetEditorCanonical")
+    }
+
+    #[test]
+    fn canonical_text_is_applied_only_when_idle_and_unchanged() {
+        // Asked for only once the editor's last text has been taken, beside
+        // an update wanted for the same file, and once however often it is
+        // wanted meanwhile.
+        let rig = rig();
+        rig.sender.push_latest("a", changed("1"), rig.done("1"));
+        rig.first_send_in_flight();
+        rig.sender.request_update("a", &update_job(&rig));
+        rig.sender.request_canonical("a", &canonical_job(&rig));
+        rig.sender.request_canonical("a", &canonical_job(&rig));
+        rig.sender.push_latest("a", changed("2"), rig.done("2"));
+        rig.release.send(()).unwrap();
+        assert!(rig.sender.wait_idle_for(Duration::from_secs(5)), "idle");
+        let log = rig.log.lock().unwrap().clone();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert_eq!(log[..2], ["changed 1", "changed 2"], "{log:?}");
+        assert_eq!(log.iter().filter(|l| is_update(l)).count(), 1, "{log:?}");
+        assert_eq!(log.iter().filter(|l| is_canonical(l)).count(), 1, "{log:?}");
+
+        // Applied only to the text it was computed for, at that version.
+        let asked_for = "# Title\n\n----\n\n* one\n* two\n";
+        let canonical = "# Title\n\n----\n\n- one\n- two\n";
+        let edits: Vec<conductor::BufferEdit> = content::sync::format_edits(asked_for, canonical)
+            .into_iter()
+            .map(conductor::BufferEdit::from)
+            .collect();
+        let hash = Some(conductor::TextHash::of(asked_for));
+        let mut buffers = OpenBuffers::default();
+        buffers.opened("a", 1, asked_for.to_string());
+        buffers.changed(
+            "a",
+            2,
+            "# Title\n\n----\n\n* one\n* two typed\n".to_string(),
+        );
+        assert_eq!(buffers.decide("a", hash, &edits), UpdateDecision::Stale);
+        buffers.changed("a", 3, asked_for.to_string());
+        let UpdateDecision::Apply { version, edits } = buffers.decide("a", hash, &edits) else {
+            panic!("applied to the text it was computed for");
+        };
+        assert_eq!(version, 3);
+        assert_eq!(apply(asked_for, &edits), canonical);
+    }
+
+    #[test]
+    fn a_failed_save_shows_and_clears() {
+        let file = "content/post/a.md";
+        let mut view = SaveStateView::default();
+        view.apply(
+            file,
+            conductor::SaveState::Failed {
+                error: "write error: Permission denied".to_string(),
+            },
+        );
+        let diagnostics = save_diagnostics(view.failure(file));
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let shown = &diagnostics[0];
+        assert_eq!(shown.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(shown.range.start, Position::new(0, 0));
+        assert!(
+            shown.message.contains("Permission denied"),
+            "{}",
+            shown.message
+        );
+        assert!(shown.message.contains("not saved"), "{}", shown.message);
+        // Another file is not touched.
+        assert!(save_diagnostics(view.failure("content/post/b.md")).is_empty());
+
+        view.apply(
+            file,
+            conductor::SaveState::Saved {
+                at: std::time::SystemTime::now(),
+            },
+        );
+        assert!(
+            save_diagnostics(view.failure(file)).is_empty(),
+            "cleared on a save"
         );
     }
 

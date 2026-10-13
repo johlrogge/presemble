@@ -774,6 +774,17 @@ impl Conductor {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .touched(rel, now);
+        self.forget_canonical_ask(rel);
+    }
+
+    /// The document at site-relative `rel` changed: when its editor was last
+    /// asked for the canonical text no longer counts, so its next pause asks
+    /// again at once (ADR-070) rather than 5×idle after the last ask.
+    fn forget_canonical_ask(&self, rel: &Path) {
+        self.canonical_asked
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(rel);
     }
 
     /// Remember what the file at site-relative `rel` looks like now, as the
@@ -900,6 +911,9 @@ impl Conductor {
                 })
                 .collect()
         };
+        for rel in paths {
+            self.forget_canonical_ask(rel);
+        }
         for rel in newly_unsaved {
             self.record_base(rel);
             self.save_state_changed(rel);
@@ -4637,6 +4651,7 @@ impl Conductor {
             Command::EditorClosed { path } => self.editor_closed(&path),
             Command::KeepMine { path, drift_id } => self.keep_mine(path, drift_id),
             Command::GetEditorUpdate { path } => self.editor_update(&path),
+            Command::GetEditorCanonical { path } => self.editor_canonical(&path),
             Command::ResolveConflict { path, id, take } => self.resolve_conflict(&path, id, take),
             Command::DocumentSaved { path } => {
                 if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) {

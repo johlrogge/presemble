@@ -1251,6 +1251,38 @@ impl Conductor {
         })
     }
 
+    /// What the open editor of `path` should do to its buffer to hold N's
+    /// canonical text ([`Command::GetEditorCanonical`], ADR-070).
+    /// The format edits from the editor's last text to the whole canonical
+    /// text, with the hash of the text they apply to; none while the editor
+    /// holds a region N does not have (held or drifted: it is the editor's).
+    pub(super) fn editor_canonical(&self, path: &editorial_types::ContentPath) -> CommandResult {
+        let Some(state) = self
+            .editors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .cloned()
+        else {
+            return CommandResult::with_response(Response::EditorUpdate {
+                last_hash: None,
+                edits: Vec::new(),
+            });
+        };
+        let settled = state.held.is_empty() && state.drifts.is_empty();
+        let edits = match self.canonical_text(path) {
+            Some(canonical) if settled => sync::format_edits(&state.last, &canonical)
+                .into_iter()
+                .map(crate::protocol::BufferEdit::from)
+                .collect(),
+            _ => Vec::new(),
+        };
+        CommandResult::with_response(Response::EditorUpdate {
+            last_hash: Some(crate::protocol::TextHash::of(&state.last)),
+            edits,
+        })
+    }
+
     pub(super) fn keep_mine(
         &self,
         path: editorial_types::ContentPath,
