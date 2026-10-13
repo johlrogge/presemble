@@ -1218,16 +1218,19 @@ n.className=tag==='del'?'presemble-diff-del':'presemble-diff-ins';
 n.textContent=text;
 return n;
 }
-// The change a block-edit suggestion proposes: the base markdown struck out,
-// the proposed markdown after it (blocks keep their line breaks, so a
-// structural change such as one paragraph into two reads as such).
+// The change a block-edit suggestion proposes, word by word (wordDiff): what
+// stays is plain text, what goes is struck, what comes is inserted, all in one
+// container that keeps line breaks (pre-wrap), so a structural change such as
+// one paragraph into two still reads as such.
 function _renderPreviewDiff(el,base,proposed){
 el.textContent='';
-var del=_diffNode('del',base);
-var ins=_diffNode('ins',proposed);
-[del,ins].forEach(function(n){n.style.display='block';n.style.whiteSpace='pre-wrap';});
-el.appendChild(del);
-el.appendChild(ins);
+var box=document.createElement('span');
+box.style.display='block';
+box.style.whiteSpace='pre-wrap';
+wordDiff(base,proposed).forEach(function(part){
+box.appendChild(part.op==='eq'?document.createTextNode(part.text):_diffNode(part.op,part.text));
+});
+el.appendChild(box);
 }
 // Prefer an in-place split of the single text node containing `search`
 // (preserves surrounding markup); otherwise fall back to a flat text rendering.
@@ -1575,6 +1578,50 @@ window._foldToggle=function(el){_foldToggle(el);};
 // U+FEFF, which is not White_Space.
 function normalizeAnchorText(s) {
 return String(s).split(/\p{White_Space}+/u).filter(Boolean).join(' ');
+}
+
+// What a suggestion changes, word by word: [{op:'eq'|'del'|'ins', text}].
+// Tokens are runs of Unicode White_Space and runs of everything else (the
+// boundary of normalizeAnchorText), so a line break is a token too: one
+// paragraph into two shows as a change. The tokens are diffed by their longest
+// common subsequence; adjacent entries of one op are merged. Past 250,000
+// token pairs the whole base goes out and the whole proposal in.
+function wordDiff(base, proposed) {
+var tokens = function (s) {
+  return String(s).split(/(\p{White_Space}+)/u).filter(function (t) { return t !== ''; });
+};
+var a = tokens(base);
+var b = tokens(proposed);
+var out = [];
+var push = function (op, text) {
+  var last = out[out.length - 1];
+  if (last && last.op === op) last.text += text;
+  else out.push({ op: op, text: text });
+};
+if (a.length * b.length > 250000) {
+  if (a.length) push('del', a.join(''));
+  if (b.length) push('ins', b.join(''));
+  return out;
+}
+// lcs[i * (m + 1) + j]: the longest common subsequence of a[i..] and b[j..].
+var n = a.length, m = b.length, w = m + 1;
+var lcs = new Uint32Array((n + 1) * w);
+for (var i = n - 1; i >= 0; i--) {
+  for (var j = m - 1; j >= 0; j--) {
+    lcs[i * w + j] = a[i] === b[j]
+      ? lcs[(i + 1) * w + j + 1] + 1
+      : Math.max(lcs[(i + 1) * w + j], lcs[i * w + j + 1]);
+  }
+}
+var x = 0, y = 0;
+while (x < n && y < m) {
+  if (a[x] === b[y]) { push('eq', a[x]); x++; y++; }
+  else if (lcs[(x + 1) * w + y] >= lcs[x * w + y + 1]) { push('del', a[x]); x++; }
+  else { push('ins', b[y]); y++; }
+}
+while (x < n) { push('del', a[x]); x++; }
+while (y < m) { push('ins', b[y]); y++; }
+return out;
 }
 
 // END pure-text-helpers

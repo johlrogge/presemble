@@ -1,0 +1,79 @@
+{
+  "_comment": "wordDiff(base, proposed) in resources/serve/inject.js (pure-text-helpers), checked by tools/text-vectors.ts. Tokens are runs of Unicode White_Space and runs of everything else, the boundary of normalizeAnchorText. A string may be written {\"repeat\": s, \"times\": n}.",
+  "cases": [
+    {
+      "name": "one word changed",
+      "base": "The quick fox",
+      "proposed": "The slow fox",
+      "diff": [
+        { "op": "eq", "text": "The " },
+        { "op": "del", "text": "quick" },
+        { "op": "ins", "text": "slow" },
+        { "op": "eq", "text": " fox" }
+      ]
+    },
+    {
+      "name": "identical texts",
+      "base": "Nothing changes here.",
+      "proposed": "Nothing changes here.",
+      "diff": [{ "op": "eq", "text": "Nothing changes here." }]
+    },
+    {
+      "name": "from nothing",
+      "base": "",
+      "proposed": "a",
+      "diff": [{ "op": "ins", "text": "a" }]
+    },
+    {
+      "name": "one paragraph into two",
+      "base": "a b",
+      "proposed": "a\n\nb",
+      "diff": [
+        { "op": "eq", "text": "a" },
+        { "op": "del", "text": " " },
+        { "op": "ins", "text": "\n\n" },
+        { "op": "eq", "text": "b" }
+      ]
+    },
+    {
+      "name": "U+FEFF is not White_Space, so not a boundary",
+      "base": "a﻿b",
+      "proposed": "a﻿c",
+      "diff": [
+        { "op": "del", "text": "a﻿b" },
+        { "op": "ins", "text": "a﻿c" }
+      ]
+    },
+    {
+      "name": "a no-break space is White_Space, so a boundary (as normalizeAnchorText)",
+      "base": "a b",
+      "proposed": "a c",
+      "diff": [
+        { "op": "eq", "text": "a " },
+        { "op": "del", "text": "b" },
+        { "op": "ins", "text": "c" }
+      ]
+    },
+    {
+      "name": "over 250,000 token pairs: the whole base out, the whole proposal in",
+      "base": { "repeat": "x ", "times": 260 },
+      "proposed": { "repeat": "y ", "times": 260 },
+      "diff": [
+        { "op": "del", "text": { "repeat": "x ", "times": 260 } },
+        { "op": "ins", "text": { "repeat": "y ", "times": 260 } }
+      ]
+    },
+    {
+      "name": "under the limit the same texts are diffed word by word",
+      "base": "x x",
+      "proposed": "y y",
+      "diff": [
+        { "op": "del", "text": "x" },
+        { "op": "ins", "text": "y" },
+        { "op": "eq", "text": " " },
+        { "op": "del", "text": "x" },
+        { "op": "ins", "text": "y" }
+      ]
+    }
+  ]
+}

@@ -11,7 +11,11 @@
 //               normalize_plain_text and ned's normalize_ws do. The browser
 //               uses it to match scroll anchors (ADR-046).
 //
-// The other groups in the file (atx, plain) are Rust-only:
+//   word-diff — wordDiff(base, proposed), the word-by-word change a suggestion
+//               preview shows, against resources/serve/word-diff-vectors.json
+//               (browser-only).
+//
+// The other groups in text-vectors.json (atx, plain) are Rust-only:
 // since the block-edit cutover (ADR-059 §10) the browser no longer derives
 // stored text from markdown.
 //
@@ -29,12 +33,32 @@ const END = "// END pure-text-helpers";
 
 interface Helpers {
   normalizeAnchorText(s: string): string;
+  wordDiff(base: string, proposed: string): DiffEntry[];
 }
 
 type Pair = readonly [string, unknown];
 
 interface Vectors {
   readonly normalize: readonly Pair[];
+}
+
+interface DiffEntry {
+  readonly op: "eq" | "del" | "ins";
+  readonly text: string;
+}
+
+/** A string, or `{repeat, times}` for one too long to write out. */
+type VectorText = string | { readonly repeat: string; readonly times: number };
+
+interface WordDiffCase {
+  readonly name: string;
+  readonly base: VectorText;
+  readonly proposed: VectorText;
+  readonly diff: readonly { readonly op: DiffEntry["op"]; readonly text: VectorText }[];
+}
+
+function text(t: VectorText): string {
+  return typeof t === "string" ? t : t.repeat.repeat(t.times);
 }
 
 function read(relative: string): string {
@@ -50,7 +74,7 @@ function loadHelpers(): Helpers {
   }
   const region = source.slice(start, end);
   const factory = new Function(
-    `${region}\nreturn { normalizeAnchorText: normalizeAnchorText };`,
+    `${region}\nreturn { normalizeAnchorText: normalizeAnchorText, wordDiff: wordDiff };`,
   );
   return factory() as Helpers;
 }
@@ -81,7 +105,29 @@ function check(
 function main(): number {
   const helpers = loadHelpers();
   const vectors = JSON.parse(read("../resources/serve/text-vectors.json")) as Vectors;
-  const failures = check("normalize", vectors.normalize, (s) => helpers.normalizeAnchorText(s));
+  let failures = check("normalize", vectors.normalize, (s) => helpers.normalizeAnchorText(s));
+
+  const wordDiff = JSON.parse(read("../resources/serve/word-diff-vectors.json")) as {
+    readonly cases: readonly WordDiffCase[];
+  };
+  let diffFailures = 0;
+  for (const c of wordDiff.cases) {
+    const expected = c.diff.map((e) => ({ op: e.op, text: text(e.text) }));
+    const got = helpers.wordDiff(text(c.base), text(c.proposed));
+    if (show(got) !== show(expected)) {
+      diffFailures += 1;
+      // Long texts are shown by length only, and long diffs by their size.
+      const brief = (d: readonly DiffEntry[]) =>
+        d.length > 12
+          ? `${d.length} entries`
+          : show(d.map((e) => (e.text.length > 60 ? { op: e.op, length: e.text.length } : e)));
+      console.log(`FAIL word-diff ${c.name}: expected ${brief(expected)}, got ${brief(got)}`);
+    }
+  }
+  if (diffFailures === 0) {
+    console.log(`PASS word-diff (${wordDiff.cases.length} vectors)`);
+  }
+  failures += diffFailures;
   return failures === 0 ? 0 : 1;
 }
 
