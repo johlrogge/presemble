@@ -34,6 +34,9 @@ jobs:
       - name: Format
         run: devenv shell -- just fmt-check
 
+      - name: Content format
+        run: devenv shell -- just site-fmt-check
+
       - name: Run tests
         run: devenv shell -- cargo polylith cargo --profile dev test
 
