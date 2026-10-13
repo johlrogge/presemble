@@ -338,6 +338,39 @@ pub fn query_result(store: &NodeStore, q: NodeId) -> Vec<String> {
         .collect()
 }
 
+/// The URLs of the pages whose semantic node holds a slot reference to `sem`
+/// (ADR-058 D7): a single-value link slot's `Reference` straight to it, or a
+/// multi-value link slot's `Collection` (a `ConsistsOf` part of the page) with
+/// a `Child` to it. Sorted, without duplicates.
+///
+/// The collections injected for each stem (`inject_collections_in_store`) are
+/// not followed: a page reaches them by a `Reference`, never as a
+/// `ConsistsOf` part, so a page that only lists `sem` through a stem
+/// collection is not returned (that is the D3a family).
+pub fn pages_referencing(store: &NodeStore, sem: NodeId) -> Vec<String> {
+    let page_url = |page: NodeId| get_attribute_text(store, page, "url");
+    let mut pages = Vec::new();
+    for (source, edge) in store.incoming(sem) {
+        match edge {
+            Edge::Reference { target, .. } if target == sem => pages.extend(page_url(source)),
+            Edge::Child(child)
+                if child == sem && matches!(store.get(source), Some(Node::Collection)) =>
+            {
+                // A multi-value slot's list: the page holds it as a part.
+                for (page, holder) in store.incoming(source) {
+                    if matches!(holder, Edge::ConsistsOf { part, .. } if part == source) {
+                        pages.extend(page_url(page));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    pages.sort();
+    pages.dedup();
+    pages
+}
+
 /// The query nodes over `stem_node`.
 pub fn queries_over(store: &NodeStore, stem_node: NodeId) -> Vec<NodeId> {
     store
@@ -1185,6 +1218,68 @@ mod tests {
             from_reversed["post"], from_forward["post"],
             "stem_index must not depend on root order"
         );
+    }
+
+    /// A page whose single-value slot references `target`.
+    fn reference(store: &mut NodeStore, page: NodeId, slot: &str, target: NodeId) {
+        let name = store.intern(slot);
+        store.add_edge(page, Edge::Reference { name, target });
+    }
+
+    /// A page whose multi-value slot lists `targets`.
+    fn reference_list(store: &mut NodeStore, page: NodeId, slot: &str, targets: &[NodeId]) {
+        let name = store.intern(slot);
+        let list = store.add_node(Node::Collection);
+        for &target in targets {
+            store.add_edge(list, Edge::Child(target));
+        }
+        store.add_edge(page, Edge::ConsistsOf { name, part: list });
+    }
+
+    /// D7: the pages that hold a slot reference to a page, through a
+    /// single-value or a multi-value link slot.
+    #[test]
+    fn pages_referencing_finds_single_and_multi_value_slot_references() {
+        let mut store = NodeStore::new();
+        let author = add_page(&mut store, "author", "/author/jo", "item", "Jo");
+        let other = add_page(&mut store, "author", "/author/an", "item", "An");
+        let post = add_page(&mut store, "post", "/post/p", "item", "P");
+        let book = add_page(&mut store, "book", "/book/b", "item", "B");
+        let unrelated = add_page(&mut store, "post", "/post/q", "item", "Q");
+        reference(&mut store, post, "author", author);
+        reference_list(&mut store, book, "authors", &[other, author]);
+        reference(&mut store, unrelated, "author", other);
+        // Referenced twice from one page: listed once.
+        reference(&mut store, post, "editor", author);
+
+        assert_eq!(
+            pages_referencing(&store, author),
+            vec!["/book/b".to_string(), "/post/p".to_string()]
+        );
+    }
+
+    /// Every page holds a reference to each stem's collection; listing a page
+    /// there is not a slot reference to it (the D3a family).
+    #[test]
+    fn pages_referencing_ignores_the_injected_stem_collections() {
+        let mut store = NodeStore::new();
+        let author = add_page(&mut store, "author", "/author/jo", "item", "Jo");
+        let post = add_page(&mut store, "post", "/post/p", "item", "P");
+        let roots = vec![
+            ("/author/jo".to_string(), author),
+            ("/post/p".to_string(), post),
+        ];
+        let (_, stem_idx) = build_indexes_from_store(&store, &roots);
+        inject_collections_in_store(&mut store, &roots, &stem_idx);
+        assert!(
+            store
+                .references(post)
+                .iter()
+                .any(|(name, _)| store.resolve_name(*name) == "author"),
+            "the post holds the injected `author` collection"
+        );
+
+        assert_eq!(pages_referencing(&store, author), Vec::<String>::new());
     }
 
     #[test]

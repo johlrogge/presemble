@@ -1811,9 +1811,10 @@ impl Conductor {
     ///    (a re-ingested root's thread slots must be re-resolved).
     /// 3. X is always rendered; when it needs the context, its own queries
     ///    are resolved first.
-    /// 4. When X's preamble changed, every query over X's stem is checked;
-    ///    its page is re-resolved and rendered when the result changed or X
-    ///    is in the old or new result (D3a).
+    /// 4. When X's preamble changed, every page holding a slot reference to
+    ///    X is rendered (D7), and every query over X's stem is checked; its
+    ///    page is re-resolved and rendered when the result changed or X is in
+    ///    the old or new result (D3a).
     pub(crate) fn propagate_document_changes(
         &self,
         changes: &[DocChange],
@@ -1868,11 +1869,24 @@ impl Conductor {
             // 3. X's own queries.
             self.resolve_page(&mut store, &ctx, &p.change.url, &mut grammars);
             if !p.preamble_changed {
-                // Body-only edit: nothing a query reads has changed.
+                // Body-only edit: nothing a query or a reference reads has
+                // changed.
                 continue;
             }
 
-            // 4. Queries over X's stem.
+            // 4a. Pages holding a slot reference to X (D7): they re-render
+            // whatever fields of X their templates read, conservatively, as
+            // D3a does for queries. The stem collections every page holds
+            // are not followed (a listing is the D3a family).
+            if let Some(&x_sem) = ctx.url_to_semantic.get(&p.change.url) {
+                for page in sp::pages_referencing(&store, x_sem) {
+                    if page != p.change.url {
+                        render.insert(page);
+                    }
+                }
+            }
+
+            // 4b. Queries over X's stem.
             let x_url = sp::normalise_url(&p.change.url);
             let Some(&stem_node) = ctx.stem_nodes.get(&p.change.stem) else {
                 continue;
@@ -15030,6 +15044,149 @@ mod emitted_address_tests {
                 .replace("&gt;", ">")
                 .replace("&amp;", "&"),
         )
+    }
+
+    /// A site in a tempdir from `(path, text)` files, and its conductor.
+    fn site_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Conductor) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (rel, text) in files {
+            let path = tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let repo = site_repository::SiteRepository::builder()
+            .from_dir(tmp.path())
+            .build();
+        let conductor = Conductor::with_repo(tmp.path().to_path_buf(), repo).expect("conductor");
+        (tmp, conductor)
+    }
+
+    /// The edit a click sends on the first `<tag>` of page `url` that has an
+    /// address: its file, its address and its markdown, with `proposed`.
+    /// Returns the pages it rebuilt (it must apply).
+    fn edit_from_page(conductor: &Conductor, url: &str, tag: &str, proposed: &str) -> Vec<String> {
+        use editorial_types::{
+            BlockEditIntent, BlockEditOutcome, BlockEditRequest, BlockEditResponse, BlockText,
+            ContentPath,
+        };
+        let html = conductor
+            .render_page(url, &RenderMode::View)
+            .unwrap_or_else(|e| panic!("{url}: {e}"));
+        let element = html
+            .split(&format!("<{tag}"))
+            .skip(1)
+            .filter_map(|rest| rest.split('>').next())
+            .find(|t| t.contains("data-presemble-address="))
+            .unwrap_or_else(|| panic!("an addressed <{tag}> in {html}"));
+        let file = attr(element, "data-presemble-file").expect("a file");
+        let result = conductor.handle_command(Command::BlockEdit(BlockEditRequest {
+            file: ContentPath::parse(&file).expect("a content path"),
+            selection: attr(element, "data-presemble-address").expect("an address"),
+            base: BlockText::Markdown(attr(element, "data-presemble-md").expect("markdown")),
+            proposed: BlockText::Markdown(proposed.to_string()),
+            intent: BlockEditIntent::Apply,
+            reason: None,
+        }));
+        match result.response {
+            Response::BlockEdited(BlockEditResponse::Done(BlockEditOutcome::Applied { pages })) => {
+                pages
+            }
+            other => panic!("the edit of {file} should apply, got {other:?}"),
+        }
+    }
+
+    const AUTHOR_SCHEMA: &str =
+        "# Author name {#name}\noccurs\n: exactly once\n\n----\n\nAbout the author.\n";
+    const AUTHOR_TEMPLATE: &str = "[:main [:presemble/insert {:data input.name :as \"h1\"}] [:presemble/insert {:data input.body}]]";
+    const AUTHOR_JO: &str = "# Joakim Ohlrogge\n\n----\n\nWrites code.\n";
+
+    /// A post whose byline is its author's name, editable (`:as`).
+    fn post_with_author_site() -> (tempfile::TempDir, Conductor) {
+        site_with(&[
+            ("schemas/author/item.md", AUTHOR_SCHEMA),
+            ("templates/author/item.hiccup", AUTHOR_TEMPLATE),
+            ("content/author/jo.md", AUTHOR_JO),
+            (
+                "schemas/post/item.md",
+                "# Post title {#title}\noccurs\n: exactly once\n\n\
+                 [<name>](/author/<name>) {#author}\noccurs\n: exactly once\ntype\n: link(author)\n",
+            ),
+            (
+                "templates/post/item.hiccup",
+                "[:main [:presemble/insert {:data input.author.name :as \"span\"}]]",
+            ),
+            ("content/post/p.md", "# A post\n\n[Jo](/author/jo)\n"),
+        ])
+    }
+
+    /// 5c/5d: a post shows its author's name, editable (`:as`). The element
+    /// names the author's file, so the edit a click sends (that file, that
+    /// address, that markdown) applies to the author; the post, which reads
+    /// the name through its `author` reference, is re-rendered with it (D7).
+    #[test]
+    fn an_editable_field_of_another_document_is_edited_in_that_document() {
+        let (_tmp, conductor) = post_with_author_site();
+        let pages = edit_from_page(&conductor, "/post/p", "span", "Jo Ohlrogge");
+        assert!(
+            conductor
+                .dirty_docs()
+                .read()
+                .unwrap()
+                .contains(Path::new("content/author/jo.md")),
+            "the author's document changed"
+        );
+        for page in ["/author/jo", "/post/p"] {
+            assert!(pages.iter().any(|p| p == page), "{page} in {pages:?}");
+        }
+        let after = conductor
+            .render_page("/post/p", &RenderMode::View)
+            .expect("the post page");
+        assert!(after.contains("Jo Ohlrogge"), "{after}");
+    }
+
+    /// D7, kept local: an edit of the author's body changes nothing a
+    /// referencing page reads through the preamble, so only the author's
+    /// page is re-rendered.
+    #[test]
+    fn a_body_edit_of_a_referenced_page_rebuilds_that_page_only() {
+        let (_tmp, conductor) = post_with_author_site();
+        let pages = edit_from_page(&conductor, "/author/jo", "p", "Writes Rust.");
+        assert_eq!(pages, vec!["/author/jo".to_string()]);
+    }
+
+    /// D7 through a multi-value link slot: the book re-renders when either
+    /// of its authors' names changes.
+    #[test]
+    fn a_page_listing_two_authors_rebuilds_when_either_name_changes() {
+        let (_tmp, conductor) = site_with(&[
+            ("schemas/author/item.md", AUTHOR_SCHEMA),
+            ("templates/author/item.hiccup", AUTHOR_TEMPLATE),
+            ("content/author/jo.md", AUTHOR_JO),
+            (
+                "content/author/an.md",
+                "# Anna Andersson\n\n----\n\nEdits.\n",
+            ),
+            (
+                "schemas/book/item.md",
+                "# Book title {#title}\noccurs\n: exactly once\n\n\
+                 [<name>](/author/<name>) {#authors}\noccurs\n: 1..2\ntype\n: link(author)\n",
+            ),
+            (
+                "templates/book/item.hiccup",
+                "[:main [:template {:data-each input.authors} [:presemble/insert {:data item.name :as \"span\"}]]]",
+            ),
+            (
+                "content/book/b.md",
+                "# A book\n\n[Jo](/author/jo)\n\n[An](/author/an)\n",
+            ),
+        ]);
+        for (author, name) in [("/author/jo", "Jo Ohlrogge"), ("/author/an", "Anna A")] {
+            let pages = edit_from_page(&conductor, author, "h1", name);
+            assert!(
+                pages.iter().any(|p| p == "/book/b"),
+                "editing {author}: {pages:?}"
+            );
+        }
     }
 
     /// The store kind a rendered element stands for.

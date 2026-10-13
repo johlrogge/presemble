@@ -61,7 +61,7 @@ ADR-030 introduced link expressions in content and left their markdown syntax op
 - **Body-only edits.** Each document stores a preamble fingerprint: a hash of its canonical serialization with the body emptied, which covers slots, `unassigned`, hrefs and markers. When the fingerprint is unchanged, the edit is body-only and re-renders X alone.
 - **Known limits.**
   - D3a: a page re-renders whenever X is in its result, even if it reads nothing that changed.
-  - D7: a page that displays data from a page it links to (not through a link expression) is not re-rendered when that page changes.
+  - D7, closed for slot references (amended 2026-10-13): when X's preamble fingerprint changes, every page whose semantic content holds a slot reference to X is re-rendered too: a single-value link slot's `Reference`, or a multi-value link slot's list (`store_pipeline::pages_referencing`). Like D3a it is conservative: the page re-renders whatever fields of X its template reads. A body-only edit of X still re-renders X alone. The collections injected for each stem, which every page holds, are not followed: a page that shows X through a collection listing stays in the D3a family.
   - D9: an external file change (`FileChanged`) is a full rebuild. Comparing the stored query results before and after the repopulate, as `CreateContent` already does, is the basis for a minimal one later.
   - A body-only edit of X does not re-render pages whose templates show X's body or an excerpt of it (the D3a family: what P's template reads is not analysed yet).
   - An unassigned paragraph that contains an image loses its link syntax when parsed (a save-path gap), so the links in it are not counted.
