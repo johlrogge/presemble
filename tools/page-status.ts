@@ -34,6 +34,8 @@ interface MascotState {
   readonly kind: Kind;
   readonly face: string;
   readonly title: string;
+  /** The non-interactive label beside the mascot; '' when it is hidden. */
+  readonly label: string;
 }
 
 interface PageStatus {
@@ -74,60 +76,68 @@ const SUMMARY_CASES: readonly SummaryCase[] = [
 const MASCOT_CASES: readonly MascotCase[] = [
   {
     mode: "view", suggestions: 0, dirty: 0, errors: 0, warnings: 0,
-    expected: { kind: "clear", face: "\u{1F44D}", title: "All clear \u{2014} ready to publish" },
+    expected: {
+      kind: "clear", face: "\u{1F60C}", title: "No issues on this page \u{2014} click to change mode", label: "No issues",
+    },
   },
   {
     mode: "view", suggestions: 0, dirty: 0, errors: 1, warnings: 0,
-    expected: { kind: "errors", face: "\u{1F61F}", title: ONE_ERROR },
+    expected: { kind: "errors", face: "\u{1F61F}", title: ONE_ERROR, label: "" },
   },
   {
     mode: "view", suggestions: 0, dirty: 0, errors: 2, warnings: 3,
-    expected: { kind: "errors", face: "\u{1F61F}", title: `${TWO_ERRORS} ${THREE_WARNINGS}` },
+    expected: { kind: "errors", face: "\u{1F61F}", title: `${TWO_ERRORS} ${THREE_WARNINGS}`, label: "" },
   },
   {
     mode: "view", suggestions: 0, dirty: 0, errors: 0, warnings: 1,
-    expected: { kind: "warnings", face: "\u{1F914}", title: ONE_WARNING },
+    expected: { kind: "warnings", face: "\u{1F914}", title: ONE_WARNING, label: "" },
   },
   {
     mode: "view", suggestions: 1, dirty: 0, errors: 1, warnings: 0,
-    expected: { kind: "suggestions", face: "\u{1F917}", title: "1 suggestion \u{2014} click to edit" },
+    expected: { kind: "suggestions", face: "\u{1F917}", title: "1 suggestion \u{2014} click to edit", label: "" },
   },
   {
     mode: "view", suggestions: 0, dirty: 1, errors: 0, warnings: 0,
-    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "1 unsaved document \u{2014} click to change" },
+    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "1 unsaved document \u{2014} click to change", label: "" },
   },
   {
     mode: "view", suggestions: 0, dirty: 3, errors: 0, warnings: 0,
-    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "3 unsaved documents \u{2014} click to change" },
+    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "3 unsaved documents \u{2014} click to change", label: "" },
   },
   {
     mode: "view", suggestions: 2, dirty: 1, errors: 0, warnings: 0,
-    expected: { kind: "suggestions", face: "\u{1F917}", title: "2 suggestions (1 unsaved) \u{2014} click to edit" },
+    expected: {
+      kind: "suggestions", face: "\u{1F917}", title: "2 suggestions (1 unsaved) \u{2014} click to edit", label: "",
+    },
   },
   {
     // Unsaved edits outrank the page's diagnostics.
     mode: "view", suggestions: 0, dirty: 1, errors: 1, warnings: 0,
-    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "1 unsaved document \u{2014} click to change" },
+    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "1 unsaved document \u{2014} click to change", label: "" },
   },
   {
     mode: "view", suggestions: 1, dirty: 0, errors: 0, warnings: 0,
-    expected: { kind: "suggestions", face: "\u{1F917}", title: "1 suggestion \u{2014} click to edit" },
+    expected: { kind: "suggestions", face: "\u{1F917}", title: "1 suggestion \u{2014} click to edit", label: "" },
   },
   {
     mode: "edit", suggestions: 0, dirty: 2, errors: 0, warnings: 0,
-    expected: { kind: "edit", face: "\u{270F}\u{FE0F}", title: "Edit mode \u{2014} click to change (2 unsaved)" },
+    expected: {
+      kind: "edit", face: "\u{270F}\u{FE0F}", title: "Edit mode \u{2014} click to change (2 unsaved)", label: "",
+    },
   },
   {
     mode: "suggest", suggestions: 0, dirty: 1, errors: 0, warnings: 0,
-    expected: { kind: "suggest", face: "\u{1F4AC}", title: "Suggest mode \u{2014} click to change (1 unsaved)" },
+    expected: {
+      kind: "suggest", face: "\u{1F4AC}", title: "Suggest mode \u{2014} click to change (1 unsaved)", label: "",
+    },
   },
   {
     mode: "edit", suggestions: 0, dirty: 0, errors: 1, warnings: 0,
-    expected: { kind: "edit", face: "\u{270F}\u{FE0F}", title: "Edit mode \u{2014} click to change" },
+    expected: { kind: "edit", face: "\u{270F}\u{FE0F}", title: "Edit mode \u{2014} click to change", label: "" },
   },
   {
     mode: "schema", suggestions: 0, dirty: 0, errors: 1, warnings: 0,
-    expected: { kind: "schema", face: "\u{1F4D0}", title: "Structure mode \u{2014} viewing schema" },
+    expected: { kind: "schema", face: "\u{1F4D0}", title: "Structure mode \u{2014} viewing schema", label: "" },
   },
 ];
 
@@ -175,7 +185,7 @@ function main(): number {
   let mascotFailures = 0;
   for (const c of MASCOT_CASES) {
     const got = status.mascotState(c.mode, c.suggestions, c.dirty, c.errors, c.warnings);
-    const gotPlain = { kind: got.kind, face: got.face, title: got.title };
+    const gotPlain = { kind: got.kind, face: got.face, title: got.title, label: got.label };
     if (show(gotPlain) !== show(c.expected)) {
       mascotFailures += 1;
       const input = `(${c.mode},${c.suggestions},${c.dirty},${c.errors},${c.warnings})`;

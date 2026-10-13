@@ -858,6 +858,13 @@ return '/'+s;
 }
 function countSuggestions(){return document.querySelectorAll('.presemble-suggestion').length;}
 var container=document.createElement('div');container.className='presemble-mascot';
+// The page's state in words, beside the mascot: a label, never a control.
+var status=document.createElement('span');
+status.className='presemble-mascot-status';
+status.setAttribute('role','status');
+status.setAttribute('aria-live','polite');
+status.title='No errors or warnings on this page. The site is published when no page has errors.';
+status.hidden=true;
 var icon=document.createElement('button');icon.className='presemble-mascot-icon';
 var badge=document.createElement('span');badge.className='presemble-mascot-badge';
 var menu=document.createElement('div');menu.className='presemble-mascot-menu';
@@ -867,7 +874,7 @@ var suggestBtn=document.createElement('button');suggestBtn.textContent='\u{1F4AC
 var suggestBadge=document.createElement('span');suggestBadge.className='presemble-suggest-badge';suggestBadge.style.display='none';suggestBtn.appendChild(suggestBadge);
 var structureBtn=document.createElement('button');structureBtn.textContent='\u{1F4D0} Structure';
 menu.appendChild(viewBtn);menu.appendChild(editBtn);menu.appendChild(suggestBtn);menu.appendChild(structureBtn);
-container.appendChild(icon);container.appendChild(badge);container.appendChild(menu);
+container.appendChild(status);container.appendChild(icon);container.appendChild(badge);container.appendChild(menu);
 document.body.appendChild(container);
 function update(){
 var totalBadge=_editorialSuggestCount+_dirtyCount;
@@ -876,6 +883,7 @@ else{badge.style.display='none';}
 var diag=_pageDiagCounts();
 var s=mascotState(mode,_editorialSuggestCount,_dirtyCount,diag.errors,diag.warnings);
 icon.textContent=s.face;icon.title=s.title;icon.setAttribute('data-status',s.kind);
+status.textContent=s.label;status.hidden=!s.label;
 viewBtn.className=mode==='view'?'active':'';
 editBtn.className=mode==='edit'?'active':'';
 suggestBtn.className=mode==='suggest'?'active':'';
@@ -1642,33 +1650,35 @@ function diagSummary(errors, warnings) {
   return parts.join(' ');
 }
 
-// What the mascot shows: `kind` (its data-status), the `face` and the hover
-// `title`. Modes come first, then suggestions and unsaved edits; only when
-// none of those apply do the page's errors and warnings replace the all-clear.
+// What the mascot shows: `kind` (its data-status), the `face`, the hover
+// `title` and the `label` beside it ('' hides the label; only a page with no
+// problems has one). Modes come first, then suggestions and unsaved edits;
+// only when none of those apply do the page's errors and warnings replace
+// the resting face.
 function mascotState(mode, suggestions, dirty, errors, warnings) {
   var unsaved = dirty > 0 ? ' (' + dirty + ' unsaved)' : '';
   if (mode === 'edit') {
-    return { kind: 'edit', face: '\u{270F}\u{FE0F}', title: 'Edit mode \u{2014} click to change' + unsaved };
+    return { kind: 'edit', face: '\u{270F}\u{FE0F}', title: 'Edit mode \u{2014} click to change' + unsaved, label: '' };
   }
   if (mode === 'suggest') {
-    return { kind: 'suggest', face: '\u{1F4AC}', title: 'Suggest mode \u{2014} click to change' + unsaved };
+    return { kind: 'suggest', face: '\u{1F4AC}', title: 'Suggest mode \u{2014} click to change' + unsaved, label: '' };
   }
   if (mode === 'schema') {
-    return { kind: 'schema', face: '\u{1F4D0}', title: 'Structure mode \u{2014} viewing schema' };
+    return { kind: 'schema', face: '\u{1F4D0}', title: 'Structure mode \u{2014} viewing schema', label: '' };
   }
   if (suggestions > 0) {
-    return { kind: 'suggestions', face: '\u{1F917}', title: suggestions + ' suggestion' + (suggestions === 1 ? '' : 's') + unsaved + ' \u{2014} click to edit' };
+    return { kind: 'suggestions', face: '\u{1F917}', title: suggestions + ' suggestion' + (suggestions === 1 ? '' : 's') + unsaved + ' \u{2014} click to edit', label: '' };
   }
   if (dirty > 0) {
-    return { kind: 'unsaved', face: '\u{1F4BE}', title: dirty + ' unsaved document' + (dirty === 1 ? '' : 's') + ' \u{2014} click to change' };
+    return { kind: 'unsaved', face: '\u{1F4BE}', title: dirty + ' unsaved document' + (dirty === 1 ? '' : 's') + ' \u{2014} click to change', label: '' };
   }
   if (errors > 0) {
-    return { kind: 'errors', face: '\u{1F61F}', title: diagSummary(errors, warnings) };
+    return { kind: 'errors', face: '\u{1F61F}', title: diagSummary(errors, warnings), label: '' };
   }
   if (warnings > 0) {
-    return { kind: 'warnings', face: '\u{1F914}', title: diagSummary(errors, warnings) };
+    return { kind: 'warnings', face: '\u{1F914}', title: diagSummary(errors, warnings), label: '' };
   }
-  return { kind: 'clear', face: '\u{1F44D}', title: 'All clear \u{2014} ready to publish' };
+  return { kind: 'clear', face: '\u{1F60C}', title: 'No issues on this page \u{2014} click to change mode', label: 'No issues' };
 }
 
 // END page-status

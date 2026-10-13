@@ -1,7 +1,7 @@
 site/assets/style.css 17eb0b0fd5a5b593
 site/author/johlrogge/index.html 1e3c7da179429ee0
 site/docs/index.html 52424378a0cdf6ef
-site/feature/browser-editing/index.html 1d363d6594fc7ebe
+site/feature/browser-editing/index.html 112e2eac760a4151
 site/feature/deployment-url-rewriting/index.html 5c5601179b539095
 site/feature/editor-lsp-support/index.html 8289533b6ebb456a
 site/feature/editorial-collaboration/index.html c7b251d97f662352
@@ -17,7 +17,7 @@ site/feature/the-presemble-repl/index.html 4387f7ba25a97cb7
 site/feature/validated-at-every-level/index.html 21f8bdf4a48ec816
 site/guide/getting-started/index.html d9181b06024d1315
 site/guide/the-presemble-model/index.html af893e184a4612fa
-site/guide/user-guide/index.html 0301d49c661bc698
+site/guide/user-guide/index.html 326123cbb0215236
 site/index.html f306becd559e5ab4
 site/post/building-presemble/index.html d9706ff4c5a260ee
 site/post/index.html a1265113dda27dfd

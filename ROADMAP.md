@@ -377,7 +377,7 @@ structural diff, and browser adapter defined there.
 - View mode: hugging face / peace sign — shows validation count badge
 - Edit mode: pen icon — content nodes become inline-editable
 - Suggest mode: speech bubble — annotations and suggestions for other editors
-- All clear: thumbs up — page is ready to publish
+- At rest: a calm face and a "No issues" label — this page has no problems (the persona's expressions are designed later)
 
 **Three interaction modes:**
 

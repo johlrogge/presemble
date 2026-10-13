@@ -14,7 +14,7 @@ The mascot overlay in the corner of the page shows the current mode:
 
 | State | Indicator |
 | --- | --- |
-| All clear: no suggestions, unsaved edits, errors or warnings on this page | Thumbs up |
+| No problems: no suggestions, unsaved edits, errors or warnings on this page (publishing still checks the whole site) | Resting face and a "No issues" label |
 | Problems on this page | Worried face (errors) or thinking face (warnings); hover for the same summary as the panel |
 | Suggestions present | Badge with count |
 | Unsaved edits: a document on the site has edits not yet saved; auto-save catches up within seconds | Floppy disk |

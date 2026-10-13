@@ -705,7 +705,7 @@ The serve UI includes a mascot overlay in the corner of every served page. It in
 | --- | --- | --- |
 | Suggestions present | Mascot + badge | One or more suggestion nodes exist on this page |
 | Unsaved edits | Floppy disk | A document on the site has edits not yet saved; auto-save catches up within seconds |
-| All clear | Thumbs up | No suggestions, unsaved edits, errors or warnings on this page |
+| No problems | Resting face and a "No issues" label | No suggestions, unsaved edits, errors or warnings on this page. Publishing still checks the whole site |
 | Problems on this page | Worried face (errors) or thinking face (warnings) | Hover for the same summary as the panel |
 | Edit mode | Pencil | Inline editing is active |
 
