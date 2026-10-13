@@ -51,6 +51,12 @@ pub const KEY_PRESEMBLE_FILE: &str = "_presemble_file";
 /// Data graph key for the source slot path used in browser editing.
 pub const KEY_SOURCE_SLOT: &str = "_source_slot";
 
+/// Attribute of a page's synthesized link node (the store pipeline's `link`):
+/// the grammar slot of the title heading its text reads, whatever that slot
+/// is called (`schema::Grammar::title_slot`). Absent when the grammar has no
+/// title heading.
+pub const KEY_TITLE_SLOT: &str = "_title_slot";
+
 /// HTML attribute names emitted by the template renderer for browser editing.
 pub const ATTR_SLOT: &str = "data-presemble-slot";
 pub const ATTR_FILE: &str = "data-presemble-file";

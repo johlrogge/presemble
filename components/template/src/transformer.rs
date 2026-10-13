@@ -984,14 +984,14 @@ fn render_insert_native(
 
                     // What makes this link editable: a link of the document
                     // (under a slot) is a block with its own bundle; a
-                    // synthesized link stands for its source slot, the title,
-                    // and takes that slot's bundle.
+                    // synthesized link stands for its source slot, the title
+                    // heading, and takes that slot's bundle.
                     let mut source_attrs: Vec<(String, Form)> = Vec::new();
                     let mut link_editor: Vec<(String, Form)> = Vec::new();
                     if let Some(source) = source_slot {
                         // A synthesized title link carries the title heading's
                         // editor record: its address and its markdown.
-                        if editorial && source == "title" {
+                        if editorial {
                             let address =
                                 node_attr_str(store, id, crate::constants::KEY_EDITOR_ADDRESS)
                                     .and_then(|a| content::address::with_file(&a, presemble_file));
@@ -1006,18 +1006,21 @@ fn render_insert_native(
                         link_editor.extend(editor_here());
                     } else if let EditorAttrs::Computed { page: Some(page) } = editor
                         && slot == "link"
+                        && let Some(title_slot) =
+                            node_attr_str(store, id, crate::constants::KEY_TITLE_SLOT)
                     {
                         // The page link the store pipeline adds to every page:
-                        // it stands for the page's title heading.
-                        source_attrs.push((
-                            crate::constants::ATTR_SOURCE_SLOT.to_string(),
-                            Form::Str("title".to_string()),
-                        ));
+                        // it stands for the page's title heading, in whichever
+                        // slot the grammar keeps it.
                         let heading = page_document(store, page).and_then(|document| {
-                            document_slot_blocks(store, document, "title")
+                            document_slot_blocks(store, document, &title_slot)
                                 .into_iter()
                                 .next()
                         });
+                        source_attrs.push((
+                            crate::constants::ATTR_SOURCE_SLOT.to_string(),
+                            Form::Str(title_slot),
+                        ));
                         if let Some(heading) = heading {
                             // The heading's own editor record.
                             link_editor
@@ -5214,7 +5217,11 @@ mod tests {
         store.add_edge(slot, node_store::Edge::Child(heading));
         let link_name = store.intern("link");
         let link = store.add_node(node_store::Node::Element(link_name));
-        for (key, value) in [("href", "/x"), ("text", "x")] {
+        for (key, value) in [
+            ("href", "/x"),
+            ("text", "x"),
+            (crate::constants::KEY_TITLE_SLOT, "title"),
+        ] {
             let name = store.intern(key);
             let val = store.add_node(node_store::Node::Text(value.into()));
             store.add_edge(link, node_store::Edge::Attribute { name, value: val });
@@ -5739,9 +5746,9 @@ mod tests {
         );
         assert!(legacy.contains(&want_md), "{legacy}");
 
-        // Native: the link the store pipeline adds has href and text only; it
-        // stands for the title heading of its page's document, which the page
-        // here is (it has a preamble).
+        // Native: the link the store pipeline adds has href, text and the
+        // slot of its title heading; it stands for that heading of its page's
+        // document, which the page here is (it has a preamble).
         let mut store = node_store::NodeStore::new();
         let root_name = store.intern("page");
         let root = store.add_node(node_store::Node::Element(root_name));
@@ -5787,7 +5794,11 @@ mod tests {
         );
         let link_name = store.intern("link");
         let link = store.add_node(node_store::Node::Element(link_name));
-        for (key, value) in [("href", "/x"), ("text", "Plain em title")] {
+        for (key, value) in [
+            ("href", "/x"),
+            ("text", "Plain em title"),
+            (crate::constants::KEY_TITLE_SLOT, "title"),
+        ] {
             let name = store.intern(key);
             let val = store.add_node(node_store::Node::Text(value.into()));
             store.add_edge(link, node_store::Edge::Attribute { name, value: val });

@@ -81,6 +81,95 @@ fn an_aligned_table_renders_its_alignment_when_built() {
     );
 }
 
+/// A site with an author whose title heading is the slot `name`, and a post
+/// whose `author` links to that author.
+fn author_and_post_site() -> (TempDir, PathBuf) {
+    let tmp = TempDir::new().expect("temp dir");
+    let site = tmp.path().join("site");
+    for dir in [
+        "schemas/author",
+        "schemas/post",
+        "templates/author",
+        "templates/post",
+        "content/author",
+        "content/post",
+    ] {
+        fs::create_dir_all(site.join(dir)).unwrap();
+    }
+    fs::write(
+        site.join("schemas/author/item.md"),
+        "# Author name {#name}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("schemas/post/item.md"),
+        "# Post title {#title}\noccurs\n: exactly once\n\n[<name>](/author/<name>) {#author}\noccurs\n: exactly once\n",
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/author/item.hiccup"),
+        "[:main [:presemble/insert {:data input.link :as \"a\"}]]",
+    )
+    .unwrap();
+    fs::write(
+        site.join("templates/post/item.hiccup"),
+        "[:main [:presemble/insert {:data input.title :as \"h1\"}] [:presemble/insert {:data input.author :as \"a\"}]]",
+    )
+    .unwrap();
+    fs::write(site.join("content/author/jo.md"), "# Joakim Ohlrogge\n").unwrap();
+    fs::write(
+        site.join("content/post/p.md"),
+        "# A post\n\n[Jo](/author/jo)\n",
+    )
+    .unwrap();
+    (tmp, site)
+}
+
+/// Bug 5 (D5): a link to a page reads that page's title heading, whatever
+/// its slot is called; the author schema calls it `name`.
+#[test]
+fn a_post_links_its_author_by_the_author_pages_title_heading() {
+    let (_tmp, site) = author_and_post_site();
+    publisher_cli::build_for_publish(&site, &publisher_cli::UrlConfig::default())
+        .expect("the site builds");
+    let html = fs::read_to_string(publisher_cli::output_dir(&site).join("post/p/index.html"))
+        .expect("the published post");
+    assert!(html.contains(">Joakim Ohlrogge</a>"), "{html}");
+    assert!(!html.contains(">/author/jo</a>"), "{html}");
+}
+
+/// Bug 5: in the editorial page, a page's link stands for its title heading:
+/// it names that heading's slot and carries the heading's address.
+#[test]
+fn an_editorial_page_link_stands_for_its_title_heading_whatever_its_slot_is_called() {
+    let (_tmp, site) = author_and_post_site();
+    let site = fs::canonicalize(&site).unwrap();
+    publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("the site builds");
+    let html =
+        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("author/jo/index.html"))
+            .expect("the editorial author page");
+    let link = html
+        .split("<a ")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_else(|| panic!("an author link in {html}"));
+    assert!(
+        link.contains("data-presemble-source-slot=\"name\""),
+        "{link}"
+    );
+    let address = link
+        .split("data-presemble-address=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("an address on {link}"));
+    assert!(
+        address.contains("content/author/jo.md") && address.contains("name"),
+        "the name heading's address: {address}"
+    );
+    assert!(html.contains(">Joakim Ohlrogge</a>"), "{html}");
+}
+
 // ── Read-only validation tests (never call build) ────────────────────────────
 
 #[test]

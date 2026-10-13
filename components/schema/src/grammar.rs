@@ -6,6 +6,18 @@ pub struct Grammar {
     pub body: Option<BodyRules>,
 }
 
+impl Grammar {
+    /// The slot holding a document's title: the first preamble slot whose
+    /// element is a level-1 heading (its level range starts at 1), whatever it
+    /// is called (`title`, `name`, `tagline`). A link to the document reads
+    /// its text from this slot; `None` when the grammar has no such heading.
+    pub fn title_slot(&self) -> Option<&Slot> {
+        self.preamble.iter().find(
+            |slot| matches!(&slot.element, Element::Heading { level } if level.min.value() == 1),
+        )
+    }
+}
+
 /// A named position in the document grammar with an expected element type,
 /// constraints, and optional hint text for authors.
 #[derive(Debug, Clone)]

@@ -607,6 +607,20 @@ mod tests {
     }
 
     #[test]
+    fn the_title_slot_is_the_first_level_one_heading_whatever_its_name() {
+        let grammar = parse(
+            "A bio. {#bio}\n\n## Role {#role}\n\n# Author name {#name}\n\n# Other {#other}\n",
+        );
+        assert_eq!(grammar.title_slot().map(|s| s.name.as_str()), Some("name"));
+    }
+
+    #[test]
+    fn a_grammar_without_a_level_one_heading_has_no_title_slot() {
+        let grammar = parse("A bio. {#bio}\n\n## Role {#role}\n");
+        assert!(grammar.title_slot().is_none());
+    }
+
+    #[test]
     fn heading_level_is_correct() {
         let grammar = parse("## Section heading {#section}\n");
         let slot = &grammar.preamble[0];

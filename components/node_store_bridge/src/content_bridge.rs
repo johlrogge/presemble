@@ -523,33 +523,25 @@ pub fn fill_semantic_content(
         );
     }
 
-    // Synthesize a link reference (url + title text)
-    // Collect title text first before any mutable borrows
-    let title_text = {
-        let parts = store.consists_of(sem);
-        let title_entry = parts
-            .iter()
-            .find(|(n, _)| store.resolve_name(*n) == "title")
-            .copied();
-        title_entry.and_then(|(_, title_node)| {
-            // A heading's link text is its plain text (ADR-059 §8); any other
-            // content element gives its first child text.
-            let is_heading = matches!(
-                store.get(title_node),
-                Some(Node::Element(n)) if store.resolve_name(*n) == "heading"
-            );
-            if is_heading {
-                return content_store::heading_plain_text(store, title_node);
-            }
-            store.children(title_node).iter().find_map(|&c| {
-                if let Some(Node::Text(s)) = store.get(c) {
-                    Some(s.clone())
-                } else {
-                    None
-                }
+    // Synthesize a link reference (url + title text). The text is the title
+    // heading's plain text (ADR-059 §8), whatever the grammar calls its slot;
+    // the URL only names a document whose grammar has no title heading.
+    let title_slot = grammar
+        .title_slot()
+        .map(|slot| slot.name.as_str().to_string());
+    let title_text = title_slot.as_deref().and_then(|slot| {
+        store
+            .consists_of(sem)
+            .into_iter()
+            .find(|(n, _)| store.resolve_name(*n) == slot)
+            .filter(|(_, node)| {
+                matches!(
+                    store.get(*node),
+                    Some(Node::Element(n)) if store.resolve_name(*n) == "heading"
+                )
             })
-        })
-    };
+            .and_then(|(_, heading)| content_store::heading_plain_text(store, heading))
+    });
 
     let link_elem_name = store.intern("link");
     let link_node = store.add_node(Node::Element(link_elem_name));
@@ -557,6 +549,10 @@ pub fn fill_semantic_content(
     let text = title_text.unwrap_or_else(|| meta.url.clone());
     add_text_attr(store, link_node, "href", &href);
     add_text_attr(store, link_node, "text", &text);
+    // The slot the link stands for in the editor: its title heading's.
+    if let Some(slot) = &title_slot {
+        add_text_attr(store, link_node, template::constants::KEY_TITLE_SLOT, slot);
+    }
     let link_name = store.intern("link");
     store.add_edge(
         sem,
@@ -1962,6 +1958,64 @@ mod tests {
         assert_eq!(
             find_attr_text(&store, *link_id, "text"),
             Some("My <Article>".to_string())
+        );
+    }
+
+    /// The synthesized link of a page and the text it reads.
+    fn synthesized_link(schema_src: &str, doc_src: &str, url: &str) -> (NodeStore, NodeId) {
+        let grammar = schema::parse_schema(schema_src).expect("schema parses");
+        let doc = content::parse_and_assign(doc_src, &grammar).expect("document parses");
+        let mut store = NodeStore::new();
+        let meta = DocumentMeta {
+            url: url.to_string(),
+            stem: "author".to_string(),
+            file: "content/author/x.md".to_string(),
+            page_kind: "item".to_string(),
+        };
+        let doc_root = document_to_store(&doc, &mut store, Some(&meta));
+        let sem = create_semantic_content(
+            &mut store,
+            doc_root,
+            &grammar,
+            &meta,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            None,
+        );
+        let (_, link_id) = store
+            .consists_of(sem)
+            .into_iter()
+            .find(|(n, _)| store.resolve_name(*n) == "link")
+            .expect("a synthesized link");
+        (store, link_id)
+    }
+
+    /// Bug 5 (D5): a page's link reads its title heading, the first
+    /// level-1 heading slot of its grammar, whatever that slot is called.
+    #[test]
+    fn synthesized_link_text_is_the_title_heading_whatever_its_slot_is_called() {
+        let (store, link) = synthesized_link(
+            "# Author name {#name}\noccurs\n: exactly once\n",
+            "# Joakim Ohlrogge\n",
+            "/author/x",
+        );
+        assert_eq!(
+            find_attr_text(&store, link, "text").as_deref(),
+            Some("Joakim Ohlrogge")
+        );
+    }
+
+    /// A document whose grammar has no title heading is named by its URL.
+    #[test]
+    fn synthesized_link_text_without_a_title_heading_is_the_url() {
+        let (store, link) = synthesized_link(
+            "A bio. {#bio}\noccurs\n: exactly once\n",
+            "Writes code.\n",
+            "/author/x",
+        );
+        assert_eq!(
+            find_attr_text(&store, link, "text").as_deref(),
+            Some("/author/x")
         );
     }
 
