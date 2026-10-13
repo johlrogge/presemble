@@ -1646,7 +1646,6 @@ function diagSummary(errors, warnings) {
 // `title`. Modes come first, then suggestions and unsaved edits; only when
 // none of those apply do the page's errors and warnings replace the all-clear.
 function mascotState(mode, suggestions, dirty, errors, warnings) {
-  var total = suggestions + dirty;
   var unsaved = dirty > 0 ? ' (' + dirty + ' unsaved)' : '';
   if (mode === 'edit') {
     return { kind: 'edit', face: '\u{270F}\u{FE0F}', title: 'Edit mode \u{2014} click to change' + unsaved };
@@ -1657,19 +1656,19 @@ function mascotState(mode, suggestions, dirty, errors, warnings) {
   if (mode === 'schema') {
     return { kind: 'schema', face: '\u{1F4D0}', title: 'Structure mode \u{2014} viewing schema' };
   }
-  if (total === 0 && dirty === 0) {
-    if (errors > 0) {
-      return { kind: 'errors', face: '\u{1F61F}', title: diagSummary(errors, warnings) };
-    }
-    if (warnings > 0) {
-      return { kind: 'warnings', face: '\u{1F914}', title: diagSummary(errors, warnings) };
-    }
-    return { kind: 'clear', face: '\u{1F44D}', title: 'All clear \u{2014} ready to publish' };
+  if (suggestions > 0) {
+    return { kind: 'suggestions', face: '\u{1F917}', title: suggestions + ' suggestion' + (suggestions === 1 ? '' : 's') + unsaved + ' \u{2014} click to edit' };
   }
-  if (dirty > 0 && total === 0) {
-    return { kind: 'unsaved', face: '\u{1F4BE}', title: dirty + ' unsaved change' + (dirty === 1 ? '' : 's') + ' \u{2014} click to change' };
+  if (dirty > 0) {
+    return { kind: 'unsaved', face: '\u{1F4BE}', title: dirty + ' unsaved document' + (dirty === 1 ? '' : 's') + ' \u{2014} click to change' };
   }
-  return { kind: 'suggestions', face: '\u{1F917}', title: total + ' suggestion' + (total === 1 ? '' : 's') + unsaved + ' \u{2014} click to edit' };
+  if (errors > 0) {
+    return { kind: 'errors', face: '\u{1F61F}', title: diagSummary(errors, warnings) };
+  }
+  if (warnings > 0) {
+    return { kind: 'warnings', face: '\u{1F914}', title: diagSummary(errors, warnings) };
+  }
+  return { kind: 'clear', face: '\u{1F44D}', title: 'All clear \u{2014} ready to publish' };
 }
 
 // END page-status

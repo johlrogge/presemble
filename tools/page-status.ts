@@ -16,7 +16,7 @@
 //
 // Usage (run by tools/smoketest.sh and `just page-status`):
 //
-//   deno run --allow-read tools/page-status.ts
+//   deno run --allow-read=. tools/page-status.ts
 //
 // Output: `PASS <group>` per group, `FAIL <group> <input>: expected …, got …`
 // per mismatch. Exit 0 if everything matches, 1 otherwise.
@@ -91,6 +91,35 @@ const MASCOT_CASES: readonly MascotCase[] = [
   {
     mode: "view", suggestions: 1, dirty: 0, errors: 1, warnings: 0,
     expected: { kind: "suggestions", face: "\u{1F917}", title: "1 suggestion \u{2014} click to edit" },
+  },
+  {
+    mode: "view", suggestions: 0, dirty: 1, errors: 0, warnings: 0,
+    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "1 unsaved document \u{2014} click to change" },
+  },
+  {
+    mode: "view", suggestions: 0, dirty: 3, errors: 0, warnings: 0,
+    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "3 unsaved documents \u{2014} click to change" },
+  },
+  {
+    mode: "view", suggestions: 2, dirty: 1, errors: 0, warnings: 0,
+    expected: { kind: "suggestions", face: "\u{1F917}", title: "2 suggestions (1 unsaved) \u{2014} click to edit" },
+  },
+  {
+    // Unsaved edits outrank the page's diagnostics.
+    mode: "view", suggestions: 0, dirty: 1, errors: 1, warnings: 0,
+    expected: { kind: "unsaved", face: "\u{1F4BE}", title: "1 unsaved document \u{2014} click to change" },
+  },
+  {
+    mode: "view", suggestions: 1, dirty: 0, errors: 0, warnings: 0,
+    expected: { kind: "suggestions", face: "\u{1F917}", title: "1 suggestion \u{2014} click to edit" },
+  },
+  {
+    mode: "edit", suggestions: 0, dirty: 2, errors: 0, warnings: 0,
+    expected: { kind: "edit", face: "\u{270F}\u{FE0F}", title: "Edit mode \u{2014} click to change (2 unsaved)" },
+  },
+  {
+    mode: "suggest", suggestions: 0, dirty: 1, errors: 0, warnings: 0,
+    expected: { kind: "suggest", face: "\u{1F4AC}", title: "Suggest mode \u{2014} click to change (1 unsaved)" },
   },
   {
     mode: "edit", suggestions: 0, dirty: 0, errors: 1, warnings: 0,

@@ -17,6 +17,7 @@ The mascot overlay in the corner of the page shows the current mode:
 | All clear: no suggestions, unsaved edits, errors or warnings on this page | Thumbs up |
 | Problems on this page | Worried face (errors) or thinking face (warnings); hover for the same summary as the panel |
 | Suggestions present | Badge with count |
+| Unsaved edits: a document on the site has edits not yet saved; auto-save catches up within seconds | Floppy disk |
 | Edit mode active | Pencil |
 
 ### Suggest mode
