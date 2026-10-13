@@ -1,8 +1,20 @@
 use nng::options::Options;
 
 use crate::protocol::{
-    Command, ConductorEvent, DependentFile, FileClassification, LinkOption, Response,
+    Command, ConductorEvent, DependentFile, FileClassification, LinkOption, PROTOCOL_FINGERPRINT,
+    Response,
 };
+
+/// What a conductor that answered a ping turned out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handshake {
+    /// It speaks the protocol of this build.
+    SameProtocol,
+    /// It was built from other sources. `version` is what it reported, or
+    /// `None` when its answer did not decode (a conductor from before the
+    /// handshake).
+    OtherBuild { version: Option<String> },
+}
 
 /// Client for sending commands to the conductor via nng REQ socket.
 ///
@@ -39,6 +51,12 @@ impl ConductorClient {
 
     /// Send a command and receive a response.
     pub fn send(&self, cmd: &Command) -> Result<Response, String> {
+        let reply = self.exchange(cmd)?;
+        serde_json::from_slice(&reply).map_err(|e| format!("failed to deserialize response: {e}"))
+    }
+
+    /// Send a command and receive the undecoded reply.
+    fn exchange(&self, cmd: &Command) -> Result<nng::Message, String> {
         let data =
             serde_json::to_vec(cmd).map_err(|e| format!("failed to serialize command: {e}"))?;
         let msg = nng::Message::from(data.as_slice());
@@ -46,18 +64,34 @@ impl ConductorClient {
         socket
             .send(msg)
             .map_err(|(_msg, e)| format!("failed to send: {e}"))?;
-        let reply = socket
+        socket
             .recv()
-            .map_err(|e| format!("failed to receive reply: {e}"))?;
-        serde_json::from_slice(&reply).map_err(|e| format!("failed to deserialize response: {e}"))
+            .map_err(|e| format!("failed to receive reply: {e}"))
     }
 
     /// Convenience: ping the conductor.
     pub fn ping(&self) -> Result<(), String> {
         match self.send(&Command::Ping)? {
-            Response::Pong => Ok(()),
+            Response::Pong { .. } => Ok(()),
             other => Err(format!("unexpected response to ping: {other:?}")),
         }
+    }
+
+    /// Ping the conductor and check that it speaks this build's protocol.
+    /// `Err` means no answer at all; an answer from another build, or one
+    /// that does not decode (a conductor from before the handshake), is
+    /// `Ok(Handshake::OtherBuild)`.
+    pub fn handshake(&self) -> Result<Handshake, String> {
+        let reply = self.exchange(&Command::Ping)?;
+        Ok(match serde_json::from_slice::<Response>(&reply) {
+            Ok(Response::Pong { fingerprint, .. }) if fingerprint == PROTOCOL_FINGERPRINT => {
+                Handshake::SameProtocol
+            }
+            Ok(Response::Pong { version, .. }) => Handshake::OtherBuild {
+                version: Some(version),
+            },
+            _ => Handshake::OtherBuild { version: None },
+        })
     }
 
     /// Classify a file path into its site role.
@@ -210,13 +244,8 @@ impl ConductorSubscriber {
 pub fn ensure_conductor(site_dir: &std::path::Path) -> Result<ConductorClient, String> {
     let url = socket_url(site_dir);
 
-    // Try to connect to existing conductor
-    if let Ok(client) = ConductorClient::connect(&url) {
-        if client.ping().is_ok() {
-            return Ok(client);
-        }
-        // Socket exists but conductor isn't responding — stale socket
-        cleanup_stale_socket(site_dir);
+    if let Some(client) = existing_conductor(&url, site_dir)? {
+        return Ok(client);
     }
 
     // Start conductor daemon as background process
@@ -237,14 +266,51 @@ pub fn ensure_conductor(site_dir: &std::path::Path) -> Result<ConductorClient, S
     // Wait for conductor to be ready (poll with timeout)
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Ok(client) = ConductorClient::connect(&url)
-            && client.ping().is_ok()
-        {
-            return Ok(client);
+        if let Ok(client) = ConductorClient::connect(&url) {
+            match client.handshake() {
+                Ok(Handshake::SameProtocol) => return Ok(client),
+                Ok(Handshake::OtherBuild { version }) => {
+                    return Err(other_build_message(site_dir, version));
+                }
+                Err(_) => {}
+            }
         }
     }
 
     Err("conductor failed to start within 5 seconds".to_string())
+}
+
+/// The conductor already listening at `url`, if any.
+///
+/// - `Ok(Some(_))`: it speaks this build's protocol; use it.
+/// - `Ok(None)`: nobody answers; a stale socket is removed so one can start.
+/// - `Err(_)`: a conductor of another build answers. It is left running —
+///   serve or the nREPL may own it — and the error says how to stop it.
+fn existing_conductor(
+    url: &str,
+    site_dir: &std::path::Path,
+) -> Result<Option<ConductorClient>, String> {
+    let Ok(client) = ConductorClient::connect(url) else {
+        return Ok(None);
+    };
+    match client.handshake() {
+        Ok(Handshake::SameProtocol) => Ok(Some(client)),
+        Ok(Handshake::OtherBuild { version }) => Err(other_build_message(site_dir, version)),
+        Err(_) => {
+            // Socket exists but conductor isn't responding — stale socket
+            cleanup_stale_socket(site_dir);
+            Ok(None)
+        }
+    }
+}
+
+fn other_build_message(site_dir: &std::path::Path, version: Option<String>) -> String {
+    let version = version.unwrap_or_else(|| "an older version".to_string());
+    format!(
+        "the running conductor for {} is a different presemble build ({version}); \
+         stop it with `just serve-stop` / `pkill -f \"presemble conductor\"` and retry",
+        site_dir.display()
+    )
 }
 
 fn cleanup_stale_socket(site_dir: &std::path::Path) {
@@ -258,11 +324,23 @@ fn cleanup_stale_socket(site_dir: &std::path::Path) {
 }
 
 /// FNV-1a hash — deterministic across all builds and Rust versions.
-fn fnv1a_hash(bytes: &[u8]) -> u64 {
+const fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    fnv1a_hash_parts(&[bytes])
+}
+
+/// FNV-1a over the concatenation of `parts`, usable at compile time.
+pub(crate) const fn fnv1a_hash_parts(parts: &[&[u8]]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in bytes {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+    let mut p = 0;
+    while p < parts.len() {
+        let bytes = parts[p];
+        let mut i = 0;
+        while i < bytes.len() {
+            hash ^= bytes[i] as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+            i += 1;
+        }
+        p += 1;
     }
     hash
 }
@@ -292,12 +370,22 @@ mod tests {
     /// Returns the URL the client should connect to. The server thread
     /// terminates when the test process exits (it loops on `recv`).
     fn spawn_echo_server() -> String {
+        spawn_server_replying(serde_json::to_vec(&Response::pong()).unwrap())
+    }
+
+    /// Spin up an in-process Rep0 server that answers every request with
+    /// `reply`, verbatim. Returns the URL the client should connect to.
+    fn spawn_server_replying(reply: Vec<u8>) -> String {
         let pid = std::process::id();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let url = format!("ipc:///tmp/presemble-test-{pid}-{nanos}");
+        // Tests run in parallel: the counter keeps two servers started in the
+        // same clock tick from colliding on one address.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let url = format!("ipc:///tmp/presemble-test-{pid}-{nanos}-{n}");
 
         let url_for_server = url.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
@@ -310,23 +398,95 @@ mod tests {
                     Ok(m) => m,
                     Err(_) => break,
                 };
-                let cmd: Command = match serde_json::from_slice(&msg) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                let reply = match cmd {
-                    Command::Ping => Response::Pong,
-                    _ => Response::Error("test server only handles Ping".to_string()),
-                };
-                let bytes = serde_json::to_vec(&reply).unwrap();
-                let out = nng::Message::from(bytes.as_slice());
+                if serde_json::from_slice::<Command>(&msg).is_err() {
+                    continue;
+                }
+                let out = nng::Message::from(reply.as_slice());
                 if server.send(out).is_err() {
                     break;
                 }
             }
         });
-        ready_rx.recv().unwrap();
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("test server did not start listening within 5 seconds");
         url
+    }
+
+    #[test]
+    fn protocol_fingerprint_is_the_hash_of_the_wire_type_sources() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let protocol = std::fs::read(root.join("src/protocol.rs")).unwrap();
+        let editorial = std::fs::read(root.join("../editorial_types/src/lib.rs")).unwrap();
+        let mut both = protocol.clone();
+        both.extend_from_slice(&editorial);
+        assert_eq!(PROTOCOL_FINGERPRINT, fnv1a_hash(&both));
+    }
+
+    #[test]
+    fn existing_conductor_with_this_protocol_is_used() {
+        let site = tempfile::tempdir().unwrap();
+        let url = spawn_echo_server();
+        let found = existing_conductor(&url, site.path()).expect("matching conductor is fine");
+        assert!(found.is_some(), "a matching conductor must be connected to");
+    }
+
+    #[test]
+    fn no_conductor_listening_means_start_one() {
+        let site = tempfile::tempdir().unwrap();
+        let url = format!("ipc://{}", site.path().join("nobody-here").display());
+        let found = existing_conductor(&url, site.path()).expect("no conductor is not an error");
+        assert!(found.is_none(), "nothing listening must mean: start one");
+    }
+
+    #[test]
+    fn conductor_speaking_another_protocol_is_refused() {
+        let site = tempfile::tempdir().unwrap();
+        let other = Response::Pong {
+            fingerprint: crate::protocol::PROTOCOL_FINGERPRINT ^ 1,
+            version: "0.0.1-other".to_string(),
+        };
+        let url = spawn_server_replying(serde_json::to_vec(&other).unwrap());
+
+        let err = match existing_conductor(&url, site.path()) {
+            Err(e) => e,
+            Ok(found) => panic!(
+                "a conductor of another build must be refused, got connected={}",
+                found.is_some()
+            ),
+        };
+        let site_name = site.path().display().to_string();
+        assert!(err.contains(&site_name), "names the site: {err}");
+        assert!(err.contains("0.0.1-other"), "names its version: {err}");
+        assert!(
+            err.contains("just serve-stop"),
+            "says how to stop it: {err}"
+        );
+        assert!(
+            err.contains("pkill -f \"presemble conductor\""),
+            "says how to stop it without just: {err}"
+        );
+    }
+
+    #[test]
+    fn conductor_whose_pong_does_not_decode_is_refused() {
+        let site = tempfile::tempdir().unwrap();
+        // What a conductor from before the handshake answers.
+        let url = spawn_server_replying(b"\"Pong\"".to_vec());
+
+        let err = match existing_conductor(&url, site.path()) {
+            Err(e) => e,
+            Ok(found) => panic!(
+                "an old conductor must be refused, got connected={}",
+                found.is_some()
+            ),
+        };
+        let site_name = site.path().display().to_string();
+        assert!(err.contains(&site_name), "names the site: {err}");
+        assert!(
+            err.contains("just serve-stop"),
+            "says how to stop it: {err}"
+        );
     }
 
     #[test]

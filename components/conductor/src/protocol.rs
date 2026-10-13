@@ -1,6 +1,29 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Fingerprint of the wire protocol this build speaks: FNV-1a over the source
+/// of the wire types (this file and `editorial_types`). It comes from the
+/// sources, not the build profile, so a dev LSP and a release conductor built
+/// from the same checkout agree. Any edit to those files (comments included)
+/// changes it, which at worst asks for a conductor restart between builds.
+pub const PROTOCOL_FINGERPRINT: u64 = crate::client::fnv1a_hash_parts(&[
+    include_bytes!("protocol.rs"),
+    include_bytes!("../../editorial_types/src/lib.rs"),
+]);
+
+/// The presemble version of this build, reported in `Response::Pong`.
+pub const PRESEMBLE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+impl Response {
+    /// The `Pong` this build answers a `Ping` with.
+    pub fn pong() -> Self {
+        Response::Pong {
+            fingerprint: PROTOCOL_FINGERPRINT,
+            version: PRESEMBLE_VERSION.to_string(),
+        }
+    }
+}
+
 /// Serializable file classification for the wire protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FileClassification {
@@ -471,7 +494,12 @@ pub enum Response {
     SchemaSource(Option<String>),
     BuildErrors(HashMap<String, Vec<String>>),
     Error(String),
-    Pong,
+    /// Answer to `Command::Ping`: which protocol and version this conductor
+    /// speaks, so a client can refuse one built from other sources.
+    Pong {
+        fingerprint: u64,
+        version: String,
+    },
     /// A suggestion was created successfully.
     SuggestionCreated(editorial_types::SuggestionId),
     /// The content already reads as the suggestion wants it: nothing was

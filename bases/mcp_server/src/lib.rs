@@ -407,7 +407,7 @@ fn handle_request(req: &JsonRpcRequest, site_dir: &Path) -> JsonRpcResponse {
                     return json_rpc_ok(
                         req.id.clone(),
                         serde_json::json!({
-                            "content": [{"type": "text", "text": format!("Cannot connect to conductor: {e}. Is `presemble serve` running?")}],
+                            "content": [{"type": "text", "text": format!("Cannot connect to conductor: {e}")}],
                             "isError": true
                         }),
                     );

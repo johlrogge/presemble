@@ -4634,7 +4634,7 @@ impl Conductor {
 
     fn dispatch_command(&self, cmd: Command) -> CommandResult {
         match cmd {
-            Command::Ping => CommandResult::with_response(Response::Pong),
+            Command::Ping => CommandResult::with_response(Response::pong()),
             Command::GetGrammar { stem } => {
                 CommandResult::with_response(Response::SchemaSource(self.schema_source(&stem)))
             }

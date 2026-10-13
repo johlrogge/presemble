@@ -9,7 +9,7 @@ pub(crate) mod suggestion_apply;
 
 pub use autosave::{AutoSaveConfig, Clock, SystemClock};
 pub use client::{
-    ConductorClient, ConductorSubscriber, SubscriberError, ensure_conductor, socket_url,
+    ConductorClient, ConductorSubscriber, Handshake, SubscriberError, ensure_conductor, socket_url,
 };
 pub use conductor::{CommandResult, Conductor, ProgramError, ProgramOutcome};
 pub use content_store::edit::Plan;
@@ -18,8 +18,8 @@ pub use editorial_types;
 pub use protocol::{
     BlockContainer, BlockLocation, BlockStep, BufferEdit, Command, ConductorEvent, ConflictId,
     ConflictRegion, ConflictSide, ConflictState, DependentFile, Drift, DriftId, DriftKind,
-    FileClassification, FileConflicts, HeldRegion, LinkOption, PathStep, RenderMode, Response,
-    SaveState, TextHash,
+    FileClassification, FileConflicts, HeldRegion, LinkOption, PROTOCOL_FINGERPRINT, PathStep,
+    RenderMode, Response, SaveState, TextHash,
 };
 
 #[cfg(test)]
@@ -63,7 +63,12 @@ mod tests {
     fn conductor_ping_returns_pong() {
         let conductor = empty_conductor();
         let result = conductor.handle_command(Command::Ping);
-        assert!(matches!(result.response, Response::Pong));
+        assert!(matches!(
+            result.response,
+            Response::Pong { fingerprint, ref version }
+                if fingerprint == crate::protocol::PROTOCOL_FINGERPRINT
+                    && version == env!("CARGO_PKG_VERSION")
+        ));
         assert!(result.events.is_empty());
     }
 
