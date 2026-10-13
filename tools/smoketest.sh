@@ -111,6 +111,7 @@ DENO_TOOL_FILES=(
     "tools/ws-smoke.ts"
     "tools/text-vectors.ts"
     "tools/protocol-fixtures.ts"
+    "tools/page-status.ts"
     "tools/block-edit.ts"
 )
 
@@ -132,6 +133,15 @@ if deno run --no-prompt --allow-read=. tools/text-vectors.ts 2>&1 | tee /tmp/pre
     pass "text vectors: inject.js agrees with the server"
 else
     fail "text vectors: inject.js disagrees with the server"
+    JS_CHECK_FAILED=1
+fi
+
+# The browser's page status (inject.js): the diagnostics panel's sentence and
+# the mascot's face for each mode, suggestion, unsaved and problem count.
+if deno run --no-prompt --allow-read=. tools/page-status.ts 2>&1 | tee /tmp/presemble-page-status.log; then
+    pass "page status: inject.js shows the expected panel sentence and mascot face"
+else
+    fail "page status: inject.js shows a different panel sentence or mascot face"
     JS_CHECK_FAILED=1
 fi
 

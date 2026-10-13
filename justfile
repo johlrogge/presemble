@@ -293,6 +293,22 @@ protocol-fixtures:
     grep -E 'FAIL|Error|error' target/protocol-fixtures.log >&2 || true
     exit 1
 
+# Check inject.js's page status (the diagnostics panel's sentence and the
+# mascot's face) against the vectors in tools/page-status.ts. The full output
+# goes to target/page-status.log, because the just MCP drops stdout when a
+# recipe fails.
+[group('develop')]
+page-status:
+    #!/usr/bin/env bash
+    set -o pipefail
+    mkdir -p target
+    if NO_COLOR=1 deno run --no-prompt --allow-read=. tools/page-status.ts 2>&1 | tee target/page-status.log; then
+        exit 0
+    fi
+    echo "page status failed; full output in target/page-status.log" >&2
+    grep -E 'FAIL|Error|error' target/page-status.log >&2 || true
+    exit 1
+
 # Run the smoketest (tools/smoketest.sh) against the given polylith profile.
 [group('develop')]
 smoketest profile="dev":

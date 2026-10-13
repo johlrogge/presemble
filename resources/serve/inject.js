@@ -537,6 +537,16 @@ try{list=JSON.parse(text);}catch(err){return [];}
 if(!Array.isArray(list)){return [];}
 return list.filter(function(d){return d&&typeof d.message==='string'&&(d.severity==='error'||d.severity==='warning');});
 }
+// The page's error and warning counts from the #presemble-diagnostics script;
+// none when it is missing or can't be parsed.
+function _pageDiagCounts(){
+var script=document.getElementById('presemble-diagnostics');
+if(!script){return {errors:0,warnings:0};}
+var data=null;
+try{data=JSON.parse(script.textContent);}catch(err){data=null;}
+if(!data||typeof data!=='object'){return {errors:0,warnings:0};}
+return {errors:Number(data.errors)||0,warnings:Number(data.warnings)||0};
+}
 function _diagWorst(list){return list.some(function(d){return d.severity==='error';})?'error':'warning';}
 function _diagMessagesBox(list){
 var box=document.createElement('div');
@@ -597,10 +607,7 @@ panel.setAttribute('role','status');
 var head=document.createElement('button');
 head.type='button';
 head.className='presemble-diag-panel-head';
-var summary=[];
-if(errors>0){summary.push(errors+(errors===1?' error':' errors')+" on this page. The site can't be published until "+(errors===1?"it's":"they're")+" fixed.");}
-if(warnings>0){summary.push(warnings+(warnings===1?' warning':' warnings')+' on this page.');}
-head.textContent=summary.join(' ');
+head.textContent=diagSummary(errors,warnings);
 var body=document.createElement('div');
 body.className='presemble-diag-panel-body';
 if(unplaced.length){body.appendChild(_diagMessagesBox(unplaced));}
@@ -866,16 +873,9 @@ function update(){
 var totalBadge=_editorialSuggestCount+_dirtyCount;
 if(totalBadge>0){badge.textContent=totalBadge;badge.style.display='block';}
 else{badge.style.display='none';}
-if(mode==='edit'){icon.textContent='\u{270F}\u{FE0F}';icon.title='Edit mode \u{2014} click to change';
-if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}
-}
-else if(mode==='suggest'){icon.textContent='\u{1F4AC}';icon.title='Suggest mode \u{2014} click to change';
-if(_dirtyCount>0){icon.title+=' ('+_dirtyCount+' unsaved)';}
-}
-else if(mode==='schema'){icon.textContent='\u{1F4D0}';icon.title='Structure mode \u{2014} viewing schema';}
-else if(totalBadge===0&&_dirtyCount===0){icon.textContent='\u{1F44D}';icon.title='All clear \u{2014} ready to publish';}
-else if(_dirtyCount>0&&totalBadge===0){icon.textContent='\u{1F4BE}';icon.title=_dirtyCount+' unsaved change'+(_dirtyCount===1?'':'s')+' \u{2014} click to change';}
-else{icon.textContent='\u{1F917}';icon.title=totalBadge+' suggestion'+(totalBadge===1?'':'s')+(_dirtyCount>0?' ('+_dirtyCount+' unsaved)':'')+' \u{2014} click to edit';}
+var diag=_pageDiagCounts();
+var s=mascotState(mode,_editorialSuggestCount,_dirtyCount,diag.errors,diag.warnings);
+icon.textContent=s.face;icon.title=s.title;icon.setAttribute('data-status',s.kind);
 viewBtn.className=mode==='view'?'active':'';
 editBtn.className=mode==='edit'?'active':'';
 suggestBtn.className=mode==='suggest'?'active':'';
@@ -884,6 +884,7 @@ document.body.classList.toggle('presemble-edit-mode',mode==='edit');
 document.body.classList.toggle('presemble-suggest-mode',mode==='suggest');
 }
 update();
+if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',update);}
 icon.onclick=function(e){e.stopPropagation();menu.classList.toggle('open');};
 document.addEventListener('click',function(){menu.classList.remove('open');});
 menu.onclick=function(e){e.stopPropagation();};
@@ -1625,6 +1626,53 @@ return out;
 }
 
 // END pure-text-helpers
+// BEGIN page-status
+// Pure functions, no DOM: tools/page-status.ts evaluates this region.
+
+// The diagnostics panel's sentence for a page with `errors` errors and
+// `warnings` warnings; '' when it has neither.
+function diagSummary(errors, warnings) {
+  var parts = [];
+  if (errors > 0) {
+    parts.push(errors + (errors === 1 ? ' error' : ' errors') + " on this page. The site can't be published until " + (errors === 1 ? "it's" : "they're") + ' fixed.');
+  }
+  if (warnings > 0) {
+    parts.push(warnings + (warnings === 1 ? ' warning' : ' warnings') + ' on this page.');
+  }
+  return parts.join(' ');
+}
+
+// What the mascot shows: `kind` (its data-status), the `face` and the hover
+// `title`. Modes come first, then suggestions and unsaved edits; only when
+// none of those apply do the page's errors and warnings replace the all-clear.
+function mascotState(mode, suggestions, dirty, errors, warnings) {
+  var total = suggestions + dirty;
+  var unsaved = dirty > 0 ? ' (' + dirty + ' unsaved)' : '';
+  if (mode === 'edit') {
+    return { kind: 'edit', face: '\u{270F}\u{FE0F}', title: 'Edit mode \u{2014} click to change' + unsaved };
+  }
+  if (mode === 'suggest') {
+    return { kind: 'suggest', face: '\u{1F4AC}', title: 'Suggest mode \u{2014} click to change' + unsaved };
+  }
+  if (mode === 'schema') {
+    return { kind: 'schema', face: '\u{1F4D0}', title: 'Structure mode \u{2014} viewing schema' };
+  }
+  if (total === 0 && dirty === 0) {
+    if (errors > 0) {
+      return { kind: 'errors', face: '\u{1F61F}', title: diagSummary(errors, warnings) };
+    }
+    if (warnings > 0) {
+      return { kind: 'warnings', face: '\u{1F914}', title: diagSummary(errors, warnings) };
+    }
+    return { kind: 'clear', face: '\u{1F44D}', title: 'All clear \u{2014} ready to publish' };
+  }
+  if (dirty > 0 && total === 0) {
+    return { kind: 'unsaved', face: '\u{1F4BE}', title: dirty + ' unsaved change' + (dirty === 1 ? '' : 's') + ' \u{2014} click to change' };
+  }
+  return { kind: 'suggestions', face: '\u{1F917}', title: total + ' suggestion' + (total === 1 ? '' : 's') + unsaved + ' \u{2014} click to edit' };
+}
+
+// END page-status
 document.addEventListener('click',function(e){
 if(!document.body.classList.contains('presemble-edit-mode')){return;}
 var el=e.target.closest('[data-presemble-slot]');

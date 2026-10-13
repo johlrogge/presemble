@@ -14,7 +14,8 @@ The mascot overlay in the corner of the page shows the current mode:
 
 | State | Indicator |
 | --- | --- |
-| All clear | Thumbs up |
+| All clear: no suggestions, unsaved edits, errors or warnings on this page | Thumbs up |
+| Problems on this page | Worried face (errors) or thinking face (warnings); hover for the same summary as the panel |
 | Suggestions present | Badge with count |
 | Edit mode active | Pencil |
 
