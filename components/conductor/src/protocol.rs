@@ -615,9 +615,15 @@ pub enum ConductorEvent {
     /// the browser can restore scroll position after reload; `None` for
     /// general rebuilds (file watcher, NED program apply without focused
     /// target, etc.).
+    ///
+    /// `focus` is the page of the one document an edit changed: the page an
+    /// editor's browser follows. `None` when no single edited document caused
+    /// the rebuild (a file change, a reload, a conflict re-render): then no
+    /// browser is sent elsewhere, and only the pages listed reload.
     PagesRebuilt {
         pages: Vec<String>,
         anchor: Option<editorial_types::StructuralAnchor>,
+        focus: Option<String>,
     },
     /// Build failed for some pages.
     BuildFailed { error_pages: Vec<String> },
@@ -805,6 +811,7 @@ mod protocol_tests {
         let event = ConductorEvent::PagesRebuilt {
             pages: vec!["/post/hello".to_string()],
             anchor: Some(anchor.clone()),
+            focus: Some("/post/hello".to_string()),
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");
@@ -812,8 +819,10 @@ mod protocol_tests {
             ConductorEvent::PagesRebuilt {
                 pages,
                 anchor: Some(a),
+                focus,
             } => {
                 assert_eq!(pages, vec!["/post/hello".to_string()]);
+                assert_eq!(focus.as_deref(), Some("/post/hello"));
                 assert_eq!(a.file, "content/post/hello.md");
                 assert_eq!(a.slot, "body");
                 assert_eq!(a.heading_text, Some("Why Presemble".to_string()));
@@ -829,6 +838,7 @@ mod protocol_tests {
         let event = ConductorEvent::PagesRebuilt {
             pages: vec!["/post/hello".to_string()],
             anchor: None,
+            focus: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let decoded: ConductorEvent = serde_json::from_str(&json).expect("deserialize");

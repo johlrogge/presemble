@@ -3504,6 +3504,7 @@ impl Conductor {
             events.push(ConductorEvent::PagesRebuilt {
                 pages: rebuilt_pages,
                 anchor: None,
+                focus: None,
             });
         }
         if !failed_pages.is_empty() {
@@ -3512,6 +3513,12 @@ impl Conductor {
             });
         }
         events
+    }
+
+    /// The page of the content document at `file` (site-relative or
+    /// absolute): the `focus` of a rebuild an edit of it caused.
+    pub(crate) fn page_of_document(&self, file: &Path) -> Option<String> {
+        self.url_for_content_path(&self.site_dir.join(file))
     }
 
     /// Derive the URL path for a content file (for error tracking).
@@ -4002,6 +4009,7 @@ impl Conductor {
                                 // After the rebuild: the anchor reads the new body.
                                 anchor: body_idx
                                     .and_then(|idx| self.compute_body_anchor(file.as_str(), idx)),
+                                focus: self.page_of_document(Path::new(file.as_str())),
                             });
                         }
                         if !failed.is_empty() {
@@ -4145,9 +4153,16 @@ impl Conductor {
         };
         let mut events = Vec::new();
         if !rebuilt_pages.is_empty() {
+            // A plan that edited one document names its page to follow; one
+            // that edited several names none.
+            let focus = match dirty_paths.as_slice() {
+                [only] => self.page_of_document(only),
+                _ => None,
+            };
             events.push(ConductorEvent::PagesRebuilt {
                 pages: rebuilt_pages.clone(),
                 anchor: None,
+                focus,
             });
         }
         if !failed_pages.is_empty() {
@@ -4360,9 +4375,11 @@ impl Conductor {
             .flatten()
             .collect();
         if !pages.is_empty() {
+            // A conflict changed, not an edit: no page to follow.
             result.events.push(ConductorEvent::PagesRebuilt {
                 pages,
                 anchor: None,
+                focus: None,
             });
         }
         // What changed in N, for the editors that have it open (LSP-1).
@@ -4918,6 +4935,9 @@ impl Conductor {
                             events.push(ConductorEvent::PagesRebuilt {
                                 pages: rebuilt_pages,
                                 anchor: None,
+                                // The new page, not whichever page listing it
+                                // was rebuilt first.
+                                focus: Some(url.clone()),
                             });
                         }
                         let failed = self.flush_repopulate_failures();
@@ -8600,6 +8620,28 @@ mod suggestion_accept_tests {
         assert_eq!(dirty, vec![FILE.to_string()]);
     }
 
+    /// Bug 2: a change on disk rebuilds pages, but no edit caused it, so it
+    /// names no page for the editors' browsers to follow.
+    #[test]
+    fn a_file_change_rebuild_names_no_page_to_follow() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        std::fs::write(tmp.path().join(FILE), "# Changed\n\n----\n\nOn disk.\n").unwrap();
+        let result = conductor.handle_command(Command::FileChanged {
+            paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")],
+        });
+        let focuses: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                ConductorEvent::PagesRebuilt { focus, .. } => Some(focus.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!focuses.is_empty(), "events: {:?}", result.events);
+        assert!(focuses.iter().all(Option::is_none), "focuses: {focuses:?}");
+    }
+
     fn title_of(conductor: &Conductor, file: &str) -> String {
         let root = conductor
             .doc_root_for_path(Path::new(file))
@@ -10647,6 +10689,35 @@ mod block_edit_tests {
                 .events
                 .iter()
                 .any(|e| matches!(e, ConductorEvent::PagesRebuilt { anchor: None, .. })),
+            "events: {:?}",
+            result.events
+        );
+    }
+
+    /// Bug 2: a block edit names its document's page for the editors'
+    /// browsers to follow, whichever pages the edit rebuilt besides.
+    #[test]
+    fn block_edit_apply_names_the_edited_page_to_follow() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let result = edit(
+            &conductor,
+            TITLE_HEADING,
+            "First Post",
+            "Second Post",
+            BlockEditIntent::Apply,
+        );
+        let focuses: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                ConductorEvent::PagesRebuilt { focus, .. } => Some(focus.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            focuses,
+            vec![Some("/post/first".to_string())],
             "events: {:?}",
             result.events
         );

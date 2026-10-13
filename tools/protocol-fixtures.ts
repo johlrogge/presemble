@@ -34,6 +34,10 @@
 //   `reloads`. It lives in resources/serve/reload.js between
 //   `// BEGIN reader-reload` and `// END reader-reload`.
 //
+// Also checked, per path in PAGE_PATH_VECTORS: both copies of the page path
+// normaliser (inject.js `_samePagePath`, reload.js `samePagePath`) give the
+// same, expected form.
+//
 // Output: `PASS <fixture>` per fixture, `FAIL <fixture> <what>` per mismatch,
 // `SKIP <fixture>` per skipped fixture.
 // Exit 0 if everything matches, 1 otherwise.
@@ -83,6 +87,8 @@ interface Builders {
   editorialMessageAction(message: unknown): string;
   /** What the page opened at `pathname` does with a reload message. */
   reloadDecision(message: unknown, pathname: string): ReloadDecision;
+  /** inject.js's `_samePagePath`. */
+  samePagePath(path: string): string;
 }
 
 type ReloadDecision =
@@ -154,18 +160,43 @@ interface PublicFixture {
   readonly reloads: boolean;
 }
 
-function loadReaderReloads(): ReaderReloads {
+/** The one form a page path is compared in (see `PAGE_PATH_VECTORS`). */
+type SamePagePath = (path: string) => string;
+
+interface Reader {
+  readonly readerReloads: ReaderReloads;
+  readonly samePagePath: SamePagePath;
+}
+
+function loadReader(): Reader {
   const code = region("reload.js", "// BEGIN reader-reload", "// END reader-reload");
-  return new Function(`${code}\nreturn readerReloads;`)() as ReaderReloads;
+  return new Function(
+    `${code}\nreturn { readerReloads: readerReloads, samePagePath: samePagePath };`,
+  )() as Reader;
 }
 
 function loadBuilders(): Builders {
   const code = region("inject.js", BEGIN, END);
   const factory = new Function(
-    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision };`,
+    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision, samePagePath: _samePagePath };`,
   );
   return factory() as Builders;
 }
+
+/**
+ * Every path the server answers a page at, and the one form both copies of
+ * the normaliser (`_samePagePath` in inject.js, `samePagePath` in reload.js)
+ * compare it in. One list for both keeps the twins in step.
+ */
+const PAGE_PATH_VECTORS: readonly (readonly [string, string])[] = [
+  ["/", "/"],
+  ["/index.html", "/"],
+  ["/post", "/post"],
+  ["/post/", "/post"],
+  ["/post/index.html", "/post"],
+  ["/post/a", "/post/a"],
+  ["/post/a/", "/post/a"],
+];
 
 function show(value: unknown): string {
   return JSON.stringify(value);
@@ -264,12 +295,12 @@ function main(): number {
       failures += 1;
     }
   }
-  const readerReloads = loadReaderReloads();
+  const reader = loadReader();
   for (const name of fixtureNames("public/")) {
     const fixture = JSON.parse(
       read(`../resources/serve/protocol/public/${name}.json`),
     ) as PublicFixture;
-    const reloads = readerReloads(fixture.message, fixture.pathname);
+    const reloads = reader.readerReloads(fixture.message, fixture.pathname);
     if (reloads === fixture.reloads) {
       console.log(`PASS public/${name}`);
     } else {
@@ -279,6 +310,25 @@ function main(): number {
           show(fixture.reloads)
         }, got ${show(reloads)}`,
       );
+    }
+  }
+  const normalisers: readonly (readonly [string, SamePagePath])[] = [
+    ["inject.js _samePagePath", builders.samePagePath],
+    ["reload.js samePagePath", reader.samePagePath],
+  ];
+  for (const [path, wanted] of PAGE_PATH_VECTORS) {
+    let ok = true;
+    for (const [which, normalise] of normalisers) {
+      const got = normalise(path);
+      if (got !== wanted) {
+        ok = false;
+        console.log(`FAIL page-path ${show(path)} ${which}: expected ${show(wanted)}, got ${show(got)}`);
+      }
+    }
+    if (ok) {
+      console.log(`PASS page-path ${show(path)}`);
+    } else {
+      failures += 1;
     }
   }
   return failures === 0 ? 0 : 1;

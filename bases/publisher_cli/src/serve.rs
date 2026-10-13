@@ -32,6 +32,9 @@ enum EditorialMessage {
     Reload {
         pages: Vec<String>,
         anchor: Option<editorial_types::StructuralAnchor>,
+        /// The page an editor's browser follows (`"primary"` on the wire):
+        /// the page of the edited document, `None` when no edit caused it.
+        focus: Option<String>,
     },
     ScrollTo {
         anchor: editorial_types::StructuralAnchor,
@@ -175,7 +178,11 @@ impl BrowserChannels {
 impl EditorialMessage {
     fn to_json(&self) -> String {
         match self {
-            EditorialMessage::Reload { pages, anchor } => {
+            EditorialMessage::Reload {
+                pages,
+                anchor,
+                focus,
+            } => {
                 let anchor_json = match anchor {
                     Some(a) => {
                         let wire = AnchorWire::from(a);
@@ -186,24 +193,20 @@ impl EditorialMessage {
                     }
                     None => String::new(),
                 };
-                if pages.is_empty() {
-                    format!(
-                        r#"{{"type":"reload","pages":[],"primary":""{}}}"#,
-                        anchor_json
-                    )
-                } else {
-                    let pages_json = pages
-                        .iter()
-                        .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!(
-                        r#"{{"type":"reload","pages":[{}],"primary":"{}"{}}}"#,
-                        pages_json,
-                        pages[0].replace('\\', "\\\\").replace('"', "\\\""),
-                        anchor_json
-                    )
-                }
+                let escape = |p: &str| p.replace('\\', "\\\\").replace('"', "\\\"");
+                let pages_json = pages
+                    .iter()
+                    .map(|p| format!("\"{}\"", escape(p)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                // The page to follow is the edited one, never just the first
+                // page rebuilt; `""` (no edit) sends no browser elsewhere.
+                format!(
+                    r#"{{"type":"reload","pages":[{}],"primary":"{}"{}}}"#,
+                    pages_json,
+                    escape(focus.as_deref().unwrap_or("")),
+                    anchor_json
+                )
             }
             EditorialMessage::ScrollTo { anchor } => {
                 let wire = AnchorWire::from(anchor);
@@ -292,12 +295,19 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
         // canonical text; the browser shows N already.
         ConductorEvent::EditorCanonicalWanted { .. } => return None,
         ConductorEvent::SaveState { file, state } => EditorialMessage::SaveState { file, state },
-        ConductorEvent::PagesRebuilt { pages, anchor } => {
-            EditorialMessage::Reload { pages, anchor }
-        }
+        ConductorEvent::PagesRebuilt {
+            pages,
+            anchor,
+            focus,
+        } => EditorialMessage::Reload {
+            pages,
+            anchor,
+            focus,
+        },
         ConductorEvent::BuildFailed { error_pages } => EditorialMessage::Reload {
             pages: error_pages,
             anchor: None,
+            focus: None,
         },
         ConductorEvent::CursorScrollTo { anchor } => EditorialMessage::ScrollTo { anchor },
         ConductorEvent::NedSuggestionCreated { suggestion } => {
@@ -320,6 +330,7 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
         ConductorEvent::NedSuggestionAccepted { pages, .. } => EditorialMessage::Reload {
             pages,
             anchor: None,
+            focus: None,
         },
         ConductorEvent::NedSuggestionRejected { file, .. } => {
             EditorialMessage::SuggestionListChanged {
@@ -3291,11 +3302,13 @@ mod tests {
         let step = ws_step(Ok(EditorialMessage::Reload {
             pages: vec!["/a".to_string()],
             anchor: None,
+            focus: None,
         }));
         match step {
             WsStep::Forward(EditorialMessage::Reload {
                 pages,
                 anchor: None,
+                ..
             }) => {
                 assert_eq!(pages, vec!["/a".to_string()]);
             }
@@ -3353,6 +3366,7 @@ mod tests {
         channels.publish_editorial(EditorialMessage::Reload {
             pages: vec!["/a".to_string()],
             anchor: Some(test_anchor()),
+            focus: None,
         });
         assert!(matches!(
             public_rx.try_recv(),
@@ -3504,11 +3518,17 @@ mod tests {
         let msg = editorial_message_for(conductor::ConductorEvent::PagesRebuilt {
             pages: vec!["/post/a".to_string()],
             anchor: Some(test_anchor()),
+            focus: Some("/post/a".to_string()),
         });
         match msg {
-            EditorialMessage::Reload { pages, anchor } => {
+            EditorialMessage::Reload {
+                pages,
+                anchor,
+                focus,
+            } => {
                 assert_eq!(pages, vec!["/post/a".to_string()]);
                 assert_eq!(anchor, Some(test_anchor()));
+                assert_eq!(focus.as_deref(), Some("/post/a"));
             }
             other => panic!("expected Reload, got {other:?}"),
         }
@@ -3523,6 +3543,7 @@ mod tests {
             EditorialMessage::Reload {
                 pages,
                 anchor: None,
+                focus: None,
             } => {
                 assert_eq!(pages, vec!["/post/broken".to_string()]);
             }
@@ -3592,6 +3613,7 @@ mod tests {
             EditorialMessage::Reload {
                 pages,
                 anchor: None,
+                ..
             } => {
                 assert_eq!(pages, vec!["/post/a".to_string()]);
             }
@@ -3633,6 +3655,7 @@ mod tests {
         let msg = EditorialMessage::Reload {
             pages: vec![],
             anchor: None,
+            focus: None,
         };
         assert_eq!(
             msg.to_json(),
@@ -3645,6 +3668,7 @@ mod tests {
         let msg = EditorialMessage::Reload {
             pages: vec!["/article/hello".to_string()],
             anchor: None,
+            focus: Some("/article/hello".to_string()),
         };
         let json = msg.to_json();
         assert_eq!(
@@ -3653,14 +3677,31 @@ mod tests {
         );
     }
 
+    /// Bug 2: a rebuild no edit caused (a save, a file change) names no page
+    /// to follow. `pages[0]` is just the first URL in sort order, `/`: taking
+    /// it as the primary sent every editor to the index.
     #[test]
-    fn reload_message_multiple_pages_primary_is_first() {
-        let msg = EditorialMessage::Reload {
-            pages: vec!["/article/a".to_string(), "/article/b".to_string()],
+    fn reload_without_focus_has_an_empty_primary() {
+        let msg = editorial_message_for(conductor::ConductorEvent::PagesRebuilt {
+            pages: vec!["/".to_string(), "/post/a".to_string()],
             anchor: None,
+            focus: None,
+        });
+        let json = msg.to_json();
+        assert!(json.contains(r#""primary":"""#), "{json}");
+        assert!(json.contains(r#""pages":["/","/post/a"]"#), "{json}");
+    }
+
+    /// The primary is the edited page, wherever it sorts among the pages.
+    #[test]
+    fn reload_primary_is_the_focus_not_the_first_page() {
+        let msg = EditorialMessage::Reload {
+            pages: vec!["/".to_string(), "/post/a".to_string()],
+            anchor: None,
+            focus: Some("/post/a".to_string()),
         };
         let json = msg.to_json();
-        assert!(json.contains(r#""primary":"/article/a""#));
+        assert!(json.contains(r#""primary":"/post/a""#), "{json}");
     }
 
     #[test]
@@ -3668,6 +3709,7 @@ mod tests {
         let msg = EditorialMessage::Reload {
             pages: vec!["/bad\"path".to_string()],
             anchor: None,
+            focus: Some("/bad\"path".to_string()),
         };
         let json = msg.to_json();
         assert!(json.contains(r#"\/bad\"path"#) || json.contains(r#"/bad\""#));
@@ -3685,6 +3727,7 @@ mod tests {
         let msg = EditorialMessage::Reload {
             pages: vec!["/article/hello".to_string()],
             anchor: Some(anchor),
+            focus: Some("/article/hello".to_string()),
         };
         let json = msg.to_json();
         assert!(json.contains(r#""anchor":"#), "should have anchor field");
@@ -3741,6 +3784,7 @@ mod tests {
         let msg = EditorialMessage::Reload {
             pages: vec!["/article/hello".to_string()],
             anchor: None,
+            focus: Some("/article/hello".to_string()),
         };
         assert!(!msg.to_json().contains("anchor"));
     }
@@ -5717,6 +5761,7 @@ mod tests {
                 channels.publish_editorial(EditorialMessage::Reload {
                     pages: vec!["/a".to_string()],
                     anchor: Some(test_anchor()),
+                    focus: Some("/a".to_string()),
                 });
                 channels.publish_reload_to_readers(vec!["/a".to_string()]);
                 (

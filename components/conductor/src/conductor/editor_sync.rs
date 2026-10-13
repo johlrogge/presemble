@@ -1390,9 +1390,11 @@ impl Conductor {
         Ok(if pages.is_empty() {
             vec![]
         } else {
+            // An editor changed this one document: its page is the one to follow.
             vec![ConductorEvent::PagesRebuilt {
                 pages,
                 anchor: None,
+                focus: self.page_of_document(abs),
             }]
         })
     }

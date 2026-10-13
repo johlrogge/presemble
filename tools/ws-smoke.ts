@@ -37,7 +37,8 @@ interface Reload {
   readonly type: "reload";
   readonly pages: readonly string[];
   /**
-   * Editorial socket: `pages[0]`, or `""` when `pages` is empty.
+   * Editorial socket: the page of the edited document, or `""` when no
+   * edit caused the rebuild (a save, a file change).
    * Public socket: omitted on the wire; modelled as `null`.
    */
   readonly primary: string | null;
@@ -684,8 +685,8 @@ async function run(baseUrl: string, cookie: string, siteDir: string | null): Pro
         reloadIncluding(PAGE),
       );
       check(
-        "ws: /block-edit editorial reload primary is pages[0]",
-        m.primary === m.pages[0],
+        `ws: /block-edit editorial reload primary is the edited page ${PAGE}`,
+        m.primary === PAGE,
         `primary=${JSON.stringify(m.primary)} pages=${JSON.stringify(m.pages)}`,
       );
       // Readers are served the saved, published page: an edit that is not saved
