@@ -788,7 +788,47 @@ impl Conductor {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .remove(path);
+        // Nothing waits for its text any more.
+        self.canonical_asked
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(Path::new(path.as_str()));
         CommandResult::ok()
+    }
+
+    /// What the open editor of the document at site-relative `rel` means for
+    /// auto-saving it (ADR-070): none open; a region N does not hold yet (held
+    /// or drifted), which waits; the editor already shows N's canonical text,
+    /// so a save writes what it shows; or not yet, with when it was last asked
+    /// for it.
+    pub(super) fn editor_view(&self, rel: &Path) -> crate::autosave::EditorView {
+        use crate::autosave::EditorView;
+        let Ok(key) = editorial_types::ContentPath::parse(&rel.to_string_lossy()) else {
+            return EditorView::Closed;
+        };
+        let Some(state) = self
+            .editors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        else {
+            return EditorView::Closed;
+        };
+        if !state.held.is_empty() || !state.drifts.is_empty() {
+            return EditorView::Unsettled;
+        }
+        if self.canonical_text(&key).as_deref() == Some(state.last.as_str()) {
+            return EditorView::Canonical;
+        }
+        EditorView::Waiting {
+            asked: self
+                .canonical_asked
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(rel)
+                .copied(),
+        }
     }
 
     /// What the editor of `path` has now, if one is open.
@@ -1161,6 +1201,9 @@ impl Conductor {
             EditorState::opened(self.canonical_text(&path).unwrap_or_else(|| text.clone()))
         });
         state.last = text;
+        // A change, even one N does not take yet (a held region): auto-save
+        // waits for the idle time from here (ADR-070).
+        self.touch(Path::new(path.as_str()));
         let result = self.sync_editor(&path, &abs, &mut state, false);
         self.finish_sync(path, state, result)
     }

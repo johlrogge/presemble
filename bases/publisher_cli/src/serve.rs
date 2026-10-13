@@ -259,6 +259,9 @@ fn editorial_message_of(ev: conductor::ConductorEvent) -> Option<EditorialMessag
         ConductorEvent::DocumentsSaved { .. } => return None,
         // For open editors: the browser follows N through `PagesRebuilt`.
         ConductorEvent::DocumentModelChanged { .. } => return None,
+        // For open editors: the language server brings the buffer to the
+        // canonical text; the browser shows N already.
+        ConductorEvent::EditorCanonicalWanted { .. } => return None,
         ConductorEvent::PagesRebuilt { pages, anchor } => {
             EditorialMessage::Reload { pages, anchor }
         }

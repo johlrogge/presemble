@@ -10,6 +10,8 @@ use crate::protocol::{
 use crate::suggestion_apply::{self, DOCUMENT_KIND};
 use content_store::edit;
 
+#[cfg(test)]
+mod autosave_tests;
 mod editor_sync;
 mod page_diagnostics;
 
@@ -316,6 +318,14 @@ pub struct Conductor {
     // Diagnostics for every schema and content file, rebuilt by
     // `populate_node_store`. The publish gate (ADR-061).
     validation_report: RwLock<validation::ValidationReport>,
+    // Where auto-save reads the time (ADR-070): the system clock, or a test's.
+    clock: Arc<dyn crate::autosave::Clock>,
+    // Whether ticks save, and after how long without a change.
+    autosave: RwLock<crate::autosave::AutoSaveConfig>,
+    // When the open editor of each document waiting for its canonical text
+    // was last asked for it (`EditorCanonicalWanted`); forgotten once the
+    // document has no unsaved edits.
+    canonical_asked: RwLock<HashMap<PathBuf, std::time::Instant>>,
 }
 
 /// A document whose content changed, as input to
@@ -532,6 +542,9 @@ impl Conductor {
             ),
             stem_nodes: RwLock::new(HashMap::new()),
             validation_report: RwLock::new(validation::ValidationReport::default()),
+            clock: Arc::new(crate::autosave::SystemClock),
+            autosave: RwLock::new(crate::autosave::AutoSaveConfig::default()),
+            canonical_asked: RwLock::new(HashMap::new()),
         };
 
         // Load persisted NED suggestions from disk (read only: a load never
@@ -736,6 +749,28 @@ impl Conductor {
         &self.dirty_docs
     }
 
+    /// The same conductor reading the time from `clock` (auto-save, ADR-070;
+    /// a test moves its clock by hand).
+    pub fn with_clock(mut self, clock: Arc<dyn crate::autosave::Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Whether ticks save, and after how long without a change (ADR-070).
+    pub fn set_autosave(&self, config: crate::autosave::AutoSaveConfig) {
+        *self.autosave.write().unwrap_or_else(|e| e.into_inner()) = config;
+    }
+
+    /// The document at site-relative `rel` changed now, from any channel:
+    /// auto-save waits for the idle time from here.
+    fn touch(&self, rel: &Path) {
+        let now = self.clock.now();
+        self.dirty_docs
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .touched(rel, now);
+    }
+
     /// Remember what the file at site-relative `rel` looks like now, as the
     /// version our copy is based on. Call it before reading the file (a
     /// change in between then shows as a change, never as a missed one), and
@@ -793,6 +828,7 @@ impl Conductor {
     /// Mark the documents at site-relative `paths` unsaved. One that goes from
     /// saved to unsaved gets the base of its edits (ADR-065 amendment F2).
     fn mark_unsaved(&self, paths: &[PathBuf]) {
+        let now = self.clock.now();
         let newly_unsaved: Vec<&PathBuf> = {
             let mut dirty = self.dirty_docs.write().unwrap_or_else(|e| e.into_inner());
             paths
@@ -800,6 +836,7 @@ impl Conductor {
                 .filter(|path| {
                     let new = !dirty.contains(path);
                     dirty.mark((*path).clone());
+                    dirty.touched((*path).clone(), now);
                     new
                 })
                 .collect()
@@ -852,6 +889,10 @@ impl Conductor {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .clear(rel);
+        self.canonical_asked
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(rel);
         was_conflicted.then(|| self.conflict_ended(rel))
     }
 
@@ -4248,6 +4289,140 @@ impl Conductor {
         result
     }
 
+    /// Write the dirty document at `path` to disk ([`Command::SaveBuffer`]):
+    /// a change to the file the watcher has not reported yet is taken first
+    /// (ADR-065), a document in conflict is only written with `consent` that
+    /// names it, and the text written is N's.
+    fn save_buffer(
+        &self,
+        path: &editorial_types::SitePath,
+        consent: &editorial_types::ConflictConsent,
+    ) -> CommandResult {
+        if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, path) {
+            return CommandResult::error(format!("{path}: {e}"));
+        }
+        let rel_path = path.as_path().to_path_buf();
+
+        // The watcher may not have reported a change to the file yet:
+        // look at the file ourselves first (ADR-065).
+        let detected = self.detect_unreported_change(&rel_path);
+
+        // A save never overwrites a conflict without consent that
+        // names the file (ADR-065). Nothing is written.
+        if self
+            .dirty_docs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_conflicted(&rel_path)
+            && !consent.covers(path.as_str())
+        {
+            return CommandResult {
+                response: Response::ConflictsNeedConfirmation(vec![path.to_string()]),
+                events: detected.into_iter().collect(),
+            };
+        }
+
+        // Serialize from NodeStore and write.
+        if self
+            .dirty_docs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&rel_path)
+        {
+            let text = match self.doc_root_for_path(&rel_path) {
+                Some(root) => {
+                    let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
+                    match node_store_bridge::serialize_from_store(&store, root) {
+                        Ok(text) => text,
+                        Err(e) => {
+                            return CommandResult::error(format!("cannot save {path}: {e}"));
+                        }
+                    }
+                }
+                None => {
+                    return CommandResult::error(format!("document not in store: {path}"));
+                }
+            };
+            if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
+                return CommandResult::error(format!("write error: {e}"));
+            }
+            let ended = self.clear_unsaved(&rel_path);
+            return CommandResult::ok_with_events(
+                std::iter::once(saved_event([&rel_path]))
+                    .chain(ended)
+                    .collect(),
+            );
+        }
+        CommandResult::error(format!("buffer not dirty: {path}"))
+    }
+
+    /// One auto-save tick ([`Command::AutoSaveTick`], ADR-070): every dirty
+    /// document the policy finds due is saved through [`Conductor::save_buffer`]
+    /// (no consent, so a conflict is never written over), and the open editor
+    /// of each document that waits for its canonical text is asked for it. A
+    /// save that fails leaves the document dirty, to be tried again on a later
+    /// tick; the failures are the answer's error.
+    fn auto_save_tick(&self) -> CommandResult {
+        let config = *self.autosave.read().unwrap_or_else(|e| e.into_inner());
+        let now = self.clock.now();
+        let docs: Vec<crate::autosave::DocView> = {
+            let dirty = self.dirty_docs.read().unwrap_or_else(|e| e.into_inner());
+            let mut paths: Vec<PathBuf> = dirty.iter().map(Path::to_path_buf).collect();
+            paths.sort();
+            paths
+                .into_iter()
+                .map(|path| crate::autosave::DocView {
+                    last_change: dirty.last_change(&path),
+                    conflicted: dirty.is_conflicted(&path),
+                    editor: crate::autosave::EditorView::Closed,
+                    path,
+                })
+                .collect()
+        };
+        let docs: Vec<crate::autosave::DocView> = docs
+            .into_iter()
+            .map(|doc| crate::autosave::DocView {
+                editor: self.editor_view(&doc.path),
+                ..doc
+            })
+            .collect();
+
+        let mut events = Vec::new();
+        let mut failures = Vec::new();
+        for decision in crate::autosave::due(now, &docs, &config) {
+            match decision {
+                crate::autosave::Decision::Save(rel) => {
+                    let Ok(path) = editorial_types::SitePath::parse(&rel.to_string_lossy()) else {
+                        continue;
+                    };
+                    let result =
+                        self.save_buffer(&path, &editorial_types::ConflictConsent::default());
+                    if let Response::Error(e) = &result.response {
+                        failures.push(format!("{}: {e}", rel.display()));
+                    }
+                    events.extend(result.events);
+                }
+                crate::autosave::Decision::AskForCanonical(rel) => {
+                    self.canonical_asked
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(rel.clone(), now);
+                    events.push(ConductorEvent::EditorCanonicalWanted {
+                        file: rel.to_string_lossy().to_string(),
+                    });
+                }
+            }
+        }
+        CommandResult {
+            response: if failures.is_empty() {
+                Response::Ok
+            } else {
+                Response::Error(failures.join("; "))
+            },
+            events,
+        }
+    }
+
     /// The conflict of the document at site-relative `rel` with its file has
     /// ended: the event that tells subscribers so. Its page is out of date.
     fn conflict_ended(&self, rel: &Path) -> ConductorEvent {
@@ -4609,66 +4784,8 @@ impl Conductor {
                 files.sort_by(|a, b| a.file.cmp(&b.file));
                 CommandResult::with_response(Response::Conflicts(files))
             }
-            Command::SaveBuffer { path, consent } => {
-                if let Err(e) = crate::site_resolve::resolve_in_site(&self.site_dir, &path) {
-                    return CommandResult::error(format!("{path}: {e}"));
-                }
-                let rel_path = path.as_path().to_path_buf();
-
-                // The watcher may not have reported a change to the file yet:
-                // look at the file ourselves first (ADR-065).
-                let detected = self.detect_unreported_change(&rel_path);
-
-                // A save never overwrites a conflict without consent that
-                // names the file (ADR-065). Nothing is written.
-                if self
-                    .dirty_docs
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_conflicted(&rel_path)
-                    && !consent.covers(path.as_str())
-                {
-                    return CommandResult {
-                        response: Response::ConflictsNeedConfirmation(vec![path.to_string()]),
-                        events: detected.into_iter().collect(),
-                    };
-                }
-
-                // Serialize from NodeStore and write.
-                if self
-                    .dirty_docs
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains(&rel_path)
-                {
-                    let text = match self.doc_root_for_path(&rel_path) {
-                        Some(root) => {
-                            let store = self.node_store.read().unwrap_or_else(|e| e.into_inner());
-                            match node_store_bridge::serialize_from_store(&store, root) {
-                                Ok(text) => text,
-                                Err(e) => {
-                                    return CommandResult::error(format!(
-                                        "cannot save {path}: {e}"
-                                    ));
-                                }
-                            }
-                        }
-                        None => {
-                            return CommandResult::error(format!("document not in store: {path}"));
-                        }
-                    };
-                    if let Err(e) = self.write_document(&rel_path, text.as_bytes()) {
-                        return CommandResult::error(format!("write error: {e}"));
-                    }
-                    let ended = self.clear_unsaved(&rel_path);
-                    return CommandResult::ok_with_events(
-                        std::iter::once(saved_event([&rel_path]))
-                            .chain(ended)
-                            .collect(),
-                    );
-                }
-                CommandResult::error(format!("buffer not dirty: {path}"))
-            }
+            Command::SaveBuffer { path, consent } => self.save_buffer(&path, &consent),
+            Command::AutoSaveTick => self.auto_save_tick(),
             Command::SaveAllBuffers { consent } => {
                 // The check comes first (ADR-065): if any document we would
                 // write is in conflict with the file on disk and the consent

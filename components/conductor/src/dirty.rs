@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use crate::protocol::ConflictRegion;
 
@@ -134,6 +134,9 @@ impl DiskBases {
 #[derive(Debug, Default)]
 pub struct DirtyDocs {
     docs: HashMap<PathBuf, Unsaved>,
+    /// When each document last changed, from any channel (auto-save waits
+    /// until it has been unchanged for the idle time, ADR-070).
+    changed_at: HashMap<PathBuf, Instant>,
 }
 
 impl DirtyDocs {
@@ -205,11 +208,22 @@ impl DirtyDocs {
         }
     }
 
+    /// The document at `path` changed at `at`, from any channel.
+    pub fn touched(&mut self, path: impl Into<PathBuf>, at: Instant) {
+        self.changed_at.insert(path.into(), at);
+    }
+
+    /// When the document at `path` last changed, if that is known.
+    pub fn last_change(&self, path: &Path) -> Option<Instant> {
+        self.changed_at.get(path).copied()
+    }
+
     /// Remove a document from the dirty set (after save or reload), clearing
     /// any conflict with it. Returns whether it was in conflict (the end to
     /// announce).
     #[must_use]
     pub fn clear(&mut self, path: &Path) -> bool {
+        self.changed_at.remove(path);
         matches!(
             self.docs.remove(path),
             Some(Unsaved::ConflictsWithDisk { .. })

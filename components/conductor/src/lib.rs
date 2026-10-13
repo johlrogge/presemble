@@ -1,3 +1,4 @@
+mod autosave;
 mod client;
 mod conductor;
 mod dirty;
@@ -6,6 +7,7 @@ pub(crate) mod self_write_tracker;
 pub(crate) mod site_resolve;
 pub(crate) mod suggestion_apply;
 
+pub use autosave::{AutoSaveConfig, Clock, SystemClock};
 pub use client::{
     ConductorClient, ConductorSubscriber, SubscriberError, ensure_conductor, socket_url,
 };

@@ -331,6 +331,11 @@ pub enum Command {
     Ping,
     /// Request conductor shutdown.
     Shutdown,
+    /// Auto-save (ADR-070): save every dirty document that has been
+    /// unchanged for the idle time and can be saved now; ask an open editor
+    /// for N's canonical text where the save waits for it. Sent by the host
+    /// on the serial writer, every 250 ms.
+    AutoSaveTick,
     /// Editor cursor moved to a new position.
     CursorMoved {
         path: editorial_types::SitePath,
@@ -591,6 +596,11 @@ pub enum ConductorEvent {
     /// a disk merge, a resolved conflict): an editor that has it open can ask
     /// for its update ([`Command::GetEditorUpdate`]). `file` is site-relative.
     DocumentModelChanged { file: String },
+    /// Auto-save waits for the open editor of a document to hold N's
+    /// canonical text (ADR-070): its buffer should be brought to it, so that a
+    /// save writes what the editor shows. Announced again while the document
+    /// waits. `file` is site-relative.
+    EditorCanonicalWanted { file: String },
     /// Documents were written to disk by a save: what readers see (the
     /// published output) may have changed. `files` are site-relative paths.
     /// Not sent for a refused save or for an edit that was not saved.
