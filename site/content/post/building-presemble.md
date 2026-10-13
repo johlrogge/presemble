@@ -2,7 +2,7 @@
 
 This site is built with Presemble. Every page you are reading was authored in a schema-validated markdown file and assembled by the same publisher that Presemble ships as its primary deliverable.
 
- site proves the philosophy: content is data, templates are data, and schemas are the contracts between them. Nothing on these pages was produced by string interpolation. Every heading, paragraph, and link travelled through a named slot from author to template to output.
+site proves the philosophy: content is data, templates are data, and schemas are the contracts between them. Nothing on these pages was produced by string interpolation. Every heading, paragraph, and link travelled through a named slot from author to template to output.
 
 [Joakim Ohlrogge](/author/johlrogge)
 

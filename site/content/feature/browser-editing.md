@@ -13,7 +13,7 @@ Click any rendered body element in serve mode to enter edit mode for that elemen
 The mascot overlay in the corner of the page shows the current mode:
 
 | State | Indicator |
-|---|---|
+| --- | --- |
 | All clear | Thumbs up |
 | Suggestions present | Badge with count |
 | Edit mode active | Pencil |

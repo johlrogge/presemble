@@ -18,7 +18,7 @@ If `my-site/` contains no Presemble files, the server serves the wizard instead 
 ### Six-step wizard
 
 | Step | What you choose |
-|---|---|
+| --- | --- |
 | Site type | Blog, personal site, or portfolio |
 | Font mood | One of 7 curated type pairings (expressive, minimal, editorial, and more) |
 | Color seed | A hue in degrees (0–360) — the base color for the theme |
@@ -42,7 +42,7 @@ The generated stylesheet is written to `assets/style.css` in the scaffolded site
 ### Starter templates
 
 | Template | Contents |
-|---|---|
+| --- | --- |
 | Blog | Post schema, author schema, collection index, homepage |
 | Personal | About page, page schema, homepage |
 | Portfolio | Project schema with image slots, projects index, homepage |

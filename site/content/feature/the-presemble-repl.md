@@ -20,7 +20,7 @@ The TUI REPL runs in the terminal with three panels: an output history, a doc pa
 **Key bindings:**
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | Enter | Eval when delimiters are balanced; insert newline otherwise |
 | Ctrl+J | Force-eval regardless of balance |
 | Ctrl+O | Force-insert newline |
@@ -67,7 +67,7 @@ Threads as the first argument. Used for single-value transforms.
 **Built-in functions (selection):**
 
 | Function | Effect |
-|---|---|
+| --- | --- |
 | `sort-by` | Sort a collection by a field |
 | `take` | Keep the first N items |
 | `drop` | Skip the first N items |

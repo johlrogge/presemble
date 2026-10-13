@@ -94,7 +94,7 @@ content
 #### `occurs` — occurrence count
 
 | Value | Meaning |
-|---|---|
+| --- | --- |
 | `exactly once` | Exactly one occurrence required |
 | `N` | Exactly N occurrences (e.g. `2`) |
 | `1..3` | Between 1 and 3 occurrences (inclusive) |
@@ -108,13 +108,13 @@ content
 #### `content` — text content constraint
 
 | Value | Meaning |
-|---|---|
+| --- | --- |
 | `capitalized` | Text must begin with an uppercase letter |
 
 #### `headings` — heading level range (body section only)
 
 | Value | Meaning |
-|---|---|
+| --- | --- |
 | `h2..h6` | Headings H2 through H6 allowed |
 | `h3..h6` | Headings H3 through H6 allowed |
 | `h1..h6` | All heading levels allowed |
@@ -122,14 +122,14 @@ content
 #### `orientation` — image aspect ratio
 
 | Value | Meaning |
-|---|---|
+| --- | --- |
 | `landscape` | Width must exceed height |
 | `portrait` | Height must exceed width |
 
 #### `alt` — image alt text
 
 | Value | Meaning |
-|---|---|
+| --- | --- |
 | `required` | Alt text must be present |
 | `optional` | Alt text is optional |
 
@@ -165,7 +165,7 @@ The body section supports the full range of markdown block and inline content:
 **Block elements:**
 
 | Element | Syntax |
-|---|---|
+| --- | --- |
 | Paragraph | Plain text |
 | Heading | `##`, `###`, … (within the schema's `headings` constraint) |
 | Blockquote | `> quoted text`; it can hold any blocks, nested quotes included |
@@ -180,12 +180,12 @@ Two lists of the same kind written one after the other would merge in markdown. 
 **Inline formatting within paragraphs and headings:**
 
 | Format | Syntax |
-|---|---|
+| --- | --- |
 | Bold | `**text**` or `__text__` |
 | Italic | `*text*` or `_text_` |
 | Inline code | `` `code` `` |
 
-Headings keep their markdown as written, so `` ## The `<div>` element `` is saved as it was typed. Underlined (setext) headings, a line of text with `===` or `---` below it, are rewritten as `#` headings when the file is saved; until then they cannot be suggested on in the browser.
+Headings keep their markdown as written, so ``## The `<div>` element`` is saved as it was typed. Underlined (setext) headings, a line of text with `===` or `---` below it, are rewritten as `#` headings when the file is saved; until then they cannot be suggested on in the browser.
 
 In a table, a row with more cells than the header keeps them: the header is padded with empty columns when the file is saved, so no cell is lost.
 
@@ -202,7 +202,7 @@ Presemble keeps content free of HTML, even though markdown allows it, like Hugo 
 
 **Markup that looks unfinished** blocks publishing too. When markdown formatting never closes, its characters stay as literal text, and readers would see them. Presemble reports four cases:
 
-- a backtick attached to a word with no closing backtick: `` see `config ``;
+- a backtick attached to a word with no closing backtick: ``see `config``;
 - a link or image whose target never closes: `[text](https://example.com`;
 - an image mark at the start of a word with nothing after it: `see ![diagram`;
 - a `**` or `__` that can only open or only close: `**bold` with no closing `**`.
@@ -306,7 +306,7 @@ In Hiccup the same expression is written without quotes, and a bare symbol is sh
 A list is a call. The functions are pure, and the first argument is the value they work on:
 
 | Function | Effect |
-|---|---|
+| --- | --- |
 | `ref` | The value at a path (or the literal itself) |
 | `text` | Plain text (Display representation); a list of values is joined with spaces |
 | `to_lower` | Lowercase |
@@ -406,7 +406,7 @@ In Hiccup:
 A link slot or an image slot gives the template a record:
 
 | Slot | Fields |
-|---|---|
+| --- | --- |
 | Link | `href`: where the link points; `text`: the link text |
 | Image | `src`: the image source; `alt`: the alt text (absent when the image has none) |
 
@@ -547,7 +547,7 @@ Each template receives a data context with two reserved names:
 ### Path structure
 
 | Path form | Example | Description |
-|---|---|---|
+| --- | --- | --- |
 | `input.field` | `input.title` | A named slot from the current page; for a heading slot such as `input.title`, the heading's plain text (markup removed) |
 | `input.field.subfield` | `input.author.name` | A nested reference (linked content) |
 | `input.url` | `input.url` | The current page's clean URL |
@@ -611,7 +611,7 @@ Warnings are printed too, but they don't fail the build. A schema that fails to 
 ### CLI flags
 
 | Flag | Description |
-|---|---|
+| --- | --- |
 | `--config <path>` | Load a named URL config file (e.g. `.presemble/github-pages.json`) |
 | `--url-style <relative\|root\|absolute>` | Override the URL style |
 | `--base-path <path>` | Base path prefix for root-relative style (e.g. `/presemble`) |
@@ -637,7 +637,7 @@ presemble fmt --check <site-dir>
 `--check` writes nothing. It lists the files that would change (`path: would be reformatted`) and the same summary.
 
 | Exit code | Meaning |
-|---|---|
+| --- | --- |
 | 0 | Nothing went wrong; with `--check`, every file is already canonical |
 | 1 | `--check` found files that would change |
 | 2 | A file could not be formatted (this wins over 1) |
@@ -690,7 +690,7 @@ The site is published only when no page has an error, so a single outlined eleme
 The serve UI includes a mascot overlay in the corner of every served page. It indicates the current editorial state at a glance:
 
 | State | Indicator | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | Suggestions present | Mascot + badge | One or more suggestion nodes exist on this page |
 | All clear | Thumbs up | No suggestions — all slots are filled |
 | Edit mode | Pencil | Inline editing is active |
@@ -751,7 +751,7 @@ Saving while conflicts are still open works as it always has: you confirm that t
 The serve watcher monitors all source file types that affect the build. Changes to any of the following trigger an incremental rebuild and browser reload:
 
 | Extension | What changes |
-|---|---|
+| --- | --- |
 | `.md` | Content files and schemas |
 | `.html` | HTML templates |
 | `.hiccup` | Hiccup templates |
@@ -764,7 +764,7 @@ Authors always write root-relative URLs in content and templates. The publisher 
 ### URL styles
 
 | Style | Output example | When to use |
-|---|---|---|
+| --- | --- | --- |
 | `relative` (default) | `../../assets/style.css` | Works at any root, zero config |
 | `root` | `/presemble/assets/style.css` | Known subdirectory (e.g. GitHub Pages) |
 | `absolute` | `https://presemble.io/assets/style.css` | RSS, Open Graph, canonical links |
@@ -830,7 +830,7 @@ What you type in a content file reaches the site as you type it.
 ### Content file capabilities
 
 | Capability | Description |
-|---|---|
+| --- | --- |
 | Completions | Slot names from the schema; for link slots, actual content files formatted as `[Title](/type/slug)` |
 | Diagnostics | Schema violations — missing slots, occurrence counts, capitalization, broken link references; blocks that were changed elsewhere (drift); constructs not closed yet; a block (or the whole file) in conflict with the file on disk |
 | Hover | Schema hint text for the slot at the cursor |
@@ -841,7 +841,7 @@ What you type in a content file reaches the site as you type it.
 ### Template file capabilities
 
 | Capability | Description |
-|---|---|
+| --- | --- |
 | Completions | Data-path completions for `data="…"` attributes: `input.*` paths from the matching schema, `item.*` paths inside `data-each` loops, and collection names under `input` for `data-each` values |
 | Diagnostics | Every expression is checked: `input.*` or `item.*` paths referencing fields not declared in the schema (and collections' item schemas), unknown templates and functions, wrong argument counts, and a record or list used as an attribute value |
 | Hover | Schema hint text for the field at the cursor |
@@ -850,7 +850,7 @@ What you type in a content file reaches the site as you type it.
 ### Schema file capabilities
 
 | Capability | Description |
-|---|---|
+| --- | --- |
 | Completions | Element keyword syntax (heading, paragraph, link, image); constraint key/value pairs |
 | Diagnostics | Parse errors at the failing line |
 
@@ -859,7 +859,7 @@ What you type in a content file reaches the site as you type it.
 The server classifies each file by its path within the site directory:
 
 | Prefix | Kind | Capabilities |
-|---|---|---|
+| --- | --- | --- |
 | `content/` | Content | All |
 | `templates/` | Template | Completions, diagnostics, hover, go-to-definition |
 | `schemas/` | Schema | Completions, diagnostics |
@@ -871,7 +871,7 @@ Files outside these prefixes receive no diagnostics.
 Presemble validates at every stage:
 
 | Stage | What is checked |
-|---|---|
+| --- | --- |
 | Schema parse | Schema file grammar — field names, constraint syntax, valid constraint values |
 | Content validation | Each content file structure against its schema — field presence, occurrence counts, content constraints, heading levels |
 | Template checking | Every expression in a template: paths exist in the schema, templates and functions exist, argument counts, no record or list as an attribute value (reported in the editor); an unknown template or a removed spelling fails the page |
@@ -941,7 +941,7 @@ Link expressions make content the place where assembly decisions live. The homep
 A link expression starts with `->>` and a source collection, followed by any number of operations applied in order. The table shows the parenthesised form you can also type at the REPL; in a content file, drop the outer parentheses:
 
 | Expression | Effect |
-|---|---|
+| --- | --- |
 | `(->> :post (sort-by :published :desc) (take 5))` | Latest 5 posts |
 | `(->> :feature (sort-by :title :asc))` | Features sorted by title |
 | `(->> :post (filter :status "pinned"))` | Pinned posts only |
@@ -1013,7 +1013,7 @@ Starts an MCP server that exposes the site to Claude Code and other MCP-capable 
 ### Available tools
 
 | Tool | Description |
-|---|---|
+| --- | --- |
 | `get_content` | Read a content file by type and slug |
 | `get_schema` | Read the schema for a content type |
 | `list_content` | List all content files for a type (goes through conductor `ListContent`) |
@@ -1065,7 +1065,7 @@ Run "Connect to a Running REPL Server" in VS Code and select nREPL. The default 
 Two built-ins query the site's link graph directly:
 
 | Expression | Returns |
-|---|---|
+| --- | --- |
 | `(refs-to "/author/alice")` | All edges pointing to `/author/alice` |
 | `(refs-from "/post/hello")` | All edges originating from `/post/hello` |
 
@@ -1089,7 +1089,7 @@ Opens a full-screen terminal REPL with three panels: output history, a doc panel
 ### Key bindings
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | Enter | Eval when delimiters are balanced; insert newline otherwise |
 | Ctrl+J | Force-eval regardless of balance |
 | Ctrl+O | Force-insert newline |
@@ -1118,7 +1118,7 @@ Run `presemble serve <dir> --dev-session` on an empty directory and open the Log
 ### Steps
 
 | Step | What you choose |
-|---|---|
+| --- | --- |
 | Site type | Blog, personal site, or portfolio |
 | Font mood | One of 7 curated type pairings |
 | Color seed | A hue in degrees (0–360) |
@@ -1135,7 +1135,7 @@ The wizard generates a `StyleConfig` from your choices and passes it to the CSS 
 ### Starter templates
 
 | Template | Contents |
-|---|---|
+| --- | --- |
 | Blog | Post schema, author schema, posts index, homepage |
 | Personal | About page, page schema, homepage |
 | Portfolio | Project schema with image slots, projects index, homepage |
