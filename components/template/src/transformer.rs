@@ -360,7 +360,7 @@ fn render_insert_expression(
                 Form::Str(source.clone()),
             ));
             if editorial {
-                attrs.extend(source_text_attrs(source, &record, &file));
+                attrs.extend(editor_record_attrs(&record, &file));
             }
         }
         if editorial {
@@ -1493,23 +1493,15 @@ fn record_attrs(
             crate::constants::ATTR_SOURCE_SLOT.to_string(),
             Form::Str(source.clone()),
         ));
+        // A synthesized link stands for the title heading of its page, in
+        // whichever slot the grammar keeps it: it carries that heading's
+        // editor record, copied in by `synthesize_link`. Editorial output only.
         if editorial {
-            attrs.extend(source_text_attrs(source, sub_graph, file));
+            attrs.extend(editor_record_attrs(sub_graph, file));
         }
     }
     attrs.extend(editor.iter().cloned());
     attrs
-}
-
-/// A synthesized title link carries the editor attributes of the title heading
-/// it stands for: the address and markdown of the heading's editor record,
-/// copied into the link (`synthesize_link`). Callers emit it only in editorial
-/// output: the render mode alone decides, whatever the record was built for.
-fn source_text_attrs(source_slot: &str, sub_graph: &DataGraph, file: &str) -> Vec<(String, Form)> {
-    if source_slot != "title" {
-        return Vec::new();
-    }
-    editor_record_attrs(sub_graph, file)
 }
 
 /// The editor attributes of the placeholder of an empty slot (editorial output
@@ -2757,6 +2749,39 @@ mod tests {
         // The synthesized title link still carries what the editor needs.
         let html = render_with(&link_graph, r#"<presemble:insert data="(ref link)" />"#);
         assert!(html.contains("data-presemble-md=\"Hello *src*\""), "{html}");
+    }
+
+    /// On the DataGraph path a page link stands for its title heading,
+    /// whatever its slot is called: an author's link edits its `name` heading.
+    #[test]
+    fn a_page_link_carries_its_title_headings_editor_record_whatever_the_slot() {
+        let grammar = schema::parse_schema("# Author name {#name}\noccurs\n: exactly once\n")
+            .expect("schema parses");
+        let doc = content::parse_and_assign("# Joakim Ohlrogge\n", &grammar).expect("parses");
+        let mut graph =
+            crate::data::build_article_graph(&doc, &grammar, crate::data::OutputMode::Editorial);
+        graph.insert(
+            crate::constants::KEY_PRESEMBLE_FILE,
+            Value::Text("content/author/jo.md".to_string()),
+        );
+        let link = crate::data::page_link(&graph, Some(&grammar), "/author/jo", "jo");
+        graph.insert("link", Value::Record(link));
+
+        let html = render_with(&graph, r#"<presemble:insert data="(ref link)" />"#);
+        assert!(
+            html.contains("data-presemble-source-slot=\"name\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("data-presemble-md=\"Joakim Ohlrogge\""),
+            "{html}"
+        );
+        let address = attr_values(&html, "data-presemble-address");
+        assert_eq!(address.len(), 1, "{html}");
+        assert!(
+            address[0].contains("content/author/jo.md") && address[0].contains("\"name\""),
+            "{address:?}"
+        );
     }
 
     /// The editor record of a title heading whose `Content` projection is `md`.
