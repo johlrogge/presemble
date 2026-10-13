@@ -40,8 +40,8 @@ In Edit mode, headings in the content display a fold toggle. Click the toggle to
 
 Clicking anywhere on a collapsed heading section unfolds it. Fold state is not persisted across page reloads — the page always opens fully expanded.
 
-### Dirty buffer tracking
+### Saving
 
-Edits made in the browser or via accepted suggestions are held in the conductor's dirty buffer until explicitly saved. The mascot badge indicates unsaved changes. Save sends the dirty buffer contents to disk and clears the buffer. This separation lets you review several changes before committing any of them to the filesystem.
+Edits made in the browser or via accepted suggestions are saved for you once the document has gone about two seconds without a change, and at once when you hide or leave the page. An indicator shows whether the page's document is saved, unsaved, in conflict with its file, or failed to save; a failed save keeps a banner with Retry until a save succeeds. Save still saves everything at once, and auto-save can be turned off for a site (see [Saving](/guide/user-guide#saving) in the user guide).
 
 When a browser edit triggers a rebuild, the conductor resolves link expressions and cross-content references in the affected page. Feature cards, author links, and any content that depends on linked documents render correctly after a browser edit — no server restart needed.

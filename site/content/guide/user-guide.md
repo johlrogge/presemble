@@ -661,7 +661,7 @@ The server keeps two outputs. Editors, who have a session, see the working copy:
 
 Previewing drafts therefore needs a session. Start the server with `--dev-session` and open the Login URL it prints; plain `presemble serve` shows the published site.
 
-The published site is rebuilt at start-up, after every save, and after any change to a file on disk. While any page fails the publish gate, readers keep seeing the last published version; once the site passes again, they see the new one. Unsaved edits never reach readers.
+The published site is rebuilt at start-up, after every save, and after any change to a file on disk. Saves that come in a burst are published together, and the build starts at most two seconds after the first. While any page fails the publish gate, readers keep seeing the last published version; once the site passes again, they see the new one. Unsaved edits never reach readers.
 
 While serving, the published version lives in a versioned directory beside the output directory (`output/<site>.publishing-<n>`), which the server swaps for the next one in a single step, so there is no moment without a page. `output/<site>/` is written only by `presemble build`.
 
@@ -721,9 +721,27 @@ Suggestions are expressed as NED mutations via `CreateNedSuggestion`. Each sugge
 
 With `--dev-session` and a signed-in browser, the "+" button in the serve toolbar opens a form to create a new content file. Select a content type, enter a slug, and submit. The conductor scaffolds the file and the browser navigates to the new page immediately, with all required slots present as suggestion nodes.
 
-### Dirty buffer tracking
+### Saving
 
-Edits made in the browser and accepted suggestions are held in the conductor's dirty buffer until explicitly saved. The mascot badge shows unsaved changes. Save writes the dirty buffer to disk and clears it. This lets you review several changes before committing any of them to the filesystem.
+Presemble saves for you. An edit is written to its file once the document has gone about two seconds without a change, so there is nothing to remember. Every edit counts: in the browser, in your editor, through MCP or the REPL, and accepted suggestions.
+
+- **The indicator.** At the bottom left of the page, an editor sees where the page's own document stands: *Saved*, *Unsaved*, *Conflict* or *Save failed*. Hover over it for the time of the last save. On a collection page it follows the collection's own `index.md`, not the items it lists.
+- **Leaving saves at once.** Hiding the page (switching tabs, minimising the window) or leaving it saves its document right away.
+- **Invalid content is saved too.** A document with errors is saved like any other. Errors keep the site from being published (see [Publishing gate](#publishing-gate)), not from being saved.
+- **Conflicts are never saved automatically.** A document whose file was changed elsewhere in the same place keeps its edits and shows *Conflict* until you resolve it (see [Changes made outside Presemble](#changes-made-outside-presemble)).
+- **A failed save shows a banner.** If a save fails (a read-only file, a full disk), a *Save failed* banner shows the error. Your edits are kept, Presemble keeps trying, and the banner stays until a save succeeds. *Retry* saves the document at once. If its file changed on disk meanwhile, the banner asks first: *Overwrite the file* writes your edits over it, and *Cancel* leaves the file as it is.
+- **Save** in the toolbar still saves every document at once.
+- **Ctrl-C saves before stopping.** Stopping the server with Ctrl-C saves every document that can be saved first. A document that cannot be saved (one in conflict with its file) is named, because its unsaved edits are lost. Press Ctrl-C again to stop at once.
+
+#### Turning auto-save off
+
+Auto-save is set in the site's `.presemble/config.json`:
+
+```json
+{ "autosave": { "enabled": false } }
+```
+
+`"idle-ms"` changes how long Presemble waits after the last change (2000 by default). With auto-save off, only an explicit save writes a file: *Save*, *Retry*, and `:w` in your editor. Leaving the page saves nothing, and stopping the server names every document whose unsaved edits are lost. Only the running server reads the setting, always from the site's own `.presemble/config.json`, also when `presemble serve` is given another file with `--config`. `presemble build` never reads it.
 
 After a browser edit triggers a rebuild, the conductor resolves link expressions and cross-content references in the rebuilt page. Feature cards, author links, and any content that depends on linked documents render correctly without restarting the server.
 
@@ -822,6 +840,7 @@ What you type in a content file reaches the site as you type it.
 - **Changes made elsewhere come to your buffer.** A change made in the browser, through MCP, by an accepted suggestion, or merged in from the file on disk appears in your open buffer as you go. What you are typing is never overwritten: the buffer follows once your typing has reached the document. A code fence that is not closed yet and a block in drift are never overwritten either.
 - **A block changed in two places is a drift.** If you edit a block that was changed elsewhere since you began editing it, your version is not applied. The block gets a warning with two code actions: *Take the current version* replaces your text with the current one, and *Keep mine* makes your version the document's.
 - **An unfinished construct is held.** While a code fence (or an HTML block that has no end yet) is open, the editor shows an information message: the fence is not closed yet, and the blocks after it are unchanged until you close it. Closing the fence inserts one code block. Saving with the fence still open takes it as it stands.
+- **Saved when you pause.** If the page is also open in your editor, Presemble saves it once your editor shows the same text a save would write, normally right after your pause. `:w` saves at once. While a code fence is open or a block is in drift, Presemble waits until it is settled. A save that fails shows as an error on the first line until the document is saved (see [Saving](#saving)).
 - **`:w` saves.** Saving writes the document. If something else changed the document meanwhile, the file gets the document's text, which includes those changes. If the document already reads as what you saved, the file stays exactly as you wrote it.
 - **A change from outside is merged.** If a program that is not Presemble (a `sed`, a `git checkout`) changes the file while the document has unsaved edits, the change is merged block by block. A block changed both there and here gets a warning with two code actions: *Take the file's version of this block* and *Keep the unsaved version*. Taking the file's version resolves the conflict, and your buffer then follows. When the whole file conflicts, the warning is on the first line and its two code actions, offered on any line, resolve it: *Take the file on disk (discard unsaved edits)* replaces the buffer with the file, and *Keep the unsaved edits (overwrite the file)* writes the document over it. See [Changes made outside Presemble](#changes-made-outside-presemble).
 - **Match the file on disk.** When the buffer and the file mean the same but are spelled differently (`*` and `-` list markers, say), this code action makes the buffer the file's text. It is not offered when the content differs.

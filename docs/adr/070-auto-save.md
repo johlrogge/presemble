@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Proposed (implemented; accepted once the manual checks pass)
 
 ## Context
 
@@ -25,7 +25,8 @@ Proposed
      and untouched for `idle_ms` (default 2000).
    - Every dirty document is flushed at once when the conductor shuts down,
      and when a client sends a flush hint (`Command::FlushDirty`). The browser
-     sends one when its page is hidden or closed, or loses focus.
+     sends one when its page is hidden or closed (see the amendment: not when
+     it loses focus).
    - Auto-save goes through the same save path as an explicit save; there is
      no second writer.
    - A document with a held editor region (an unterminated code fence or HTML
@@ -65,9 +66,9 @@ Proposed
    - A failed save shows a banner that stays until a Retry succeeds.
    - Hovering shows the last save time.
    - The LSP shows Save failed and Conflict as diagnostics.
-9. **Configuration.** `.presemble/config.json` holds
-   `autosave: { enabled, idle_ms }`. It is on by default locally. Builds never
-   read or write it differently.
+9. **Configuration.** `<site>/.presemble/config.json` holds
+   `"autosave": { "enabled": true, "idle-ms": 2000 }`. It is on by default
+   locally. Only the conductor daemon reads it; builds never do.
 10. **Crash protection** is the idle window: at most about `idle_ms` of edits.
     There is no journal.
 
@@ -95,6 +96,66 @@ Proposed
 **Future: templates and schemas.** `presemble fmt` is built to format other kinds of file: each kind needs only a canonical writer. Templates and schemas are intended to follow. Each needs its own decision first (a later ADR):
 - **Templates:** the hiccup reader skips `;` comments, so writing a template back would drop them. Comments must be kept, as content's are (trivia), before templates can be formatted safely. Whether HTML templates keep their comments needs the same check, and the canonical form of each syntax (hiccup, HTML) must be fixed.
 - **Schemas:** there is no schema writer at all yet, only a parser, and the parser is permissive (Wave 4). A canonical schema form needs both: a strict reading, and a writer that round-trips it.
+
+## Amendment (auto-save implementation, 2026-10)
+
+- **Drifted regions wait like held ones.** A document whose open editor has
+  a held or drifted region (ADR-069) is not auto-saved: N does not hold what
+  the editor shows there, so the buffer cannot be brought to the text a save
+  would write. `:w` still saves at once.
+- **An open editor's document waits for canonical text.** It is auto-saved
+  only once the editor holds N's canonical text (ADR-069 amendment). Until
+  then the conductor asks the editor for it (`EditorCanonicalWanted`), and
+  asks again every five idle periods; it never saves on a timer of its own.
+  `:w` and a flush save at once.
+- **A flush saves at once.** Leaving the page (the browser's hint),
+  `FlushDirty` and shutdown save every document that can be saved, without
+  waiting for an editor's canonical text; an editor that had not taken it
+  shows the file as changed on disk, which "Match the file on disk" settles.
+- **Shutdown warns about conflicts.** A document still in conflict with its
+  file when the conductor stops is named in a warning: its unsaved edits are
+  lost with the conductor (ADR-065). Keeping them across a restart is later
+  work.
+- **Ticks.** The conductor's hosts put a tick on the serial writer every
+  250 ms; each save runs there, through the ordinary save path.
+- **The hint on leaving.** The browser sends the flush hint when its page is
+  hidden or left (`visibilitychange` to hidden, `pagehide`), not when the page
+  loses focus. This changes decision 1's "flush on leave". The page's own
+  reload after a rebuild sends no hint. The hint and the save-state indicator
+  are about the page's own document, which the page script names (on a
+  collection page, its `index.md`, not the items it lists).
+- **The configuration key.** `"autosave": { "enabled": true, "idle-ms": 2000 }`
+  in `<site>/.presemble/config.json` (decision 9). Only the conductor daemon
+  reads it, from the site's own file; builds never do.
+- **Auto-save off.** A flush and shutdown save nothing; shutdown names each
+  document with unsaved edits. Only explicit saves write: Save, save-all,
+  `:w`, and Retry.
+- **Retry.** The Save failed banner's Retry is an explicit save of that one
+  document (`POST /_presemble/save`). When the document is in conflict with
+  its file, it offers the conflict choices instead: overwrite the file with
+  the edits, or cancel.
+- **Ctrl-C.** SIGINT and SIGTERM shut the conductor daemon down through its
+  writer, so dirty documents are saved first. A second signal exits at once.
+- **No Saving state.** A save happens within one command, so no client could
+  show it: the states are Saved (with the time, epoch ms), Unsaved, Conflict
+  and Save failed (decision 8).
+- **Publishing.** A published build starts at most 2 s after the first save
+  of a burst, however steadily saves keep coming; saves during a build are
+  coalesced into one build after it (decision 7).
+
+### Done: auto-save
+
+- 0b49c2c: the conductor saves every dirty document after it has been idle.
+- bdff373: flush on request and on shutdown, and the save state of each
+  document.
+- 0925763: the conductor daemon drives auto-save, reads its configuration, and
+  bounds publishing waits; Ctrl-C shuts down through the writer.
+- 1374c31: the language server brings a buffer to canonical text before it is
+  saved, and shows a failed save.
+- e6a6832: the editorial page ignores message types it does not know (a
+  save-state message no longer reloads it).
+- 71c97e4: the page's save state, the Save failed banner with Retry, and the
+  flush when the page is hidden or left.
 
 ## Out of scope
 
