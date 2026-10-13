@@ -1,0 +1,5 @@
+{
+  "message": { "type": "resync" },
+  "pathname": "/post/a",
+  "reloads": true
+}

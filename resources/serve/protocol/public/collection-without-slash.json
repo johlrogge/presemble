@@ -1,0 +1,5 @@
+{
+  "message": { "type": "reload", "pages": ["/post/"] },
+  "pathname": "/post",
+  "reloads": true
+}

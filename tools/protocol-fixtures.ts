@@ -28,6 +28,12 @@
 //   and `decision`: what the page opened at `pathname` does with the reload
 //   (reload in place, navigate to a url, or nothing).
 //
+// Also checked, per fixture in resources/serve/protocol/public/:
+//   readerReloads(message, pathname) — whether a reader's page at `pathname`
+//   reloads for a message of the public socket — gives the fixture's
+//   `reloads`. It lives in resources/serve/reload.js between
+//   `// BEGIN reader-reload` and `// END reader-reload`.
+//
 // Output: `PASS <fixture>` per fixture, `FAIL <fixture> <what>` per mismatch,
 // `SKIP <fixture>` per skipped fixture.
 // Exit 0 if everything matches, 1 otherwise.
@@ -127,16 +133,36 @@ function fixtureNames(sub = ""): string[] {
   return names.sort();
 }
 
-function loadBuilders(): Builders {
-  const source = read("../resources/serve/inject.js");
-  const start = source.indexOf(BEGIN);
-  const end = source.indexOf(END);
-  if (start < 0 || end < 0 || end < start) {
-    throw new Error(`inject.js has no \`${BEGIN}\` … \`${END}\` region`);
+/** The text between `begin` and `end` in resources/serve/`file`. */
+function region(file: string, begin: string, end: string): string {
+  const source = read(`../resources/serve/${file}`);
+  const start = source.indexOf(begin);
+  const stop = source.indexOf(end);
+  if (start < 0 || stop < 0 || stop < start) {
+    throw new Error(`${file} has no \`${begin}\` … \`${end}\` region`);
   }
-  const region = source.slice(start, end);
+  return source.slice(start, stop);
+}
+
+/** Whether a reader's page at `pathname` reloads for a message of the public socket. */
+type ReaderReloads = (message: unknown, pathname: string) => boolean;
+
+/** A message of the public socket, and whether the reader's page at `pathname` reloads. */
+interface PublicFixture {
+  readonly message: unknown;
+  readonly pathname: string;
+  readonly reloads: boolean;
+}
+
+function loadReaderReloads(): ReaderReloads {
+  const code = region("reload.js", "// BEGIN reader-reload", "// END reader-reload");
+  return new Function(`${code}\nreturn readerReloads;`)() as ReaderReloads;
+}
+
+function loadBuilders(): Builders {
+  const code = region("inject.js", BEGIN, END);
   const factory = new Function(
-    `${region}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision };`,
+    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision };`,
   );
   return factory() as Builders;
 }
@@ -236,6 +262,23 @@ function main(): number {
       console.log(`PASS editorial/${name}`);
     } else {
       failures += 1;
+    }
+  }
+  const readerReloads = loadReaderReloads();
+  for (const name of fixtureNames("public/")) {
+    const fixture = JSON.parse(
+      read(`../resources/serve/protocol/public/${name}.json`),
+    ) as PublicFixture;
+    const reloads = readerReloads(fixture.message, fixture.pathname);
+    if (reloads === fixture.reloads) {
+      console.log(`PASS public/${name}`);
+    } else {
+      failures += 1;
+      console.log(
+        `FAIL public/${name} reloads at ${show(fixture.pathname)}: expected ${
+          show(fixture.reloads)
+        }, got ${show(reloads)}`,
+      );
     }
   }
   return failures === 0 ? 0 : 1;
