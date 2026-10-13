@@ -611,6 +611,24 @@ mod tests {
         assert!(outside.is_empty(), "{outside:#?}");
     }
 
+    /// D5: a template chooses a reference's label with an expression: the
+    /// referenced page's fields and its link's href read through the
+    /// `link(author)` slot.
+    #[test]
+    fn a_reference_label_reads_fields_of_the_referenced_page() {
+        let post = schema(
+            "# Post title {#title}\noccurs\n: exactly once\n\n\
+             [<name>](/author/<name>) {#author}\noccurs\n: exactly once\ntype\n: link(author)\n",
+        );
+        let found = check_template(
+            "[:a {:href input.author.link.href} (text input.author.name)]",
+            &post,
+            "post",
+            &site(),
+        );
+        assert!(found.is_empty(), "{found:#?}");
+    }
+
     /// GUARD: a name that is no collection of the site is still reported.
     #[test]
     fn a_field_of_an_unknown_collection_is_still_reported() {

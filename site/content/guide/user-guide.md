@@ -419,6 +419,18 @@ Insert the whole record to render the link or image, or a single field to insert
 
 The first line renders `<img src="…" alt="…">`. The second inserts only the alt text, wrapped in a `<figcaption>`; like any absent value, it is removed when the image has no alt text.
 
+#### Labelling a reference
+
+A link slot that points to another page of the site is a reference to that page. Inserted whole, it shows the target page's title heading: its first level-1 heading, whatever the slot is called. An author page whose schema starts with `# Author name {#name}` is shown by its name.
+
+To show anything else, write the link yourself. Through the reference, `ref` and `text` read any field of the target page, and its `link.href`:
+
+```clojure
+[:a {:href input.author.link.href} (text input.author.name)]
+```
+
+This places `<a href="/author/jo">Joakim Ohlrogge</a>`.
+
 ### `data-each`
 
 Iterate on a `<template>` element. The value of `data-each` is an expression that gives a list. A collection is the list of all the items of a content type, in URL order, found under `input` by the singular schema stem:

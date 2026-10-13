@@ -170,6 +170,40 @@ fn an_editorial_page_link_stands_for_its_title_heading_whatever_its_slot_is_call
     assert!(html.contains(">Joakim Ohlrogge</a>"), "{html}");
 }
 
+/// D5: a template that wants another label for a reference writes the link
+/// itself, reading the referenced page through the reference.
+#[test]
+fn a_template_chooses_a_references_label_with_an_expression() {
+    let (_tmp, site) = author_and_post_site();
+    let site = fs::canonicalize(&site).unwrap();
+    fs::write(
+        site.join("templates/post/item.hiccup"),
+        "[:main [:a {:href input.author.link.href} (text input.author.name)]]",
+    )
+    .unwrap();
+
+    publisher_cli::build_for_publish(&site, &publisher_cli::UrlConfig::default())
+        .expect("the site builds");
+    let published = fs::read_to_string(publisher_cli::output_dir(&site).join("post/p/index.html"))
+        .expect("the published post");
+    assert!(
+        published.contains("<a href=\"/author/jo\">Joakim Ohlrogge</a>"),
+        "{published}"
+    );
+
+    publisher_cli::build_for_serve(&site, &publisher_cli::UrlConfig::default())
+        .expect("the site builds for serve");
+    let editorial =
+        fs::read_to_string(publisher_cli::editorial_output_dir(&site).join("post/p/index.html"))
+            .expect("the editorial post");
+    let link = editorial
+        .split("<a ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("a link in {editorial}"));
+    assert!(link.starts_with("href=\"/author/jo\""), "{link}");
+    assert!(link.contains(">Joakim Ohlrogge</a>"), "{link}");
+}
+
 // ── Read-only validation tests (never call build) ────────────────────────────
 
 #[test]
