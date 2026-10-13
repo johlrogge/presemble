@@ -1,4 +1,5 @@
 mod error;
+mod fmt;
 mod lsp;
 mod serve;
 
@@ -407,6 +408,16 @@ enum Command {
         /// The content file, relative to the site directory (e.g. content/post/x.md)
         file: String,
     },
+    /// Write every file that has a canonical form (content, today) as a save
+    /// would. Exits 1 when --check finds changes, 2 when a file cannot be
+    /// formatted.
+    Fmt {
+        /// Path to the site directory
+        site_dir: String,
+        /// Write nothing; list the files that would be reformatted
+        #[arg(long)]
+        check: bool,
+    },
     /// Start the Presemble LSP server (reads JSON-RPC from stdin, writes to stdout)
     Lsp {
         /// Path to the site directory
@@ -492,6 +503,7 @@ pub fn run() -> Result<(), CliError> {
         }
         Some(Command::Init { site_dir }) => init_site(Path::new(&site_dir)),
         Some(Command::Reload { site_dir, file }) => reload_document(Path::new(&site_dir), &file),
+        Some(Command::Fmt { site_dir, check }) => fmt::run_fmt(Path::new(&site_dir), check),
         Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
         Some(Command::Conductor { site_dir }) => {
             editor_server::run_daemon(Path::new(&site_dir)).map_err(CliError::Render)

@@ -17,6 +17,22 @@ pub enum CliError {
     },
     /// Pages that failed to render during a publish build.
     PagesFailed(usize),
+    /// `presemble fmt --check`: files that are not in their canonical form.
+    NotFormatted(usize),
+    /// `presemble fmt`: files that could not be formatted.
+    FormatFailed(usize),
+}
+
+impl CliError {
+    /// The process exit code for this error: 2 for files `fmt` could not
+    /// format, 1 for everything else (including `fmt --check` finding
+    /// changes).
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            CliError::FormatFailed(_) => 2,
+            _ => 1,
+        }
+    }
 }
 
 impl fmt::Display for CliError {
@@ -34,6 +50,8 @@ impl fmt::Display for CliError {
                 "{errors} validation error(s) in {files} file(s); site not published"
             ),
             CliError::PagesFailed(n) => write!(f, "{n} page(s) failed to render"),
+            CliError::NotFormatted(n) => write!(f, "{n} file(s) would be reformatted"),
+            CliError::FormatFailed(n) => write!(f, "{n} file(s) could not be formatted"),
         }
     }
 }
