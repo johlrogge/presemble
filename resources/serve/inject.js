@@ -157,6 +157,37 @@ function submitOutcomePlan(intent, outcomeKind) {
     after: outcomeKind === 'applied' ? 'dirty-count' : 'none',
   };
 }
+
+// The modes, by the names setMode uses ('schema' is the Structure mode).
+var _MODES = ['edit', 'schema', 'suggest', 'view'];
+
+// What switching from mode `from` to mode `to` does with the open block
+// editor, whose state `editor` is 'none' | 'unchanged' | 'changed' | 'busy'
+// (busy: a submit is in flight).
+// An unchanged editor closes; a busy one refuses any switch; a changed one
+// refuses view and structure but moves between edit and suggest, keeping its
+// text and taking the new mode's save intent.
+function modeSwitchDecision(from, to, editor) {
+  if (from === to) return { kind: 'none' };
+  if (editor === 'none') return { kind: 'switch' };
+  if (editor === 'unchanged') return { kind: 'close-and-switch' };
+  if (editor === 'busy') return { kind: 'refuse', reason: 'saving' };
+  if (to === 'edit') return { kind: 'switch-keeping-editor', intent: 'apply' };
+  if (to === 'suggest') return { kind: 'switch-keeping-editor', intent: 'suggest' };
+  return { kind: 'refuse', reason: 'save-or-cancel' };
+}
+
+// The modes the user can switch to from `current` with the editor in state
+// `editor`, sorted (see modeSwitchDecision).
+function availableModes(current, editor) {
+  if (editor === 'busy') return [current];
+  if (editor === 'changed') {
+    return _MODES.filter(function (m) {
+      return m === current || m === 'edit' || m === 'suggest';
+    });
+  }
+  return _MODES.slice();
+}
 // END protocol-builders
 
 // Single source of truth for the heading text used in scroll anchors (ADR-046).
@@ -280,6 +311,16 @@ var _wsAttempts=0;var _wsLost=false;var _pendingReload=false;
 // The one open block editor (see _openBlockEditor), or null.
 var _activeEditor=null;
 function _editorOpen(){return !!_activeEditor;}
+// The open editor's state for the mode rules (modeSwitchDecision): 'none'
+// when no editor is open.
+function _editorState(){return _activeEditor?_activeEditor.state():'none';}
+// The editor's state changed: the mode buttons follow (availableModes).
+function _editorStateChanged(){if(window._refreshModeControls){window._refreshModeControls();}}
+// Put back the markup a suggestion preview replaced, and forget it.
+function _resetPreview(el){
+el.innerHTML=el.getAttribute('data-presemble-original-html');
+el.removeAttribute('data-presemble-original-html');
+}
 function _requestReload(m){
 var decision=reloadDecision(m,location.pathname);
 if(_editorOpen()){
@@ -942,10 +983,9 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
 icon.onclick=function(e){e.stopPropagation();menu.classList.toggle('open');};
 document.addEventListener('click',function(){menu.classList.remove('open');});
 menu.onclick=function(e){e.stopPropagation();};
-// Leaving a mode: an unchanged editor closes; a changed one stays open and
-// usable (no discard), so the sweep below skips everything it owns.
+// Leaving edit mode: setMode has already closed the editor or kept it (with
+// its text, in the new mode's intent), so the sweep skips everything it owns.
 function cleanupEditing(){
-if(_activeEditor&&!_activeEditor.changed()){_activeEditor.close();}
 var kept=_activeEditor;
 function mine(node){return !!kept&&kept.owns(node);}
 document.querySelectorAll('.presemble-editing').forEach(function(el){if(mine(el)){return;}el.contentEditable='false';el.classList.remove('presemble-editing');});
@@ -1161,11 +1201,10 @@ var _suggestions=[];var _suggestIdx=0;var _suggestPreviewState=null;var _suggest
 var _suggestToolbar=null;
 function _suggestCleanup(){
 document.querySelectorAll('[data-presemble-original-html]').forEach(function(el){
-// An open editor on a previewed element keeps the user's text; its own
-// close restores the markup, and a later cleanup handles the preview.
+// An open editor on a previewed element keeps the user's text; when it
+// closes outside suggest mode it resets the preview itself.
 if(_activeEditor&&_activeEditor.owns(el)){return;}
-el.innerHTML=el.getAttribute('data-presemble-original-html');
-el.removeAttribute('data-presemble-original-html');
+_resetPreview(el);
 });
 document.querySelectorAll('.presemble-suggest-indicator,.presemble-suggest-active,.presemble-suggest-stale').forEach(function(el){
 el.classList.remove('presemble-suggest-indicator','presemble-suggest-active','presemble-suggest-preview-active','presemble-suggest-stale');
@@ -1239,15 +1278,19 @@ _suggestToolbar.querySelector('.presemble-suggest-counter').textContent='('+(_su
 }
 function _suggestHighlight(){
 document.querySelectorAll('.presemble-suggest-active').forEach(function(el){el.classList.remove('presemble-suggest-active','presemble-suggest-preview-active');});
+// An open editor's element keeps the user's text: it is neither reset nor
+// drawn as a preview (it can be one after an edit -> suggest switch).
+function owned(node){return !!_activeEditor&&_activeEditor.owns(node);}
 document.querySelectorAll('[data-presemble-original-html]').forEach(function(el){
-el.innerHTML=el.getAttribute('data-presemble-original-html');
-el.removeAttribute('data-presemble-original-html');
+if(owned(el)){return;}
+_resetPreview(el);
 });
 if(_suggestions.length===0){return;}
 var sug=_suggestions[_suggestIdx];
 var el=_suggestFindTarget(sug);
 _suggestActiveEl=el;
-if(el){
+if(el&&owned(el)){el.classList.add('presemble-suggest-active');}
+else if(el){
 el.classList.add('presemble-suggest-active');
 // NED stale suggestions get a stale class; T6 adds CSS for it
 var isStale=sug._source==='ned'&&sug.status&&typeof sug.status==='object'&&sug.status.Stale;
@@ -1491,7 +1534,39 @@ _suggestHighlight();
 })
 .catch(function(err){console.warn('presemble: suggest mode render failed',err);_toast('Could not show suggestions: '+err.message);});
 }
+// The one place the mode changes: the mode buttons and the hash route both
+// come here. An open editor closes (unchanged), stays with the new mode's
+// save intent (changed, edit <-> suggest) or refuses the switch (changed, to
+// view or structure; or busy saving) — see modeSwitchDecision.
+var _REFUSAL_MESSAGES={'save-or-cancel':'Save or cancel your edit first','saving':'Saving…'};
+function _refreshModeControls(){
+var state=_editorState();
+var available=availableModes(mode,state);
+var why=_REFUSAL_MESSAGES[state==='busy'?'saving':'save-or-cancel'];
+[['view',viewBtn],['edit',editBtn],['suggest',suggestBtn],['schema',structureBtn]].forEach(function(pair){
+var ok=available.indexOf(pair[0])>=0;
+pair[1].disabled=!ok;
+pair[1].title=ok?'':why;
+});
+}
+// Put the hash back to the current mode without a hashchange (a refused
+// switch that came from the address bar).
+function _restoreModeHash(){
+var url=location.pathname+location.search;
+if(mode==='edit'||mode==='suggest'){url+='#_'+mode;}
+history.replaceState(null,'',url);
+}
 function setMode(m){
+var decision=modeSwitchDecision(mode,m,_editorState());
+if(decision.kind==='none'){menu.classList.remove('open');return;}
+if(decision.kind==='refuse'){
+if(_handlingHashChange){_restoreModeHash();}
+_toast(_REFUSAL_MESSAGES[decision.reason]);
+_activeEditor.focus();
+return;
+}
+if(decision.kind==='close-and-switch'){_activeEditor.close();}
+if(decision.kind==='switch-keeping-editor'){_activeEditor.setIntent(decision.intent);}
 if(m!=='edit'){cleanupEditing();_editCleanup();}
 if(m!=='suggest'){_suggestCleanup();}
 mode=m;
@@ -1499,6 +1574,7 @@ menu.classList.remove('open');
 update();
 if(m==='edit'){_editEnter();}
 if(m==='suggest'){_suggestEnter();}else{_fetchSuggestionCount();}
+_refreshModeControls();
 // Update the URL hash to reflect the new mode, unless we are already
 // responding to a hashchange (which would create an infinite loop).
 if(!_handlingHashChange){setPresembleMode(m);}
@@ -1639,6 +1715,8 @@ window._fetchSuggestionCount=_fetchSuggestionCount;
 window._suggestEnter=_suggestEnter;
 window._fetchSuggestionFiles=_fetchSuggestionFiles;
 window._foldToggle=function(el){_foldToggle(el);};
+window._refreshModeControls=_refreshModeControls;
+_refreshModeControls();
 })();
 // BEGIN pure-text-helpers
 // Pure functions, no DOM: tools/text-vectors.ts evaluates this region and
@@ -1756,9 +1834,12 @@ suggest:{button:'presemble-suggest-inline',icon:'&#128172;',title:'Suggest',canc
 // Open the block editor on `el` with `intent` ('apply' | 'suggest') and make
 // it the active one. A body block is edited in a textarea in its place; any
 // other element inline (contenteditable), as the server's markdown for it.
-// Returns {intent, changed(), owns(node), submit(), close()}, or null (with a toast) when
-// the server gave the element no address or markdown. close() cancels: the
-// rendered markup comes back. Every close ends in _onEditorClosed().
+// Returns {intent, setIntent(intent), state(), changed(), owns(node), focus(),
+// submit(), close()}, or null (with a toast) when the server gave the element
+// no address or markdown. close() cancels: the rendered markup comes back.
+// What saving does is read from `intent` at submit time: switching between
+// edit and suggest mode changes it while the editor is open (setIntent).
+// Every close ends in _onEditorClosed().
 function _openBlockEditor(el,intent){
 var labels=_EDITOR_INTENTS[intent];
 var body=el.getAttribute('data-presemble-slot')==='body';
@@ -1804,14 +1885,19 @@ function finish(restoreMarkup){
 ac.abort();
 if(body){el.style.display='';ta.remove();}
 else{if(restoreMarkup){el.innerHTML=savedHtml;}setEditable(false);}
+// Opened on a suggestion preview and closed outside suggest mode: the
+// preview it put back is stale there, so show the page's own markup.
+if(el.hasAttribute('data-presemble-original-html')&&!document.body.classList.contains('presemble-suggest-mode')){_resetPreview(el);}
 el.classList.remove('presemble-editing');
 toolbar.remove();
 if(errEl){errEl.remove();errEl=null;}
 var err=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
 if(err){err.remove();}
 if(_activeEditor===editor){_activeEditor=null;}
+_editorStateChanged();
 _onEditorClosed();
 }
+function state(){return busy?'busy':(_sameMd(text(),original)?'unchanged':'changed');}
 // On failure the editor stays open with the user's text.
 function fail(msg){
 busy=false;
@@ -1819,28 +1905,50 @@ _setToolbarBusy(toolbar,false);
 setReadOnly(false);
 errEl=_showEditError(toolbar,errEl,msg);
 focus();
+_editorStateChanged();
 }
 function submit(){
 if(busy){return;}
+// What saving does now: the intent may have changed since the editor opened.
+var now=editor.intent;
+var nowLabels=_EDITOR_INTENTS[now];
 var value=text();
 if(_sameMd(value,original)){finish(true);return;}
-if(!file){console.error('block editor submit without a file',el);fail(labels.noFile);return;}
+if(!file){console.error('block editor submit without a file',el);fail(nowLabels.noFile);return;}
 busy=true;
 _setToolbarBusy(toolbar,true);
 setReadOnly(true);
-_postBlockEdit(buildBlockEditRequest(file,target.address,original,value,intent)).then(function(outcome){
-var plan=submitOutcomePlan(intent,outcome.kind);
-if(plan.keepOpen){fail(outcome.message||labels.refused);return;}
+_editorStateChanged();
+_postBlockEdit(buildBlockEditRequest(file,target.address,original,value,now)).then(function(outcome){
+var plan=submitOutcomePlan(now,outcome.kind);
+if(plan.keepOpen){fail(outcome.message||nowLabels.refused);return;}
 busy=false;
 finish(plan.restoreMarkup);
 if(plan.after==='dirty-count'){if(window._fetchDirtyCount){window._fetchDirtyCount();}}
 else if(plan.after==='after-suggest'){_afterSuggest(outcome);}
 }).catch(function(err){
-fail(err.message||labels.failed);
+fail(err.message||nowLabels.failed);
 });
+}
+// Change what saving does (edit <-> suggest mode): the primary button's
+// class, icon and title and the undo title follow; the text, the caret and
+// any error stay as they are.
+function setIntent(next){
+var from=_EDITOR_INTENTS[editor.intent];
+var to=_EDITOR_INTENTS[next];
+var primary=toolbar.querySelector('.'+from.button);
+primary.classList.remove(from.button);
+primary.classList.add(to.button);
+primary.innerHTML=to.icon;
+primary.title=to.title;
+toolbar.querySelector('.presemble-undo').title=to.cancel;
+editor.intent=next;
 }
 var editor={
 intent:intent,
+setIntent:setIntent,
+state:state,
+focus:focus,
 changed:function(){return !_sameMd(text(),original);},
 // Whether `node` is part of this editor (the element, its textarea, toolbar
 // or error message).
@@ -1854,7 +1962,15 @@ toolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation
 if(!body&&ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();submit();}
 if(ev.key==='Escape'&&!busy){finish(true);}
 },{signal:ac.signal});
+// The mode buttons follow the editor's state; typing only matters when it
+// moves the editor between unchanged and changed.
+var lastState=state();
+(body?ta:el).addEventListener('input',function(){
+var now=state();
+if(now!==lastState){lastState=now;_editorStateChanged();}
+},{signal:ac.signal});
 _activeEditor=editor;
+_editorStateChanged();
 return editor;
 }
 

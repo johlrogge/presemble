@@ -43,6 +43,12 @@
 //   submitOutcomePlan(intent, outcome) — what the block editor does once the
 //   server has answered a submit — gives the fixture's `plan`.
 //
+// Also checked, per fixture in resources/serve/protocol/mode-switch/:
+//   decision-*  — modeSwitchDecision(from, to, editor) — what switching mode
+//                 does with the open block editor — gives the fixture's
+//                 `decision`;
+//   available-* — availableModes(current, editor) gives its `available`.
+//
 // Also checked, per path in PAGE_PATH_VECTORS: both copies of the page path
 // normaliser (inject.js `_samePagePath`, reload.js `samePagePath`) give the
 // same, expected form.
@@ -104,6 +110,38 @@ interface Builders {
   suggestionListUrl(files: readonly string[]): string | null;
   /** What the block editor does once the server has answered a submit. */
   submitOutcomePlan(intent: "apply" | "suggest", outcomeKind: Outcome["kind"]): SubmitPlan;
+  /** What switching mode does with the open block editor. */
+  modeSwitchDecision(from: Mode, to: Mode, editor: EditorState): ModeSwitchDecision;
+  /** The modes the user can switch to, sorted. */
+  availableModes(current: Mode, editor: EditorState): Mode[];
+}
+
+/** The modes, by the names setMode uses (`schema` is the Structure mode). */
+type Mode = "view" | "edit" | "suggest" | "schema";
+
+/** The open block editor's state; `busy` while a submit is in flight. */
+type EditorState = "none" | "unchanged" | "changed" | "busy";
+
+type ModeSwitchDecision =
+  | { readonly kind: "none" }
+  | { readonly kind: "switch" }
+  | { readonly kind: "close-and-switch" }
+  | { readonly kind: "refuse"; readonly reason: "save-or-cancel" | "saving" }
+  | { readonly kind: "switch-keeping-editor"; readonly intent: "apply" | "suggest" };
+
+/** A mode switch with the editor in a state, and what it does. */
+interface DecisionFixture {
+  readonly from: Mode;
+  readonly to: Mode;
+  readonly editor: EditorState;
+  readonly decision: ModeSwitchDecision;
+}
+
+/** The modes available from `current` with the editor in a state. */
+interface AvailableFixture {
+  readonly current: Mode;
+  readonly editor: EditorState;
+  readonly available: readonly Mode[];
 }
 
 /** What the block editor does after the server's answer to a submit. */
@@ -217,7 +255,7 @@ function loadReader(): Reader {
 function loadBuilders(): Builders {
   const code = region("inject.js", BEGIN, END);
   const factory = new Function(
-    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision, samePagePath: _samePagePath, pageFiles: pageFiles, suggestionListUrl: suggestionListUrl, submitOutcomePlan: submitOutcomePlan };`,
+    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision, samePagePath: _samePagePath, pageFiles: pageFiles, suggestionListUrl: suggestionListUrl, submitOutcomePlan: submitOutcomePlan, modeSwitchDecision: modeSwitchDecision, availableModes: availableModes };`,
   );
   return factory() as Builders;
 }
@@ -367,6 +405,30 @@ function main(): number {
       console.log(
         `FAIL editor-submit/${name} plan: expected ${show(fixture.plan)}, got ${show(plan)}`,
       );
+    }
+  }
+  for (const name of fixtureNames("mode-switch/")) {
+    const text = read(`../resources/serve/protocol/mode-switch/${name}.json`);
+    let expected: unknown;
+    let got: unknown;
+    if (name.startsWith("decision-")) {
+      const fixture = JSON.parse(text) as DecisionFixture;
+      expected = fixture.decision;
+      got = builders.modeSwitchDecision(fixture.from, fixture.to, fixture.editor);
+    } else if (name.startsWith("available-")) {
+      const fixture = JSON.parse(text) as AvailableFixture;
+      expected = fixture.available;
+      got = builders.availableModes(fixture.current, fixture.editor);
+    } else {
+      failures += 1;
+      console.log(`FAIL mode-switch/${name}: name must start with decision- or available-`);
+      continue;
+    }
+    if (show(got) === show(expected)) {
+      console.log(`PASS mode-switch/${name}`);
+    } else {
+      failures += 1;
+      console.log(`FAIL mode-switch/${name}: expected ${show(expected)}, got ${show(got)}`);
     }
   }
   const reader = loadReader();

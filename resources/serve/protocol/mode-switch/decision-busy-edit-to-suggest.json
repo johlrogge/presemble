@@ -1,0 +1,6 @@
+{
+  "from": "edit",
+  "to": "suggest",
+  "editor": "busy",
+  "decision": { "kind": "refuse", "reason": "saving" }
+}

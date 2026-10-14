@@ -1,0 +1,5 @@
+{
+  "current": "view",
+  "editor": "none",
+  "available": ["edit", "schema", "suggest", "view"]
+}

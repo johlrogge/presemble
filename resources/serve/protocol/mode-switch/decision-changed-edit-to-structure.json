@@ -1,0 +1,6 @@
+{
+  "from": "edit",
+  "to": "schema",
+  "editor": "changed",
+  "decision": { "kind": "refuse", "reason": "save-or-cancel" }
+}

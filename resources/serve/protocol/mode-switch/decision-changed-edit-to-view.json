@@ -1,0 +1,6 @@
+{
+  "from": "edit",
+  "to": "view",
+  "editor": "changed",
+  "decision": { "kind": "refuse", "reason": "save-or-cancel" }
+}

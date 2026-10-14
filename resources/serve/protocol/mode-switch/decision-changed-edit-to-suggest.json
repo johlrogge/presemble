@@ -1,0 +1,6 @@
+{
+  "from": "edit",
+  "to": "suggest",
+  "editor": "changed",
+  "decision": { "kind": "switch-keeping-editor", "intent": "suggest" }
+}

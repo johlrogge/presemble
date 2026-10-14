@@ -1,0 +1,6 @@
+{
+  "from": "view",
+  "to": "edit",
+  "editor": "none",
+  "decision": { "kind": "switch" }
+}
