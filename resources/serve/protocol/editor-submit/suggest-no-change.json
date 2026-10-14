@@ -1,0 +1,5 @@
+{
+  "intent": "suggest",
+  "outcome": "no-change",
+  "plan": { "keepOpen": false, "restoreMarkup": true, "after": "after-suggest" }
+}

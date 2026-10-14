@@ -1,0 +1,5 @@
+{
+  "intent": "apply",
+  "outcome": "no-change",
+  "plan": { "keepOpen": false, "restoreMarkup": true, "after": "none" }
+}

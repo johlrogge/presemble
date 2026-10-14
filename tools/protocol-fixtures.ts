@@ -39,6 +39,10 @@
 //   [data-presemble-file] values — gives the fixture's `files`, and
 //   suggestionListUrl(files) gives its `url` (null: nothing to ask for).
 //
+// Also checked, per fixture in resources/serve/protocol/editor-submit/:
+//   submitOutcomePlan(intent, outcome) — what the block editor does once the
+//   server has answered a submit — gives the fixture's `plan`.
+//
 // Also checked, per path in PAGE_PATH_VECTORS: both copies of the page path
 // normaliser (inject.js `_samePagePath`, reload.js `samePagePath`) give the
 // same, expected form.
@@ -98,6 +102,25 @@ interface Builders {
   pageFiles(values: readonly string[]): string[];
   /** The URL listing the suggestions of `files`; null for none. */
   suggestionListUrl(files: readonly string[]): string | null;
+  /** What the block editor does once the server has answered a submit. */
+  submitOutcomePlan(intent: "apply" | "suggest", outcomeKind: Outcome["kind"]): SubmitPlan;
+}
+
+/** What the block editor does after the server's answer to a submit. */
+interface SubmitPlan {
+  /** A refusal: the editor stays open with the user's text. */
+  readonly keepOpen: boolean;
+  /** Put the rendered markup back (inline editor only). */
+  readonly restoreMarkup: boolean;
+  /** What to refresh after closing. */
+  readonly after: "dirty-count" | "after-suggest" | "none";
+}
+
+/** An intent, the outcome the server answered with, and the editor's plan. */
+interface EditorSubmitFixture {
+  readonly intent: "apply" | "suggest";
+  readonly outcome: Outcome["kind"];
+  readonly plan: SubmitPlan;
 }
 
 /** A page's `[data-presemble-file]` values, the documents it shows and the URL of their suggestions. */
@@ -194,7 +217,7 @@ function loadReader(): Reader {
 function loadBuilders(): Builders {
   const code = region("inject.js", BEGIN, END);
   const factory = new Function(
-    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision, samePagePath: _samePagePath, pageFiles: pageFiles, suggestionListUrl: suggestionListUrl };`,
+    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision, samePagePath: _samePagePath, pageFiles: pageFiles, suggestionListUrl: suggestionListUrl, submitOutcomePlan: submitOutcomePlan };`,
   );
   return factory() as Builders;
 }
@@ -330,6 +353,20 @@ function main(): number {
       console.log(`PASS page-files/${name}`);
     } else {
       failures += 1;
+    }
+  }
+  for (const name of fixtureNames("editor-submit/")) {
+    const fixture = JSON.parse(
+      read(`../resources/serve/protocol/editor-submit/${name}.json`),
+    ) as EditorSubmitFixture;
+    const plan = builders.submitOutcomePlan(fixture.intent, fixture.outcome);
+    if (show(plan) === show(fixture.plan)) {
+      console.log(`PASS editor-submit/${name}`);
+    } else {
+      failures += 1;
+      console.log(
+        `FAIL editor-submit/${name} plan: expected ${show(fixture.plan)}, got ${show(plan)}`,
+      );
     }
   }
   const reader = loadReader();

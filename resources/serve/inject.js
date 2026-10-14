@@ -138,6 +138,25 @@ function suggestionListUrl(files) {
     return 'file=' + encodeURIComponent(f);
   }).join('&');
 }
+
+// What the block editor does once the server has answered a submit with
+// `intent` ('apply' | 'suggest'): keep it open (a refusal: the user's text
+// stays), put the rendered markup back (inline editor only; the body editor
+// never changes the rendered element), and what to refresh after closing.
+function submitOutcomePlan(intent, outcomeKind) {
+  if (outcomeKind === 'refused') {
+    return { keepOpen: true, restoreMarkup: false, after: 'none' };
+  }
+  // A suggestion is not an edit: the page shows the original again.
+  if (intent === 'suggest') {
+    return { keepOpen: false, restoreMarkup: true, after: 'after-suggest' };
+  }
+  return {
+    keepOpen: false,
+    restoreMarkup: outcomeKind === 'no-change',
+    after: outcomeKind === 'applied' ? 'dirty-count' : 'none',
+  };
+}
 // END protocol-builders
 
 // Single source of truth for the heading text used in scroll anchors (ADR-046).
@@ -184,7 +203,7 @@ function _toast(msg, sticky) {
   }
 }
 
-// Editor-session helpers shared by the four inline editors.
+// Editor-session helpers of the block editor (_openBlockEditor).
 function _setToolbarBusy(toolbar, busy) {
   toolbar.querySelectorAll('button').forEach(function(b) { b.disabled = busy; });
   toolbar.classList.toggle('presemble-busy', busy);
@@ -258,7 +277,9 @@ function parsePresembleHash(hash) {
 
 // --- Live-reload socket + reload deferral while an editor is open ---
 var _wsAttempts=0;var _wsLost=false;var _pendingReload=false;
-function _editorOpen(){return !!document.querySelector('.presemble-editing,.presemble-body-editor');}
+// The one open block editor (see _openBlockEditor), or null.
+var _activeEditor=null;
+function _editorOpen(){return !!_activeEditor;}
 function _requestReload(m){
 var decision=reloadDecision(m,location.pathname);
 if(_editorOpen()){
@@ -921,7 +942,16 @@ if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded'
 icon.onclick=function(e){e.stopPropagation();menu.classList.toggle('open');};
 document.addEventListener('click',function(){menu.classList.remove('open');});
 menu.onclick=function(e){e.stopPropagation();};
-function cleanupEditing(){document.querySelectorAll('.presemble-editing').forEach(function(el){el.contentEditable='false';el.classList.remove('presemble-editing');});document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){el.remove();});_onEditorClosed();}
+// Leaving a mode: an unchanged editor closes; a changed one stays open and
+// usable (no discard), so the sweep below skips everything it owns.
+function cleanupEditing(){
+if(_activeEditor&&!_activeEditor.changed()){_activeEditor.close();}
+var kept=_activeEditor;
+function mine(node){return !!kept&&kept.owns(node);}
+document.querySelectorAll('.presemble-editing').forEach(function(el){if(mine(el)){return;}el.contentEditable='false';el.classList.remove('presemble-editing');});
+document.querySelectorAll('.presemble-edit-toolbar,.presemble-edit-error,.presemble-link-picker').forEach(function(el){if(mine(el)){return;}el.remove();});
+_onEditorClosed();
+}
 var _editToolbar=null;
 // Save every unsaved document. If some changed on disk while they have unsaved
 // edits here, the server writes nothing and lists them: warn first, then
@@ -1131,6 +1161,9 @@ var _suggestions=[];var _suggestIdx=0;var _suggestPreviewState=null;var _suggest
 var _suggestToolbar=null;
 function _suggestCleanup(){
 document.querySelectorAll('[data-presemble-original-html]').forEach(function(el){
+// An open editor on a previewed element keeps the user's text; its own
+// close restores the markup, and a later cleanup handles the preview.
+if(_activeEditor&&_activeEditor.owns(el)){return;}
 el.innerHTML=el.getAttribute('data-presemble-original-html');
 el.removeAttribute('data-presemble-original-html');
 });
@@ -1712,96 +1745,146 @@ function mascotState(mode, suggestions, dirty, errors, warnings) {
 }
 
 // END page-status
-document.addEventListener('click',function(e){
-if(!document.body.classList.contains('presemble-edit-mode')){return;}
-var el=e.target.closest('[data-presemble-slot]');
-if(!el||el.classList.contains('presemble-editing')){return;}
-// An editor is already open: commit it and stop. The save is async and may
-// fail (the editor then stays open with the user's text), so never open a
-// second editor on top of it.
-var editing=document.querySelector('.presemble-editing');
-var openTa=document.querySelector('.presemble-body-editor');
-if(editing||openTa){
-e.preventDefault();
-var pendingSave=null;
-if(openTa){
-pendingSave=openTa.nextElementSibling&&openTa.nextElementSibling.querySelector('.presemble-save');
-if(!pendingSave){pendingSave=openTa.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');}
-}else{
-pendingSave=editing.nextElementSibling&&editing.nextElementSibling.querySelector('.presemble-save');
-if(!pendingSave){pendingSave=editing.parentNode.querySelector('.presemble-edit-toolbar .presemble-save');}
-}
-if(pendingSave&&!pendingSave.disabled){pendingSave.click();}
-return;
-}
-if(el.getAttribute('data-presemble-slot')==='body'){
-if(el.classList.contains('presemble-heading-folded')){e.preventDefault();if(window._foldToggle){window._foldToggle(el);}return;}
-e.preventDefault();
-var bfile=el.getAttribute('data-presemble-file');
-if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-// The server's address and markdown for this block; without both it is not editable.
-var btarget=_editTargetOf(el);
-if(!btarget){_toast(_NOT_EDITABLE_MSG);return;}
-var bmd=btarget.md;
+
+// What saving does in each intent: the primary button, the undo button's
+// title and the messages. The class names are what CSS and the smoketest use.
+var _EDITOR_INTENTS={
+apply:{button:'presemble-save',icon:'&#10003;',title:'Save',cancel:'Undo',refused:'Edit refused',failed:'Edit failed',noFile:'Cannot save: missing file attribute on element. This is a bug — please report.'},
+suggest:{button:'presemble-suggest-inline',icon:'&#128172;',title:'Suggest',cancel:'Cancel',refused:'Suggest refused',failed:'Suggest failed',noFile:'Cannot suggest: missing file attribute on element. This is a bug — please report.'}
+};
+
+// Open the block editor on `el` with `intent` ('apply' | 'suggest') and make
+// it the active one. A body block is edited in a textarea in its place; any
+// other element inline (contenteditable), as the server's markdown for it.
+// Returns {intent, changed(), owns(node), submit(), close()}, or null (with a toast) when
+// the server gave the element no address or markdown. close() cancels: the
+// rendered markup comes back. Every close ends in _onEditorClosed().
+function _openBlockEditor(el,intent){
+var labels=_EDITOR_INTENTS[intent];
+var body=el.getAttribute('data-presemble-slot')==='body';
+var file=el.getAttribute('data-presemble-file');
+if(!file&&body){var fEl=document.querySelector('[data-presemble-file]');if(fEl){file=fEl.getAttribute('data-presemble-file');}}
+// The server's address and markdown for this element; without both it is not editable.
+var target=_editTargetOf(el);
+if(!target){_toast(_NOT_EDITABLE_MSG);return null;}
+var original=target.md;
+var toolbar=document.createElement('div');
+toolbar.className='presemble-edit-toolbar';
+toolbar.innerHTML='<button class="'+labels.button+'" title="'+labels.title+'">'+labels.icon+'</button><button class="presemble-undo" title="'+labels.cancel+'">&#8630;</button>';
+var ac=new AbortController();
+var busy=false;
+var errEl=null;
+// The surface the user types in: a textarea for a body block, the element
+// itself otherwise.
+var ta=null;
+var savedHtml=null;
+function setEditable(on){if(on){el.contentEditable='true';}else{el.contentEditable='false';}}
+function text(){return body?ta.value:_editedText(el);}
+function setReadOnly(ro){if(body){ta.readOnly=ro;}else{setEditable(!ro);}}
+function focus(){(body?ta:el).focus();}
+if(body){
 el.style.display='none';
-var ta=document.createElement('textarea');
+ta=document.createElement('textarea');
 ta.className='presemble-body-editor';
-ta.value=bmd;
+ta.value=original;
 el.parentNode.insertBefore(ta,el.nextSibling);
-ta.focus();
-var btoolbar=document.createElement('div');
-btoolbar.className='presemble-edit-toolbar';
-btoolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
-ta.after(btoolbar);
+ta.after(toolbar);
+}else{
+savedHtml=el.innerHTML;
+el.innerText=original;
+setEditable(true);
+el.after(toolbar);
+}
 el.classList.add('presemble-editing');
-var bac=new AbortController();
-var bbusy=false;
-var berrEl=null;
-function bcleanup(){
-bac.abort();
-el.style.display='';
+focus();
+if(!body&&!el.textContent.trim()){var r=document.createRange();r.selectNodeContents(el);r.collapse(true);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}
+// Close the editor; `restoreMarkup` puts the rendered markup back (inline only:
+// a body block's rendered element is never changed).
+function finish(restoreMarkup){
+ac.abort();
+if(body){el.style.display='';ta.remove();}
+else{if(restoreMarkup){el.innerHTML=savedHtml;}setEditable(false);}
 el.classList.remove('presemble-editing');
-ta.remove();
-btoolbar.remove();
-if(berrEl){berrEl.remove();berrEl=null;}
-var berr=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
-if(berr){berr.remove();}
+toolbar.remove();
+if(errEl){errEl.remove();errEl=null;}
+var err=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
+if(err){err.remove();}
+if(_activeEditor===editor){_activeEditor=null;}
 _onEditorClosed();
 }
 // On failure the editor stays open with the user's text.
-var bfail=function(msg){
-bbusy=false;
-_setToolbarBusy(btoolbar,false);
-ta.readOnly=false;
-berrEl=_showEditError(btoolbar,berrEl,msg);
-ta.focus();
-};
-function bsave(){
-if(bbusy){return;}
-var bvalue=ta.value;
-if(_sameMd(bvalue,bmd)){bcleanup();return;}
-if(!bfile){console.error('bsave called without bfile',el);bfail('Cannot save: missing file attribute on element. This is a bug — please report.');return;}
-bbusy=true;
-_setToolbarBusy(btoolbar,true);
-ta.readOnly=true;
-_postBlockEdit(buildBlockEditRequest(bfile,btarget.address,bmd,bvalue,'apply')).then(function(outcome){
-if(outcome.kind==='refused'){bfail(outcome.message||'Edit refused');return;}
-bbusy=false;
-bcleanup();
-if(outcome.kind==='applied'&&window._fetchDirtyCount){window._fetchDirtyCount();}
+function fail(msg){
+busy=false;
+_setToolbarBusy(toolbar,false);
+setReadOnly(false);
+errEl=_showEditError(toolbar,errEl,msg);
+focus();
+}
+function submit(){
+if(busy){return;}
+var value=text();
+if(_sameMd(value,original)){finish(true);return;}
+if(!file){console.error('block editor submit without a file',el);fail(labels.noFile);return;}
+busy=true;
+_setToolbarBusy(toolbar,true);
+setReadOnly(true);
+_postBlockEdit(buildBlockEditRequest(file,target.address,original,value,intent)).then(function(outcome){
+var plan=submitOutcomePlan(intent,outcome.kind);
+if(plan.keepOpen){fail(outcome.message||labels.refused);return;}
+busy=false;
+finish(plan.restoreMarkup);
+if(plan.after==='dirty-count'){if(window._fetchDirtyCount){window._fetchDirtyCount();}}
+else if(plan.after==='after-suggest'){_afterSuggest(outcome);}
 }).catch(function(err){
-bfail(err.message||'Edit failed');
+fail(err.message||labels.failed);
 });
 }
-btoolbar.querySelector('.presemble-save').onclick=function(ev){ev.stopPropagation();bsave();};
-btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();bcleanup();};
-ta.addEventListener('keydown',function(ev){
-if(ev.key==='Escape'&&!bbusy){bcleanup();}
-},{signal:bac.signal});
+var editor={
+intent:intent,
+changed:function(){return !_sameMd(text(),original);},
+// Whether `node` is part of this editor (the element, its textarea, toolbar
+// or error message).
+owns:function(node){return node===el||node===ta||node===toolbar||(!!errEl&&node===errEl);},
+submit:submit,
+close:function(){finish(true);}
+};
+toolbar.querySelector('.'+labels.button).onclick=function(ev){ev.stopPropagation();submit();};
+toolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();finish(true);};
+(body?ta:el).addEventListener('keydown',function(ev){
+if(!body&&ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();submit();}
+if(ev.key==='Escape'&&!busy){finish(true);}
+},{signal:ac.signal});
+_activeEditor=editor;
+return editor;
+}
+
+// A click on an addressable element in edit mode (intent apply) or suggest
+// mode (intent suggest) opens the block editor on it.
+document.addEventListener('click',function(e){
+var intent=document.body.classList.contains('presemble-edit-mode')?'apply'
+:document.body.classList.contains('presemble-suggest-mode')?'suggest':null;
+if(!intent){return;}
+var el=e.target.closest('[data-presemble-slot]');
+if(!el||el.classList.contains('presemble-editing')){return;}
+// An editor is already open: submit it and stop. The submit is async and may
+// fail (the editor then stays open with the user's text), so never open a
+// second editor on top of it.
+if(_activeEditor){
+e.preventDefault();
+_activeEditor.submit();
+return;
+}
+var slot=el.getAttribute('data-presemble-slot');
+if(slot==='body'){
+e.preventDefault();
+if(el.classList.contains('presemble-heading-folded')){if(window._foldToggle){window._foldToggle(el);}return;}
+_openBlockEditor(el,intent);
 return;
 }
 if(el.tagName==='IMG'){return;}
-if(el.tagName==='A'&&!el.getAttribute('data-presemble-source-slot')){
+// In edit mode a link (not one shown from another slot) is changed by
+// picking a target; in suggest mode it is edited inline as markdown.
+if(intent==='apply'&&el.tagName==='A'&&!el.getAttribute('data-presemble-source-slot')){
 e.preventDefault();
 var afile=el.getAttribute('data-presemble-file');
 var aslot=el.getAttribute('data-presemble-slot');
@@ -1849,200 +1932,12 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'){lac.abort()
 }).catch(function(err){_toast('Could not load link options: '+err.message);});
 return;
 }
-e.preventDefault();
+// Edit mode swallowed the click before checking the element (as it always
+// did); suggest mode only once the element is known to be editable.
+if(intent==='apply'){e.preventDefault();}
 var pfile=el.getAttribute('data-presemble-file');
-var slot=el.getAttribute('data-presemble-slot');
 if(!pfile||!slot){return;}
-// The element is edited as the server's markdown for it, addressed by the
-// server's address; without both it is not editable. Cancelling restores the
-// rendered markup.
-var target=_editTargetOf(el);
-if(!target){_toast(_NOT_EDITABLE_MSG);return;}
-var savedHtml=el.innerHTML;
-var original=target.md;
-function restore(){el.innerHTML=savedHtml;}
-el.innerText=original;
-el.contentEditable='true';
-el.classList.add('presemble-editing');
-el.focus();
-if(!el.textContent.trim()){var r=document.createRange();r.selectNodeContents(el);r.collapse(true);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}
-var toolbar=document.createElement('div');
-toolbar.className='presemble-edit-toolbar';
-toolbar.innerHTML='<button class="presemble-save" title="Save">&#10003;</button><button class="presemble-undo" title="Undo">&#8630;</button>';
-el.after(toolbar);
-var ac=new AbortController();
-var busy=false;
-var errEl=null;
-function cleanup(){
-ac.abort();
-el.contentEditable='false';
-el.classList.remove('presemble-editing');
-toolbar.remove();
-if(errEl){errEl.remove();errEl=null;}
-var err=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
-if(err){err.remove();}
-_onEditorClosed();
-}
-// On failure the editor stays open with the user's text.
-function fail(msg){
-busy=false;
-_setToolbarBusy(toolbar,false);
-el.contentEditable='true';
-errEl=_showEditError(toolbar,errEl,msg);
-el.focus();
-}
-function save(){
-if(busy){return;}
-var value=_editedText(el);
-if(_sameMd(value,original)){restore();cleanup();return;}
-if(!pfile){console.error('save called without pfile',el);fail('Cannot save: missing file attribute on element. This is a bug — please report.');return;}
-busy=true;
-_setToolbarBusy(toolbar,true);
-el.contentEditable='false';
-_postBlockEdit(buildBlockEditRequest(pfile,target.address,original,value,'apply')).then(function(outcome){
-if(outcome.kind==='refused'){fail(outcome.message||'Edit refused');return;}
-busy=false;
-if(outcome.kind==='no-change'){restore();}
-cleanup();
-if(outcome.kind==='applied'&&window._fetchDirtyCount){window._fetchDirtyCount();}
-}).catch(function(e){
-fail(e.message||'Edit failed');
-});
-}
-toolbar.querySelector('.presemble-save').onclick=function(e){e.stopPropagation();save();};
-toolbar.querySelector('.presemble-undo').onclick=function(e){e.stopPropagation();restore();cleanup();};
-el.addEventListener('keydown',function(e){
-if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();save();}
-if(e.key==='Escape'&&!busy){restore();cleanup();}
-},{signal:ac.signal});
-});
-document.addEventListener('click',function(e){
-var suggestMode=document.body.classList.contains('presemble-suggest-mode');
-if(!suggestMode){return;}
-var el=e.target.closest('[data-presemble-slot]');
-if(!el||el.classList.contains('presemble-editing')){return;}
-var slot=el.getAttribute('data-presemble-slot');
-if(!slot){return;}
-if(slot==='body'){
 e.preventDefault();
-var bfile=el.getAttribute('data-presemble-file');
-if(!bfile){var bfEl=document.querySelector('[data-presemble-file]');if(bfEl){bfile=bfEl.getAttribute('data-presemble-file');}}
-// The server's address and markdown for this block; without both it is not editable.
-var btarget=_editTargetOf(el);
-if(!btarget){_toast(_NOT_EDITABLE_MSG);return;}
-var bmd=btarget.md;
-el.style.display='none';
-var ta=document.createElement('textarea');
-ta.className='presemble-body-editor';
-ta.value=bmd;
-el.parentNode.insertBefore(ta,el.nextSibling);
-ta.focus();
-var btoolbar=document.createElement('div');
-btoolbar.className='presemble-edit-toolbar';
-btoolbar.innerHTML='<button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Cancel">&#8630;</button>';
-ta.after(btoolbar);
-var bac=new AbortController();
-var bbusy=false;
-var berrEl=null;
-function bcleanup(){
-bac.abort();
-ta.remove();btoolbar.remove();el.style.display='';
-if(berrEl){berrEl.remove();berrEl=null;}
-_onEditorClosed();
-}
-// On failure the editor stays open with the user's text.
-var bfail=function(msg){
-bbusy=false;
-_setToolbarBusy(btoolbar,false);
-ta.readOnly=false;
-berrEl=_showEditError(btoolbar,berrEl,msg);
-ta.focus();
-};
-function bsuggest(){
-if(bbusy){return;}
-var bvalue=ta.value;
-if(_sameMd(bvalue,bmd)){bcleanup();return;}
-if(!bfile){console.error('bsuggest called without bfile',el);bfail('Cannot suggest: missing file attribute on element. This is a bug — please report.');return;}
-bbusy=true;
-_setToolbarBusy(btoolbar,true);
-ta.readOnly=true;
-_postBlockEdit(buildBlockEditRequest(bfile,btarget.address,bmd,bvalue,'suggest')).then(function(outcome){
-if(outcome.kind==='refused'){bfail(outcome.message||'Suggest refused');return;}
-bbusy=false;
-bcleanup();
-_afterSuggest(outcome);
-}).catch(function(err){bfail(err.message||'Suggest failed');});
-}
-btoolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();bsuggest();};
-btoolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();bcleanup();};
-ta.addEventListener('keydown',function(ev){if(ev.key==='Escape'&&!bbusy){bcleanup();}},{signal:bac.signal});
-return;
-}
-if(el.tagName==='IMG'){return;}
-var pfile=el.getAttribute('data-presemble-file');
-if(!pfile){return;}
-e.preventDefault();
-// The element is suggested against the server's markdown for it, addressed by
-// the server's address; without both it is not editable. Closing restores the
-// rendered markup.
-var target=_editTargetOf(el);
-if(!target){_toast(_NOT_EDITABLE_MSG);return;}
-var savedHtml=el.innerHTML;
-var original=target.md;
-function restore(){el.innerHTML=savedHtml;}
-el.innerText=original;
-el.contentEditable='true';
-el.classList.add('presemble-editing');
-el.focus();
-if(!el.textContent.trim()){var r=document.createRange();r.selectNodeContents(el);r.collapse(true);var s=window.getSelection();s.removeAllRanges();s.addRange(r);}
-var toolbar=document.createElement('div');
-toolbar.className='presemble-edit-toolbar';
-toolbar.innerHTML='<button class="presemble-suggest-inline" title="Suggest">&#128172;</button><button class="presemble-undo" title="Cancel">&#8630;</button>';
-el.after(toolbar);
-var ac=new AbortController();
-var busy=false;
-var errEl=null;
-function cleanup(){
-ac.abort();
-el.contentEditable='false';
-el.classList.remove('presemble-editing');
-toolbar.remove();
-if(errEl){errEl.remove();errEl=null;}
-var err=el.parentNode&&el.parentNode.querySelector('.presemble-edit-error');
-if(err){err.remove();}
-_onEditorClosed();
-}
-// On failure the editor stays open with the user's text.
-function fail(msg){
-busy=false;
-_setToolbarBusy(toolbar,false);
-el.contentEditable='true';
-errEl=_showEditError(toolbar,errEl,msg);
-el.focus();
-}
-function suggest(){
-if(busy){return;}
-var value=_editedText(el);
-if(_sameMd(value,original)){restore();cleanup();return;}
-busy=true;
-_setToolbarBusy(toolbar,true);
-el.contentEditable='false';
-_postBlockEdit(buildBlockEditRequest(pfile,target.address,original,value,'suggest')).then(function(outcome){
-if(outcome.kind==='refused'){fail(outcome.message||'Suggest refused');return;}
-// A suggestion is not an edit: restore the original markup before closing.
-busy=false;
-restore();
-cleanup();
-_afterSuggest(outcome);
-}).catch(function(e){
-fail(e.message||'Suggest failed');
-});
-}
-toolbar.querySelector('.presemble-suggest-inline').onclick=function(ev){ev.stopPropagation();suggest();};
-toolbar.querySelector('.presemble-undo').onclick=function(ev){ev.stopPropagation();restore();cleanup();};
-el.addEventListener('keydown',function(ev){
-if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();suggest();}
-if(ev.key==='Escape'&&!busy){restore();cleanup();}
-},{signal:ac.signal});
+_openBlockEditor(el,intent);
 });
 })();
