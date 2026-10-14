@@ -34,6 +34,11 @@
 //   `reloads`. It lives in resources/serve/reload.js between
 //   `// BEGIN reader-reload` and `// END reader-reload`.
 //
+// Also checked, per fixture in resources/serve/protocol/page-files/:
+//   pageFiles(values) — the documents a page shows, from its
+//   [data-presemble-file] values — gives the fixture's `files`, and
+//   suggestionListUrl(files) gives its `url` (null: nothing to ask for).
+//
 // Also checked, per path in PAGE_PATH_VECTORS: both copies of the page path
 // normaliser (inject.js `_samePagePath`, reload.js `samePagePath`) give the
 // same, expected form.
@@ -89,6 +94,17 @@ interface Builders {
   reloadDecision(message: unknown, pathname: string): ReloadDecision;
   /** inject.js's `_samePagePath`. */
   samePagePath(path: string): string;
+  /** The documents a page shows, from its `[data-presemble-file]` values. */
+  pageFiles(values: readonly string[]): string[];
+  /** The URL listing the suggestions of `files`; null for none. */
+  suggestionListUrl(files: readonly string[]): string | null;
+}
+
+/** A page's `[data-presemble-file]` values, the documents it shows and the URL of their suggestions. */
+interface PageFilesFixture {
+  readonly values: readonly string[];
+  readonly files: readonly string[];
+  readonly url: string | null;
 }
 
 type ReloadDecision =
@@ -178,7 +194,7 @@ function loadReader(): Reader {
 function loadBuilders(): Builders {
   const code = region("inject.js", BEGIN, END);
   const factory = new Function(
-    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision, samePagePath: _samePagePath };`,
+    `${code}\nreturn { buildBlockEditRequest: buildBlockEditRequest, buildLinkPickerRequest: buildLinkPickerRequest, interpretBlockEditResponse: interpretBlockEditResponse, editorialMessageAction: editorialMessageAction, reloadDecision: reloadDecision, samePagePath: _samePagePath, pageFiles: pageFiles, suggestionListUrl: suggestionListUrl };`,
   );
   return factory() as Builders;
 }
@@ -291,6 +307,27 @@ function main(): number {
     }
     if (ok) {
       console.log(`PASS editorial/${name}`);
+    } else {
+      failures += 1;
+    }
+  }
+  for (const name of fixtureNames("page-files/")) {
+    const fixture = JSON.parse(
+      read(`../resources/serve/protocol/page-files/${name}.json`),
+    ) as PageFilesFixture;
+    let ok = true;
+    const files = builders.pageFiles(fixture.values);
+    if (show(files) !== show(fixture.files)) {
+      ok = false;
+      console.log(`FAIL page-files/${name} files: expected ${show(fixture.files)}, got ${show(files)}`);
+    }
+    const url = builders.suggestionListUrl(fixture.files);
+    if (url !== fixture.url) {
+      ok = false;
+      console.log(`FAIL page-files/${name} url: expected ${show(fixture.url)}, got ${show(url)}`);
+    }
+    if (ok) {
+      console.log(`PASS page-files/${name}`);
     } else {
       failures += 1;
     }

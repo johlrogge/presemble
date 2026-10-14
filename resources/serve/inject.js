@@ -113,6 +113,31 @@ function _samePagePath(path) {
   if (p.length > 1 && p.charAt(p.length - 1) === '/') p = p.slice(0, -1);
   return p === '' ? '/' : p;
 }
+
+// The documents a page shows, from its [data-presemble-file] values: each
+// non-empty value once, sorted. A listing page shows fields of other
+// documents too, and their suggestions belong to those documents' files.
+function pageFiles(values) {
+  var seen = {};
+  var files = [];
+  for (var i = 0; i < values.length; i++) {
+    var v = values[i];
+    if (v && !Object.prototype.hasOwnProperty.call(seen, v)) {
+      seen[v] = true;
+      files.push(v);
+    }
+  }
+  return files.sort();
+}
+
+// The URL listing the suggestions of `files`, in the given order; null for
+// no files (nothing to ask for).
+function suggestionListUrl(files) {
+  if (!files.length) return null;
+  return '/_presemble/ned-suggestions?' + files.map(function (f) {
+    return 'file=' + encodeURIComponent(f);
+  }).join('&');
+}
 // END protocol-builders
 
 // Single source of truth for the heading text used in scroll anchors (ADR-046).
@@ -1319,13 +1344,21 @@ _suggestions.splice(_suggestIdx,1);
 if(_suggestIdx>=_suggestions.length&&_suggestions.length>0){_suggestIdx=_suggestions.length-1;}
 _suggestHighlight();
 }
+// The URL listing the suggestions of every document this page shows (a
+// listing shows fields of other documents); null when it shows none.
+function _pageSuggestionUrl(){
+var values=Array.prototype.map.call(document.querySelectorAll('[data-presemble-file]'),function(el){return el.getAttribute('data-presemble-file')||'';});
+return suggestionListUrl(pageFiles(values));
+}
 function _fetchSuggestionCount(){
-var fileEl=document.querySelector('[data-presemble-file]');
-if(!fileEl){return;}
-var file=fileEl.getAttribute('data-presemble-file');
-if(!file){return;}
-var enc=encodeURIComponent(file);
-fetchJson('/_presemble/ned-suggestions?file='+enc).catch(function(err){console.warn('presemble: suggestion count fetch failed',err);return[];})
+var url=_pageSuggestionUrl();
+if(!url){
+_editorialSuggestCount=0;
+suggestBadge.style.display='none';
+update();
+return;
+}
+fetchJson(url).catch(function(err){console.warn('presemble: suggestion count fetch failed',err);return[];})
 .then(function(ned){
 var nedFiltered=(Array.isArray(ned)?ned:[]).filter(function(s){return s.status==='Pending'||(s.status&&typeof s.status==='object'&&s.status.Stale);});
 var nedTagged=nedFiltered.map(function(s){return Object.assign({},s,{_source:'ned'});});
@@ -1401,12 +1434,9 @@ setInterval(_fetchDirtyCount,2000);
 setInterval(_fetchSuggestionFiles,5000);
 _fetchSuggestionFiles();
 function _suggestEnter(targetId){
-var fileEl=document.querySelector('[data-presemble-file]');
-if(!fileEl){return;}
-var file=fileEl.getAttribute('data-presemble-file');
-if(!file){return;}
-var enc=encodeURIComponent(file);
-fetchJson('/_presemble/ned-suggestions?file='+enc).catch(function(err){_toast('Could not load suggestions: '+err.message);return[];})
+var url=_pageSuggestionUrl();
+if(!url){return;}
+fetchJson(url).catch(function(err){_toast('Could not load suggestions: '+err.message);return[];})
 .then(function(ned){
 var nedFiltered=(Array.isArray(ned)?ned:[]).filter(function(s){return s.status==='Pending'||(s.status&&typeof s.status==='object'&&s.status.Stale);});
 var merged=nedFiltered.map(function(s){return Object.assign({},s,{_source:'ned'});});

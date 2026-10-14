@@ -1608,84 +1608,79 @@ async fn ned_suggestions_create_handler(
     }
 }
 
-#[derive(serde::Deserialize)]
-struct NedSuggestionsQuery {
-    file: String,
-}
-
+/// The suggestions of every document a page shows: `file` may be given more
+/// than once (a listing page shows fields of other documents). One array, in
+/// the order the files are given; each suggestion names its own file.
 async fn ned_suggestions_list_handler(
     _session: Session,
     State(state): State<AppState>,
-    Query(query): Query<NedSuggestionsQuery>,
+    Query(params): Query<Vec<(String, String)>>,
 ) -> axum::response::Response {
     use axum::http::{StatusCode, header};
 
-    if query.file.is_empty() {
-        let body = r#"{"error":"file parameter is required"}"#.to_string();
-        return (
-            StatusCode::BAD_REQUEST,
+    let json_error = |status: StatusCode, message: String| {
+        (
+            status,
             [(header::CONTENT_TYPE, "application/json")],
-            body.into_bytes(),
+            serde_json::json!({ "error": message })
+                .to_string()
+                .into_bytes(),
         )
-            .into_response();
-    }
-
-    let file = match editorial_types::ContentPath::parse(&query.file) {
-        Ok(file) => file,
-        Err(e) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e.to_string());
-            return (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            )
-                .into_response();
-        }
+            .into_response()
     };
 
-    match state
-        .conductor
-        .send(&conductor::Command::GetNedSuggestions { file })
-    {
-        Ok(conductor::Response::NedSuggestions(suggestions)) => {
-            let browser: Vec<NedSuggestionJson> =
-                suggestions.iter().map(NedSuggestionJson::from).collect();
-            let json = serde_json::to_vec(&browser).unwrap_or_else(|_| b"[]".to_vec());
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                json,
-            )
-                .into_response()
-        }
-        Ok(conductor::Response::Error(e)) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e);
-            (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            let body = format!(r#"{{"error":{:?}}}"#, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            )
-                .into_response()
-        }
-        _ => {
-            let body = r#"{"error":"unexpected conductor response"}"#.to_string();
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "application/json")],
-                body.into_bytes(),
-            )
-                .into_response()
+    let values: Vec<&str> = params
+        .iter()
+        .filter(|(key, _)| key == "file")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    if values.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "file parameter is required".to_string(),
+        );
+    }
+    let mut files = Vec::with_capacity(values.len());
+    for value in values {
+        match editorial_types::ContentPath::parse(value) {
+            Ok(file) => files.push(file),
+            Err(e) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid file {value:?}: {e}"),
+                );
+            }
         }
     }
+
+    let mut browser: Vec<NedSuggestionJson> = Vec::new();
+    for file in files {
+        match state
+            .conductor
+            .send(&conductor::Command::GetNedSuggestions { file })
+        {
+            Ok(conductor::Response::NedSuggestions(suggestions)) => {
+                browser.extend(suggestions.iter().map(NedSuggestionJson::from));
+            }
+            Ok(conductor::Response::Error(e)) => {
+                return json_error(StatusCode::BAD_REQUEST, e);
+            }
+            Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => {
+                return json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unexpected conductor response".to_string(),
+                );
+            }
+        }
+    }
+    let json = serde_json::to_vec(&browser).unwrap_or_else(|_| b"[]".to_vec());
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        json,
+    )
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -5094,6 +5089,107 @@ mod tests {
         // anchor is derived from the selection
         assert_eq!(sug["anchor"]["kind"], "slot");
         assert_eq!(sug["anchor"]["slot"], "title");
+    }
+
+    /// GET `uri` with a session; the status and the JSON body.
+    async fn get_json(
+        app: &axum::Router,
+        uri: &str,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("cookie", test_session_cookie())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        // A body that is not JSON (an extractor's plain-text rejection) is
+        // kept as text, so a failing assertion shows it.
+        let body = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+        });
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn ned_suggestions_list_returns_suggestions_of_every_file_given() {
+        // The test site, plus a second document: a listing page shows fields
+        // of other documents.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("schemas/test")).unwrap();
+        std::fs::create_dir_all(root.join("content/test")).unwrap();
+        std::fs::create_dir_all(root.join("templates/test")).unwrap();
+        std::fs::write(
+            root.join("schemas/test/item.md"),
+            "# Title {#title}\noccurs\n: exactly once\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("templates/test/item.hiccup"), "[:div]").unwrap();
+        std::fs::write(root.join("content/test/doc.md"), "# Test Title\n").unwrap();
+        std::fs::write(root.join("content/test/other.md"), "# Other Title\n").unwrap();
+        let client = start_conductor_for(root, |_| {});
+        for file in ["content/test/doc.md", "content/test/other.md"] {
+            let created = client
+                .send(&conductor::Command::CreateNedSuggestion {
+                    file: editorial_types::ContentPath::parse(file).expect("valid"),
+                    selection: format!(
+                        r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "{file}") "title")))"#
+                    ),
+                    mutation: editorial_types::NedMutation::SetText("Listed Title".to_string()),
+                    reason: "list test".to_string(),
+                    author: editorial_types::Author::Human("tester".to_string()),
+                })
+                .unwrap();
+            assert!(
+                matches!(created, conductor::Response::SuggestionCreated(_)),
+                "{file}: {created:?}"
+            );
+        }
+        let app = test_app(client);
+
+        let (status, val) = get_json(
+            &app,
+            "/_presemble/ned-suggestions?file=content/test/doc.md&file=content/test/other.md",
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::OK, "{val}");
+        let files: Vec<&str> = val
+            .as_array()
+            .expect("expected array")
+            .iter()
+            .map(|s| s["file"].as_str().expect("file"))
+            .collect();
+        assert_eq!(files, ["content/test/doc.md", "content/test/other.md"]);
+    }
+
+    #[tokio::test]
+    async fn ned_suggestions_list_refuses_a_bad_second_file() {
+        let (client, _tmp) = start_test_conductor();
+        let app = test_app(client);
+
+        let (status, val) = get_json(
+            &app,
+            "/_presemble/ned-suggestions?file=content/test/doc.md&file=../etc/passwd",
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{val}");
+        assert!(
+            val["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("../etc/passwd"),
+            "the error names the bad value: {val}"
+        );
     }
 
     #[tokio::test]
