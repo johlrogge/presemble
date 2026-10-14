@@ -451,6 +451,21 @@ fn model_steps_after(recorded: Option<&str>) -> &'static [ModelStep] {
     }
 }
 
+/// Whether `sug` is a pending suggestion of exactly this change: the same
+/// file, selection and mutation. Reason, author and preview are not part of
+/// the change; a decided or stale suggestion never stands for a new one.
+fn same_pending_change(
+    sug: &editorial_types::NedSuggestion,
+    file: &editorial_types::ContentPath,
+    selection: &str,
+    mutation: &editorial_types::NedMutation,
+) -> bool {
+    sug.status == editorial_types::NedSuggestionStatus::Pending
+        && &sug.file == file
+        && sug.selection == selection
+        && &sug.mutation == mutation
+}
+
 impl Conductor {
     pub fn new(site_dir: PathBuf) -> Result<Self, String> {
         let conductor = Self::load(site_dir)?;
@@ -3766,6 +3781,19 @@ impl Conductor {
             // nothing to store.
             Ok((_, true)) => return CommandResult::with_response(Response::AlreadyInPlace),
             Ok(_) => {}
+        }
+
+        // The same change is already waiting for a decision (a retry, a
+        // double submit): it stays the one suggestion of it.
+        let existing = self
+            .ned_suggestions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|sug| same_pending_change(sug, file, &selection, &mutation))
+            .map(|sug| sug.id.clone());
+        if let Some(id) = existing {
+            return CommandResult::with_response(Response::SuggestionCreated(id));
         }
 
         let id = editorial_types::SuggestionId::new();
@@ -7656,6 +7684,137 @@ mod ned_suggestion_handler_tests {
         );
     }
 
+    // ── 2b. The same change twice ─────────────────────────────────────────────
+
+    const TITLE_TEXT: &str = r#"(ned/text-in (ned/children (ned/slot (ned/doc-by-path "content/test/doc.md") "title")))"#;
+
+    fn suggest(conductor: &Conductor, mutation: editorial_types::NedMutation) -> CommandResult {
+        conductor.handle_command(Command::CreateNedSuggestion {
+            file: editorial_types::ContentPath::parse("content/test/doc.md").expect("valid"),
+            selection: TITLE_TEXT.to_string(),
+            mutation,
+            reason: "Better title".to_string(),
+            author: editorial_types::Author::Claude,
+        })
+    }
+
+    fn suggestion_id(result: &CommandResult) -> editorial_types::SuggestionId {
+        match &result.response {
+            Response::SuggestionCreated(id) => id.clone(),
+            other => panic!("expected SuggestionCreated, got: {other:?}"),
+        }
+    }
+
+    /// The `sug-*.json` files in the site's NED suggestion directory.
+    fn suggestion_files(tmp: &tempfile::TempDir) -> usize {
+        let dir = tmp.path().join(".presemble/suggestions/ned");
+        std::fs::read_dir(&dir)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        name.starts_with("sug-") && name.ends_with(".json")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn suggesting_the_same_change_twice_returns_the_first_id() {
+        let (conductor, tmp) = make_conductor_with_doc();
+        let change = || editorial_types::NedMutation::SetText("Updated Title".to_string());
+
+        let first = suggest(&conductor, change());
+        let second = suggest(&conductor, change());
+
+        assert_eq!(suggestion_id(&first), suggestion_id(&second));
+        assert_eq!(suggestion_files(&tmp), 1, "one suggestion file is written");
+        assert!(
+            second.events.is_empty(),
+            "the second suggestion announces nothing; got {:?}",
+            second.events
+        );
+    }
+
+    #[test]
+    fn suggesting_a_different_change_to_the_same_text_keeps_both() {
+        let (conductor, tmp) = make_conductor_with_doc();
+
+        let first = suggest(
+            &conductor,
+            editorial_types::NedMutation::SetText("Updated Title".to_string()),
+        );
+        let second = suggest(
+            &conductor,
+            editorial_types::NedMutation::SetText("Another Title".to_string()),
+        );
+
+        assert_ne!(suggestion_id(&first), suggestion_id(&second));
+        assert_eq!(suggestion_files(&tmp), 2);
+    }
+
+    #[test]
+    fn suggesting_a_rejected_change_again_makes_a_new_suggestion() {
+        let (conductor, tmp) = make_conductor_with_doc();
+        let change = || editorial_types::NedMutation::SetText("Updated Title".to_string());
+
+        let first = suggestion_id(&suggest(&conductor, change()));
+        let rejected = conductor.handle_command(Command::RejectNedSuggestion { id: first.clone() });
+        assert!(
+            matches!(rejected.response, Response::Ok),
+            "{:?}",
+            rejected.response
+        );
+        let second = suggest(&conductor, change());
+
+        assert_ne!(first, suggestion_id(&second));
+        assert!(
+            second
+                .events
+                .iter()
+                .any(|ev| matches!(ev, ConductorEvent::NedSuggestionCreated { .. })),
+            "the new suggestion is announced; got {:?}",
+            second.events
+        );
+        assert_eq!(suggestion_files(&tmp), 2);
+    }
+
+    #[test]
+    fn same_pending_change_ignores_reason_author_and_preview() {
+        let (conductor, _tmp) = make_conductor_with_doc();
+        let mutation = editorial_types::NedMutation::SetText("Updated Title".to_string());
+        let id = suggestion_id(&suggest(&conductor, mutation.clone()));
+        let mut sug = conductor.ned_suggestions.read().unwrap()[&id].clone();
+        let file = sug.file.clone();
+
+        sug.reason = "another reason".to_string();
+        sug.author = editorial_types::Author::Human("Alice".to_string());
+        sug.preview = None;
+        assert!(same_pending_change(&sug, &file, TITLE_TEXT, &mutation));
+
+        let other = editorial_types::ContentPath::parse("content/test/other.md").expect("valid");
+        assert!(!same_pending_change(&sug, &other, TITLE_TEXT, &mutation));
+        assert!(!same_pending_change(&sug, &file, "(ned/root)", &mutation));
+        assert!(!same_pending_change(
+            &sug,
+            &file,
+            TITLE_TEXT,
+            &editorial_types::NedMutation::SetText("Other".to_string())
+        ));
+        for status in [
+            editorial_types::NedSuggestionStatus::Accepted,
+            editorial_types::NedSuggestionStatus::Rejected,
+            editorial_types::NedSuggestionStatus::Stale {
+                reason: "x".to_string(),
+                cause: editorial_types::StaleCause::Unresolved,
+            },
+        ] {
+            sug.status = status;
+            assert!(!same_pending_change(&sug, &file, TITLE_TEXT, &mutation));
+        }
+    }
+
     // ── 3. Create rejection (non-text slot) ───────────────────────────────────
 
     #[test]
@@ -10245,6 +10404,70 @@ mod block_edit_tests {
             assert_eq!(title(&applier), title(&suggester), "{proposed:?}");
             assert_eq!(body_texts(&applier), body_texts(&suggester), "{proposed:?}");
         }
+    }
+
+    /// The `sug-*.json` files in the site's NED suggestion directory.
+    fn suggestion_files(tmp: &tempfile::TempDir) -> usize {
+        let dir = tmp.path().join(".presemble/suggestions/ned");
+        std::fs::read_dir(&dir)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        name.starts_with("sug-") && name.ends_with(".json")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn suggesting_the_same_block_edit_twice_keeps_one_suggestion() {
+        let tmp = build_site();
+        let conductor = make_conductor(&tmp);
+        let suggest = || {
+            edit(
+                &conductor,
+                FIRST_PARAGRAPH,
+                "Alpha para.",
+                "Alpha paragraph.",
+                BlockEditIntent::Suggest,
+            )
+        };
+
+        let first = created_id(&suggest());
+        let second = created_id(&suggest());
+
+        assert_eq!(first, second);
+        assert_eq!(suggestion_files(&tmp), 1, "one suggestion file is written");
+    }
+
+    #[test]
+    fn suggesting_the_same_block_edit_in_another_file_keeps_both() {
+        const SECOND: &str = "content/post/second.md";
+        let tmp = build_site();
+        std::fs::write(tmp.path().join(SECOND), CONTENT).unwrap();
+        let conductor = make_conductor(&tmp);
+        let suggest = |file: &str| {
+            let selection = FIRST_PARAGRAPH.replace(FILE, file);
+            created_id(&conductor.handle_command(Command::BlockEdit(request(
+                file,
+                &selection,
+                "Alpha para.",
+                "Alpha paragraph.",
+                BlockEditIntent::Suggest,
+            ))))
+        };
+
+        let first = suggest(FILE);
+        let second = suggest(SECOND);
+
+        assert_ne!(first, second);
+        assert_eq!(
+            suggestion(&conductor, &first).mutation,
+            suggestion(&conductor, &second).mutation
+        );
+        assert_eq!(suggestion_files(&tmp), 2);
     }
 
     /// A site whose title is `# Hello *World*`.
