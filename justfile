@@ -250,7 +250,7 @@ output-diff a b mode="exact":
 # Benchmark a full site build at 1K and 10K pages.
 [group('perf')]
 perf:
-    cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$'
+    bash tools/with-test-tmpdir.sh cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$'
 
 # The gate of LSP-2 2.3: p50 and p95 of an editor change (in place, and a new
 # paragraph) against DocumentChanged, interleaved, on a 1000-page site with one
@@ -258,7 +258,7 @@ perf:
 # Time editor changes against DocumentChanged (release).
 [group('perf')]
 perf-editor:
-    cargo polylith cargo --profile dev test --release -p conductor -- --ignored --nocapture timing_editor_changed
+    bash tools/with-test-tmpdir.sh cargo polylith cargo --profile dev test --release -p conductor -- --ignored --nocapture timing_editor_changed
 
 # Runs the same bench as `perf` in a throwaway worktree at git <rev>, like snapshot-ref: the
 # worktree is removed afterwards, and it has its own target dir (a full build),
@@ -275,7 +275,7 @@ perf-ref rev:
     git worktree add --detach "$wt" "{{ rev }}" >&2
     # The command is repeated, not `just perf`: the rev's own justfile may
     # predate this recipe.
-    (cd "$wt" && cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$')
+    (cd "$wt" && bash "{{ justfile_directory() }}/tools/with-test-tmpdir.sh" cargo polylith cargo --profile dev bench -p publisher_cli --bench build_bench -- 'full_build/pages/(1000|10000)$')
 
 # Check inject.js's protocol builders against resources/serve/protocol/*.json
 # (ADR-059 §10). The full output goes to target/protocol-fixtures.log, because
@@ -313,12 +313,15 @@ page-status:
 # serving on `port` (another port runs beside a serve on 3000).
 [group('develop')]
 smoketest profile="dev" port="3000":
-    PRESEMBLE_SMOKE_PORT={{ port }} ./tools/smoketest.sh {{ profile }}
+    PRESEMBLE_SMOKE_PORT={{ port }} bash tools/with-test-tmpdir.sh ./tools/smoketest.sh {{ profile }}
 
 # Run workspace tests (dev profile). Prefer the rust-codebase MCP `cargo_test`.
+# Like every recipe that runs tests, the smoketest or a bench, it runs in a
+# temporary directory of its own that is removed afterwards
+# (tools/with-test-tmpdir.sh), and warns about output left outside temp dirs.
 [group('develop')]
 test:
-    cargo polylith cargo --profile dev test
+    bash tools/with-test-tmpdir.sh cargo polylith cargo --profile dev test
 
 # Lint as CI does: libs and bins of the live profile, then every target of
 # the dev profile (tests use the in-memory site repository, which only the
@@ -355,7 +358,7 @@ fmt-check:
 # target/unfinished-markup-census.txt).
 [group('develop')]
 census-markup:
-    cargo polylith cargo --profile dev test -p content --test unfinished_markup_census -- --ignored --nocapture
+    bash tools/with-test-tmpdir.sh cargo polylith cargo --profile dev test -p content --test unfinished_markup_census -- --ignored --nocapture
 
 # Preview changes to the conductor box / network. The Caddy basic_auth hash is
 # sourced from the auth-file just-in-time into -var (rendered into cloud-init).
