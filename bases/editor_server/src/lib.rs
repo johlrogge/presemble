@@ -251,8 +251,53 @@ enum Job {
     Plan(Plan, Sender<Result<ProgramOutcome, ProgramError>>),
 }
 
+impl Job {
+    /// What the job is, for a person: the command's name, or "nREPL plan".
+    fn name(&self) -> String {
+        match self {
+            Job::Ipc(cmd, _) => command_name(cmd),
+            Job::Plan(..) => "nREPL plan".to_string(),
+        }
+    }
+}
+
+/// A command's variant name (`GetDirtyBuffers`, `BlockEdit`, …).
+fn command_name(cmd: &Command) -> String {
+    let debug = format!("{cmd:?}");
+    debug
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// What the writer is doing: the job it runs and since when, or nothing.
+/// Shared with whoever needs to say why the writer does not answer.
+#[derive(Clone, Default)]
+struct WriterStatus(Arc<Mutex<Option<(String, std::time::Instant)>>>);
+
+impl WriterStatus {
+    fn started(&self, job: String) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some((job, std::time::Instant::now()));
+    }
+
+    fn finished(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// The job the writer runs and for how long it has, or `None` when idle.
+    fn busy_with(&self) -> Option<(String, std::time::Duration)> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|(job, since)| (job.clone(), since.elapsed()))
+    }
+}
+
 /// The writer thread's loop: take jobs in arrival order, run each on the
-/// conductor, answer its sender, then publish its events.
+/// conductor, answer its sender, then publish its events. `status` names the
+/// job running (and is cleared after it).
 ///
 /// Ends after a `Shutdown` command, or when every sender is gone (the channel
 /// is closed). A requester that has gone away (its receiver dropped) does not
@@ -260,25 +305,37 @@ enum Job {
 fn writer_loop(
     conductor: &Conductor,
     jobs: &Receiver<Job>,
+    status: &WriterStatus,
     publish: &mut dyn FnMut(&ConductorEvent),
 ) {
     while let Ok(job) = jobs.recv() {
-        match job {
-            Job::Ipc(cmd, reply) => {
-                let is_shutdown = matches!(cmd, Command::Shutdown);
-                let CommandResult { response, events } = conductor.handle_command(cmd);
-                // The requester gets its answer before the subscribers get the
-                // events, as before.
-                let _ = reply.send(CommandResult {
-                    response,
-                    events: vec![],
-                });
-                events.iter().for_each(&mut *publish);
-                if is_shutdown {
-                    break;
-                }
-            }
-            Job::Plan(plan, reply) => match conductor.execute_plan(plan) {
+        status.started(job.name());
+        let shutdown = run_job(conductor, job, publish);
+        status.finished();
+        if shutdown {
+            break;
+        }
+    }
+}
+
+/// Run one job: answer its sender, then publish its events. True after a
+/// `Shutdown` command.
+fn run_job(conductor: &Conductor, job: Job, publish: &mut dyn FnMut(&ConductorEvent)) -> bool {
+    match job {
+        Job::Ipc(cmd, reply) => {
+            let is_shutdown = matches!(cmd, Command::Shutdown);
+            let CommandResult { response, events } = conductor.handle_command(cmd);
+            // The requester gets its answer before the subscribers get the
+            // events, as before.
+            let _ = reply.send(CommandResult {
+                response,
+                events: vec![],
+            });
+            events.iter().for_each(&mut *publish);
+            is_shutdown
+        }
+        Job::Plan(plan, reply) => {
+            match conductor.execute_plan(plan) {
                 Ok((outcome, events)) => {
                     let _ = reply.send(Ok(outcome));
                     events.iter().for_each(&mut *publish);
@@ -286,7 +343,8 @@ fn writer_loop(
                 Err(refused) => {
                     let _ = reply.send(Err(refused));
                 }
-            },
+            }
+            false
         }
     }
 }
@@ -442,9 +500,11 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
 
     // Auto-save (ADR-070): ticks run on the writer like every other job.
     start_ticker(jobs.clone(), TICK_EVERY);
+    // What the writer is doing, so a shutdown that it does not answer can say.
+    let status = WriterStatus::default();
     // Ctrl-C and SIGTERM shut down through the writer, so unsaved documents
     // are flushed first.
-    handle_signals(jobs.clone())?;
+    handle_signals(jobs.clone(), status.clone())?;
 
     println!("Conductor ready. Waiting for commands...");
 
@@ -457,7 +517,7 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
 
     // The writer: the only thread that changes the conductor. It publishes the
     // events of every job, whether it came from a client or from the nREPL.
-    writer_loop(&conductor, &job_queue, &mut |event| {
+    writer_loop(&conductor, &job_queue, &status, &mut |event| {
         if let Ok(event_data) = serde_json::to_vec(event) {
             let _ = pub_socket.send(nng::Message::from(event_data.as_slice()));
         }
@@ -584,27 +644,64 @@ fn start_ticker(jobs: Sender<Job>, every: std::time::Duration) -> std::thread::J
     })
 }
 
+/// How long a shutdown waits for the writer before giving up.
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How a shutdown through the writer ended.
+#[derive(Debug, PartialEq)]
+enum Shutdown {
+    /// The writer flushed and stopped; the warnings it answered with
+    /// (documents that could not be saved), if any.
+    Done(Option<String>),
+    /// The writer did not answer in time: what it was busy with, and for how
+    /// long, if anything.
+    TimedOut {
+        busy: Option<(String, std::time::Duration)>,
+    },
+}
+
 /// Shut the conductor down through the writer (a `Shutdown` job, so it
-/// flushes in order with everything before it); the warnings it answers with
-/// are printed to stderr and returned.
-fn request_shutdown(jobs: &Sender<Job>) -> Option<String> {
+/// flushes in order with everything before it), waiting at most
+/// `SHUTDOWN_WAIT`; the warnings it answers with are printed to stderr.
+fn request_shutdown(jobs: &Sender<Job>, status: &WriterStatus) -> Shutdown {
+    request_shutdown_within(jobs, status, SHUTDOWN_WAIT)
+}
+
+/// `request_shutdown`, waiting at most `wait` for the writer.
+fn request_shutdown_within(
+    jobs: &Sender<Job>,
+    status: &WriterStatus,
+    wait: std::time::Duration,
+) -> Shutdown {
     let (reply, result) = mpsc::channel();
-    jobs.send(Job::Ipc(Command::Shutdown, reply)).ok()?;
-    match result.recv().ok()?.response {
-        Response::Error(warnings) => {
+    if jobs.send(Job::Ipc(Command::Shutdown, reply)).is_err() {
+        return Shutdown::Done(None); // the writer is already gone
+    }
+    match result.recv_timeout(wait) {
+        Ok(CommandResult {
+            response: Response::Error(warnings),
+            ..
+        }) => {
             for warning in warnings.split("; ") {
                 eprintln!("conductor: {warning}");
             }
-            Some(warnings)
+            Shutdown::Done(Some(warnings))
         }
-        _ => None,
+        Ok(_) => Shutdown::Done(None),
+        // The writer is still on an earlier job (or this one): say which.
+        Err(mpsc::RecvTimeoutError::Timeout) => Shutdown::TimedOut {
+            busy: status.busy_with(),
+        },
+        // The writer ended without answering: nothing is left to wait for.
+        Err(mpsc::RecvTimeoutError::Disconnected) => Shutdown::Done(None),
     }
 }
 
 /// On SIGINT or SIGTERM, shut down through the writer (unsaved documents
-/// are flushed, and those that cannot be are named), then exit. A second
-/// signal while that runs exits at once.
-fn handle_signals(jobs: Sender<Job>) -> Result<(), String> {
+/// are flushed, and those that cannot be are named), then exit: 0 when it
+/// stopped, 1 when the writer did not answer within `SHUTDOWN_WAIT`. A second
+/// signal while that runs exits at once (130).
+fn handle_signals(jobs: Sender<Job>, status: WriterStatus) -> Result<(), String> {
     use signal_hook::consts::{SIGINT, SIGTERM};
     let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])
         .map_err(|e| format!("cannot handle signals: {e}"))?;
@@ -616,14 +713,31 @@ fn handle_signals(jobs: Sender<Job>) -> Result<(), String> {
             }
             shutting_down = true;
             eprintln!("conductor: shutting down (again to stop at once)");
-            let jobs = jobs.clone();
-            std::thread::spawn(move || {
-                request_shutdown(&jobs);
-                std::process::exit(0);
+            let (jobs, status) = (jobs.clone(), status.clone());
+            std::thread::spawn(move || match request_shutdown(&jobs, &status) {
+                Shutdown::Done(_) => std::process::exit(0),
+                Shutdown::TimedOut { busy } => {
+                    eprintln!("conductor: {}", timed_out_message(busy.as_ref()));
+                    std::process::exit(1);
+                }
             });
         }
     });
     Ok(())
+}
+
+/// What a shutdown the writer did not answer says.
+fn timed_out_message(busy: Option<&(String, std::time::Duration)>) -> String {
+    let doing = match busy {
+        Some((job, for_how_long)) => format!(
+            "the writer has been busy with {job} for {} s",
+            for_how_long.as_secs()
+        ),
+        None => "the writer did not answer".to_string(),
+    };
+    format!(
+        "shutting down timed out: {doing}; exiting without saving (unsaved documents cannot be listed)"
+    )
 }
 
 /// Legacy stub — kept so existing callers continue to compile.
@@ -661,6 +775,7 @@ mod tests {
         conductor: Arc<Conductor>,
         jobs: Sender<Job>,
         published: Arc<Mutex<Vec<ConductorEvent>>>,
+        status: WriterStatus,
         writer: Option<std::thread::JoinHandle<()>>,
         _site: tempfile::TempDir,
     }
@@ -680,10 +795,15 @@ mod tests {
             let conductor = Arc::new(open_conductor(site.path()).expect("conductor"));
             let (jobs, queue) = mpsc::channel();
             let published = Arc::new(Mutex::new(Vec::new()));
+            let status = WriterStatus::default();
             let writer = {
-                let (conductor, published) = (Arc::clone(&conductor), Arc::clone(&published));
+                let (conductor, published, status) = (
+                    Arc::clone(&conductor),
+                    Arc::clone(&published),
+                    status.clone(),
+                );
                 std::thread::spawn(move || {
-                    writer_loop(&conductor, &queue, &mut |event| {
+                    writer_loop(&conductor, &queue, &status, &mut |event| {
                         published.lock().unwrap().push(event.clone());
                     })
                 })
@@ -692,6 +812,7 @@ mod tests {
                 conductor,
                 jobs,
                 published,
+                status,
                 writer: Some(writer),
                 _site: site,
             }
@@ -990,8 +1111,11 @@ mod tests {
             paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")],
         });
 
-        let warnings = request_shutdown(&harness.jobs);
+        let shutdown = request_shutdown(&harness.jobs, &harness.status);
 
+        let Shutdown::Done(warnings) = shutdown else {
+            panic!("the writer answers the shutdown: {shutdown:?}");
+        };
         let warnings = warnings.expect("the conflicted document is warned about");
         assert!(warnings.contains(FILE), "{warnings}");
         assert!(
@@ -1006,6 +1130,85 @@ mod tests {
         let other = std::fs::read_to_string(harness._site.path().join(OTHER)).unwrap();
         assert!(other.starts_with("# Flushed At Shutdown"), "{other}");
         assert_eq!(on_disk(&harness), outside);
+    }
+
+    /// Run `shutdown` on its own thread and give it `deadline` to return, so
+    /// a shutdown that hangs fails the test instead of hanging it.
+    fn shutdown_within(
+        deadline: std::time::Duration,
+        shutdown: impl FnOnce() -> Shutdown + Send + 'static,
+    ) -> Shutdown {
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(shutdown());
+        });
+        result
+            .recv_timeout(deadline)
+            .unwrap_or_else(|_| panic!("the shutdown did not return within {deadline:?}"))
+    }
+
+    #[test]
+    fn a_job_is_named_by_its_command_alone_never_its_content() {
+        let text = "# Secret draft\n\n".to_string() + &"words { ( , ".repeat(1000);
+        let (reply, _answer) = mpsc::channel();
+        let job = Job::Ipc(
+            Command::EditorChanged {
+                path: editorial_types::ContentPath::parse("content/post/first.md").expect("valid"),
+                text,
+            },
+            reply,
+        );
+
+        assert_eq!(job.name(), "EditorChanged");
+    }
+
+    #[test]
+    fn a_shutdown_the_writer_never_answers_times_out() {
+        // A queue nobody takes jobs from: the writer never answers.
+        let (jobs, _queue) = mpsc::channel::<Job>();
+        let status = WriterStatus::default();
+
+        let shutdown = shutdown_within(std::time::Duration::from_secs(1), move || {
+            request_shutdown_within(&jobs, &status, std::time::Duration::from_millis(100))
+        });
+
+        assert_eq!(shutdown, Shutdown::TimedOut { busy: None });
+    }
+
+    #[test]
+    fn a_timed_out_shutdown_names_the_job_the_writer_is_busy_with() {
+        let harness = Harness::start();
+        // The writer's next job waits for this lock, which is held until the
+        // shutdown has given up.
+        let held = harness.conductor.dirty_docs().write().unwrap();
+        let (reply, _answer) = mpsc::channel();
+        harness
+            .jobs
+            .send(Job::Ipc(Command::GetDirtyBuffers, reply))
+            .unwrap();
+        assert!(
+            wait_for(|| harness.status.busy_with().is_some()),
+            "the writer starts the job"
+        );
+
+        let (jobs, status) = (harness.jobs.clone(), harness.status.clone());
+        let shutdown = shutdown_within(std::time::Duration::from_secs(2), move || {
+            request_shutdown_within(&jobs, &status, std::time::Duration::from_millis(100))
+        });
+        drop(held);
+
+        let Shutdown::TimedOut {
+            busy: Some((job, _)),
+        } = &shutdown
+        else {
+            panic!("a timeout naming the job: {shutdown:?}");
+        };
+        assert_eq!(job, "GetDirtyBuffers");
+        assert!(
+            timed_out_message(Some(&(job.clone(), std::time::Duration::from_secs(7))))
+                .contains("busy with GetDirtyBuffers for 7 s"),
+            "the message names the job and how long"
+        );
     }
 
     /// Whether the writer ends within 5 s (never blocks for good).
@@ -1026,7 +1229,10 @@ mod tests {
             .eval("s", &set_title("Saved At Shutdown"))
             .expect("evals");
 
-        assert_eq!(request_shutdown(&harness.jobs), None);
+        assert_eq!(
+            request_shutdown(&harness.jobs, &harness.status),
+            Shutdown::Done(None)
+        );
         assert!(
             writer_ends(&mut harness),
             "the writer ended on the shutdown"
@@ -1041,6 +1247,7 @@ mod tests {
             conductor: _c,
             jobs,
             published: _p,
+            status: _s,
             writer,
             _site,
         } = harness;
