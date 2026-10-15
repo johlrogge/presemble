@@ -3,6 +3,8 @@ mod fmt;
 mod lsp;
 mod serve;
 mod site_dir;
+#[cfg(test)]
+mod test_site;
 
 pub use template_registry::FileTemplateRegistry;
 

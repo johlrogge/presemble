@@ -4351,8 +4351,8 @@ mod tests {
     /// the socket URL and the `ConductorClient` that talks to it.
     /// The server thread shuts down when it receives a `Command::Shutdown`.
     #[cfg(test)]
-    fn start_test_conductor() -> (conductor::ConductorClient, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn start_test_conductor() -> (conductor::ConductorClient, crate::test_site::TestSite) {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         // Minimal site layout — must match the selection strings used in tests:
@@ -5199,7 +5199,7 @@ mod tests {
     async fn ned_suggestions_list_returns_suggestions_of_every_file_given() {
         // The test site, plus a second document: a listing page shows fields
         // of other documents.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("schemas/test")).unwrap();
         std::fs::create_dir_all(root.join("content/test")).unwrap();
@@ -6027,7 +6027,7 @@ mod tests {
     }
 
     fn full_app_with_index(
-        tmp: &tempfile::TempDir,
+        tmp: &crate::test_site::TestSite,
         client: conductor::ConductorClient,
     ) -> axum::Router {
         let out_dir = tmp.path().join("output");
@@ -6177,7 +6177,7 @@ mod tests {
         published: PublishedSite,
         trigger: PublishTrigger,
         root: std::path::PathBuf,
-        _tmp: tempfile::TempDir,
+        _tmp: crate::test_site::TestSite,
     }
 
     impl Drop for ServedSite {
@@ -6241,7 +6241,7 @@ mod tests {
 
     /// Write the site, run the start-up builds when `startup`, and serve it.
     fn served_site(content: &str, template: &str, startup: bool) -> ServedSite {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(root.join("schemas/test")).unwrap();
         std::fs::create_dir_all(root.join("content/test")).unwrap();
@@ -7478,7 +7478,10 @@ mod tests {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    fn closed_app(tmp: &tempfile::TempDir, client: conductor::ConductorClient) -> axum::Router {
+    fn closed_app(
+        tmp: &crate::test_site::TestSite,
+        client: conductor::ConductorClient,
+    ) -> axum::Router {
         let out_dir = tmp.path().join("output");
         std::fs::create_dir_all(&out_dir).unwrap();
         std::fs::write(
