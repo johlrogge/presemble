@@ -15,7 +15,8 @@ set -euo pipefail
 exec > >(tee "${SMOKETEST_LOG:-/tmp/presemble-smoketest.log}") 2>&1
 
 PROFILE="${1:-dev}"
-PORT=3000
+# The port serve listens on; PRESEMBLE_SMOKE_PORT runs beside a serve on 3000.
+PORT=${PRESEMBLE_SMOKE_PORT:-3000}
 SITE_DIR=""
 COOKIE_JAR=""
 WS_ERR=""
@@ -405,7 +406,7 @@ log "Starting presemble serve..."
 # Clean up stale nrepl-port files
 rm -f "$(dirname "$SITE_DIR")/.nrepl-port"
 # `env` execs cargo, so $! is still the cargo process, as before.
-env -u PRESEMBLE_SESSION_KEY cargo polylith cargo --profile "$PROFILE" run --bin presemble -- serve "$SITE_DIR/" --dev-session=smoketest > "$SITE_DIR/serve.log" 2>&1 &
+env -u PRESEMBLE_SESSION_KEY cargo polylith cargo --profile "$PROFILE" run --bin presemble -- serve "$SITE_DIR/" --port "$PORT" --dev-session=smoketest > "$SITE_DIR/serve.log" 2>&1 &
 PID=$!
 
 # Wait for server to be ready
@@ -426,7 +427,7 @@ log "Server ready on port $PORT"
 
 # ── Login (dev session) ───────────────────────────────────────────────────
 # serve prints "Login URL: http://127.0.0.1:<port>/_presemble/login?token=..."
-# using its bind port, which is the default 3000 == $PORT here.
+# using its bind port, which is $PORT here (serve is started with --port).
 
 login_fail() { echo -e "${RED}Login failed: $1${NC}"; cat "$SITE_DIR/serve.log"; exit 1; }
 LOGIN_URL=""
@@ -1113,7 +1114,7 @@ http_with_status() { curl -s -w '\n%{http_code}' "$@" 2>&1 || true; }
 if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
     fail "closed: port $PORT still in use 10s after stopping serve"
 else
-    env -u PRESEMBLE_SESSION_KEY cargo polylith cargo --profile "$PROFILE" run --bin presemble -- serve "$SITE_DIR/" > "$SITE_DIR/serve-closed.log" 2>&1 &
+    env -u PRESEMBLE_SESSION_KEY cargo polylith cargo --profile "$PROFILE" run --bin presemble -- serve "$SITE_DIR/" --port "$PORT" > "$SITE_DIR/serve-closed.log" 2>&1 &
     PID=$!
 
     for i in $(seq 1 30); do

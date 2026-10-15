@@ -309,10 +309,11 @@ page-status:
     grep -E 'FAIL|Error|error' target/page-status.log >&2 || true
     exit 1
 
-# Run the smoketest (tools/smoketest.sh) against the given polylith profile.
+# Run the smoketest (tools/smoketest.sh) against the given polylith profile,
+# serving on `port` (another port runs beside a serve on 3000).
 [group('develop')]
-smoketest profile="dev":
-    ./tools/smoketest.sh {{ profile }}
+smoketest profile="dev" port="3000":
+    PRESEMBLE_SMOKE_PORT={{ port }} ./tools/smoketest.sh {{ profile }}
 
 # Run workspace tests (dev profile). Prefer the rust-codebase MCP `cargo_test`.
 [group('develop')]
