@@ -443,6 +443,13 @@ grep -qF presemble_session "$COOKIE_JAR" || login_fail "no presemble_session coo
 PROBE=$(curl -s -o /dev/null -w '%{http_code}' -b "$COOKIE_JAR" "http://127.0.0.1:$PORT/_presemble/session")
 [ "$PROBE" = "200" ] || login_fail "authenticated probe returned $PROBE"
 log "Logged in (dev session)"
+# serve's stdout is a file here, not a terminal: the Login URL is plain text,
+# never an OSC 8 hyperlink.
+if grep -qF $'\e]8;;' "$SITE_DIR/serve.log"; then
+    fail "serve.log (not a terminal) carries an OSC 8 hyperlink"
+else
+    pass "serve.log (not a terminal) has no OSC 8 hyperlink"
+fi
 
 # ── Test: Auth boundary (ADR-054) ──────────────────────────────────────────
 # Plain curl, no cookie.

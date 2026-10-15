@@ -502,6 +502,7 @@ struct Bound {
 async fn bind_then_banner(
     mode: &EditorialMode,
     port: u16,
+    hyperlinks: Hyperlinks,
     sessions: impl FnOnce(&EditorialMode) -> (Arc<dyn SessionStore>, Option<accounts::SessionToken>),
 ) -> Result<Bound, CliError> {
     // Bind first: a login URL may only name a port this process holds (a
@@ -514,7 +515,12 @@ async fn bind_then_banner(
         .local_addr()
         .map_err(|e| CliError::Render(format!("failed to read the bound address: {e}")))?;
     let (session_store, login_token) = sessions(mode);
-    let banner = editorial_banner(mode, login_token.as_ref().map(|t| t.as_str()), addr);
+    let banner = editorial_banner(
+        mode,
+        login_token.as_ref().map(|t| t.as_str()),
+        addr,
+        hyperlinks,
+    );
     Ok(Bound {
         listener,
         addr,
@@ -523,12 +529,33 @@ async fn bind_then_banner(
     })
 }
 
+/// Whether the banner may write terminal hyperlinks (OSC 8): only when it
+/// goes to a terminal, never into a log or a pipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hyperlinks {
+    On,
+    Off,
+}
+
+impl Hyperlinks {
+    /// On when standard output is a terminal.
+    fn for_stdout() -> Self {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() {
+            Hyperlinks::On
+        } else {
+            Hyperlinks::Off
+        }
+    }
+}
+
 /// Startup text describing the editorial mode, for a serve listening on
 /// `addr` (the bound address). Each line ends with `\n`.
 fn editorial_banner(
     mode: &EditorialMode,
     login_token: Option<&str>,
     addr: std::net::SocketAddr,
+    hyperlinks: Hyperlinks,
 ) -> String {
     let mut out = String::new();
     match mode {
@@ -549,9 +576,15 @@ fn editorial_banner(
                 out.push('\n');
                 out.push_str("  --dev-session active\n");
                 out.push_str(&format!("  Cookie value: presemble_session={tok}\n"));
-                out.push_str(&format!(
-                    "  Login URL:    http://{addr}/_presemble/login?token={tok}\n"
-                ));
+                let url = format!("http://{addr}/_presemble/login?token={tok}");
+                // About 100 characters: a terminal may wrap it, and clicking
+                // one row would open a truncated token. As a hyperlink the
+                // whole URL opens, however it wraps.
+                let link = match hyperlinks {
+                    Hyperlinks::On => format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\"),
+                    Hyperlinks::Off => url,
+                };
+                out.push_str(&format!("  Login URL:    {link}\n"));
                 out.push('\n');
             }
         }
@@ -974,7 +1007,7 @@ async fn serve_async(
         addr,
         session_store,
         banner,
-    } = bind_then_banner(&mode, port, session_store_for).await?;
+    } = bind_then_banner(&mode, port, Hyperlinks::for_stdout(), session_store_for).await?;
     print!("{banner}");
 
     let state = AppState {
@@ -7262,7 +7295,7 @@ mod tests {
 
     #[test]
     fn closed_banner_explains_how_to_enable_editing() {
-        let banner = editorial_banner(&EditorialMode::Closed, None, bound_3000());
+        let banner = editorial_banner(&EditorialMode::Closed, None, bound_3000(), Hyperlinks::Off);
         assert!(banner.contains("--dev-session"), "banner: {banner}");
         assert!(banner.contains("PRESEMBLE_SESSION_KEY"), "banner: {banner}");
         assert!(
@@ -7276,7 +7309,7 @@ mod tests {
         let mode = EditorialMode::DevLogin {
             label: "dev".to_string(),
         };
-        let banner = editorial_banner(&mode, Some("TOK"), bound_3000());
+        let banner = editorial_banner(&mode, Some("TOK"), bound_3000(), Hyperlinks::Off);
         assert!(
             banner.contains("Login URL:    http://127.0.0.1:3000/_presemble/login?token="),
             "banner: {banner}"
@@ -7291,13 +7324,62 @@ mod tests {
         );
     }
 
+    /// `text` without its OSC 8 hyperlink sequences (`ESC ] 8 ; ; … ESC \`).
+    fn without_hyperlinks(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("\x1b]8;;") {
+            out.push_str(&rest[..start]);
+            let after = &rest[start..];
+            let end = after
+                .find("\x1b\\")
+                .expect("an OSC 8 sequence ends with ESC \\");
+            rest = &after[end + 2..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn the_login_url_is_a_hyperlink_on_a_terminal() {
+        let mode = EditorialMode::DevLogin {
+            label: "dev".to_string(),
+        };
+
+        let banner = editorial_banner(&mode, Some("TOK"), bound_3000(), Hyperlinks::On);
+
+        let url = "http://127.0.0.1:3000/_presemble/login?token=TOK";
+        assert!(
+            banner.contains(&format!(
+                "  Login URL:    \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\\n"
+            )),
+            "banner: {banner:?}"
+        );
+        assert!(
+            banner.contains("  Cookie value: presemble_session=TOK\n"),
+            "the cookie line is not a link: {banner:?}"
+        );
+    }
+
+    #[test]
+    fn a_hyperlinked_banner_reads_as_the_plain_one() {
+        let mode = EditorialMode::DevLogin {
+            label: "dev".to_string(),
+        };
+
+        let linked = editorial_banner(&mode, Some("TOK"), bound_3000(), Hyperlinks::On);
+        let plain = editorial_banner(&mode, Some("TOK"), bound_3000(), Hyperlinks::Off);
+
+        assert_eq!(without_hyperlinks(&linked), plain);
+    }
+
     #[tokio::test]
     async fn banner_names_the_port_actually_bound() {
         let mode = EditorialMode::DevLogin {
             label: "dev".to_string(),
         };
 
-        let bound = bind_then_banner(&mode, 0, session_store_for)
+        let bound = bind_then_banner(&mode, 0, Hyperlinks::Off, session_store_for)
             .await
             .expect("binds a free port");
 
@@ -7321,7 +7403,7 @@ mod tests {
         };
         let minted = std::cell::Cell::new(false);
 
-        let result = bind_then_banner(&mode, port, |mode| {
+        let result = bind_then_banner(&mode, port, Hyperlinks::Off, |mode| {
             minted.set(true);
             session_store_for(mode)
         })
@@ -7343,6 +7425,7 @@ mod tests {
             },
             None,
             bound_3000(),
+            Hyperlinks::Off,
         );
         assert!(warned.contains("is ignored"), "banner: {warned}");
         let plain = editorial_banner(
@@ -7352,6 +7435,7 @@ mod tests {
             },
             None,
             bound_3000(),
+            Hyperlinks::Off,
         );
         assert!(!plain.contains("is ignored"), "banner: {plain}");
     }
