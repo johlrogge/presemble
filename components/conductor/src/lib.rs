@@ -6,6 +6,8 @@ mod protocol;
 pub(crate) mod self_write_tracker;
 pub(crate) mod site_resolve;
 pub(crate) mod suggestion_apply;
+#[cfg(test)]
+mod test_site;
 
 pub use autosave::{AutoSaveConfig, Clock, SystemClock};
 pub use client::{
@@ -103,7 +105,7 @@ mod tests {
 
     #[test]
     fn edit_slot_modifies_file_and_emits_pages_rebuilt() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_site::TestSite::new();
 
         // Set up schemas directory with article schema
         let schemas_dir = dir.path().join("schemas");
@@ -343,8 +345,8 @@ mod tests {
     // ── SiteGraph ─────────────────────────────────────────────────────────────
 
     /// Build a conductor backed by a real temp-dir repo with two post content files.
-    fn two_post_conductor() -> (tempfile::TempDir, Conductor) {
-        let dir = tempfile::tempdir().unwrap();
+    fn two_post_conductor() -> (crate::test_site::TestSite, Conductor) {
+        let dir = crate::test_site::TestSite::new();
 
         // Schema and templates
         let schema_dir = dir.path().join("schemas/post");
@@ -558,8 +560,8 @@ mod tests {
     const AUTHOR_SCHEMA_SRC: &str = "# Author name {#name}\n\n----\nBio.\n";
 
     /// Build a conductor with post (with author link) + author schemas and one author item.
-    fn post_author_conductor() -> (tempfile::TempDir, Conductor) {
-        let dir = tempfile::tempdir().unwrap();
+    fn post_author_conductor() -> (crate::test_site::TestSite, Conductor) {
+        let dir = crate::test_site::TestSite::new();
 
         // Post schema
         let post_schema_dir = dir.path().join("schemas/post");
@@ -684,7 +686,7 @@ mod tests {
 
     #[test]
     fn list_template_names_returns_the_sites_templates() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_site::TestSite::new();
         let templates = dir.path().join("templates");
         std::fs::create_dir_all(templates.join("post")).unwrap();
         std::fs::create_dir_all(templates.join("docs")).unwrap();
@@ -821,8 +823,8 @@ mod tests {
 
     /// Build a two-post conductor that uses a simple HTML template (no evaluator forms),
     /// so that `render_page_output` can actually render without a parse error.
-    fn two_post_conductor_html_template() -> (tempfile::TempDir, Conductor) {
-        let dir = tempfile::tempdir().unwrap();
+    fn two_post_conductor_html_template() -> (crate::test_site::TestSite, Conductor) {
+        let dir = crate::test_site::TestSite::new();
 
         let schema_dir = dir.path().join("schemas/post");
         std::fs::create_dir_all(&schema_dir).unwrap();

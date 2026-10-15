@@ -5725,8 +5725,8 @@ mod smoke_tests {
     ///   schemas/post/item.md      — a simple schema with a title slot
     ///   templates/post/item.hiccup — a minimal hiccup template
     ///   content/post/hello.md     — a content file with title and body
-    fn build_minimal_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_minimal_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
@@ -5743,7 +5743,7 @@ mod smoke_tests {
 
     /// Create a conductor for the given tempdir using the builder-based repo
     /// so the schema cache is populated from disk.
-    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -5897,8 +5897,8 @@ mod validation_report_tests {
     /// A valid site under `<tmp>/site` (so the output dir `<tmp>/output/site`
     /// stays inside the tempdir): a post schema with two items and a
     /// collection page.
-    fn valid_site() -> (tempfile::TempDir, PathBuf) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn valid_site() -> (crate::test_site::TestSite, PathBuf) {
+        let tmp = crate::test_site::TestSite::new();
         let site = tmp.path().join("site");
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(site.join(dir)).expect("create dir");
@@ -6038,7 +6038,7 @@ mod populate_collection_tests {
     const COLLECTION_CONTENT_SRC: &str = "heading: Posts\n";
 
     /// Create a conductor for a tempdir (filesystem-backed).
-    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -6053,8 +6053,8 @@ mod populate_collection_tests {
     ///
     /// After populating the node store, `/post/` must be indexed as a
     /// collection page.
-    fn build_site_with_collection() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_site_with_collection() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
@@ -6108,8 +6108,8 @@ mod populate_collection_tests {
     // Test 2: root_collection_page_in_graph
     // -------------------------------------------------------------------------
 
-    fn build_root_collection_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_root_collection_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas")).expect("create schemas");
@@ -6155,8 +6155,8 @@ mod populate_collection_tests {
     /// A site with item pages and a root collection template but NO root schema
     /// or root content. After populating the node store the root `/` node should still
     /// appear (legacy fallback behaviour).
-    fn build_legacy_fallback_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_legacy_fallback_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
@@ -6237,8 +6237,8 @@ mod node_store_index_tests {
     const CONTENT_SRC: &str = "# Hello World\n\n----\n\nBody text here\n";
     const CONTENT_SRC2: &str = "# Second Post\n\n----\n\nMore body text\n";
 
-    fn build_site_with_two_posts() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_site_with_two_posts() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
@@ -6254,7 +6254,7 @@ mod node_store_index_tests {
         tmp
     }
 
-    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -6339,7 +6339,7 @@ mod node_store_index_tests {
     /// that slot.
     #[test]
     fn datagraph_for_document_link_reads_the_title_heading_whatever_its_slot() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/author", "templates/author", "content/author"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -6453,8 +6453,8 @@ mod node_store_index_tests {
 
     /// Site with content/index.md (stem = ""). Verifies that datagraph_for_document
     /// injects _presemble_file = "content/index.md" for the root index page.
-    fn build_root_index_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_root_index_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas")).expect("create schemas");
@@ -6477,8 +6477,8 @@ mod node_store_index_tests {
 
     /// Site with a root template but NO content/index.md (legacy fallback root).
     /// In this case the conductor synthesises a dummy node with file = "".
-    fn build_legacy_root_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_legacy_root_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
@@ -6556,8 +6556,8 @@ mod update_document_in_store_tests {
     const CONTENT_V1: &str = "# Original Title\n\n----\n\nOriginal body\n";
     const CONTENT_V2: &str = "# Updated Title\n\n----\n\nUpdated body\n";
 
-    fn build_single_post_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_single_post_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/post")).expect("create schemas/post");
@@ -6572,7 +6572,7 @@ mod update_document_in_store_tests {
         tmp
     }
 
-    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -6662,7 +6662,7 @@ mod update_document_in_store_tests {
 
     #[test]
     fn root_stem_item_is_not_duplicated_by_an_edit() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("schemas")).expect("create schemas");
         std::fs::create_dir_all(root.join("templates")).expect("create templates");
@@ -6724,7 +6724,7 @@ mod update_document_in_store_tests {
 
     const OTHER_CONTENT: &str = "# Other Title\n\n----\n\nOther body\n";
 
-    fn build_two_post_site() -> tempfile::TempDir {
+    fn build_two_post_site() -> crate::test_site::TestSite {
         let tmp = build_single_post_site();
         std::fs::write(tmp.path().join("content/post/other.md"), OTHER_CONTENT)
             .expect("write other content");
@@ -6744,7 +6744,7 @@ mod update_document_in_store_tests {
         }
     }
 
-    fn rebuild_hello_twice(conductor: &Conductor, tmp: &tempfile::TempDir) {
+    fn rebuild_hello_twice(conductor: &Conductor, tmp: &crate::test_site::TestSite) {
         let path = tmp.path().join("content/post/hello.md");
         conductor
             .rebuild_page(&path, CONTENT_V2)
@@ -7145,8 +7145,8 @@ mod workspace_hash_tests {
     /// Create a minimal Conductor backed by a temporary directory that is NOT
     /// a git repo. Reuses the same `build_minimal_site` / `make_conductor`
     /// helpers from `smoke_tests`.
-    fn build_minimal_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_minimal_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         const SCHEMA_SRC: &str = "# Title {#title}\noccurs\n: exactly once\n";
         const TEMPLATE_SRC: &str = "[:div [:h1 title]]";
@@ -7161,7 +7161,7 @@ mod workspace_hash_tests {
         tmp
     }
 
-    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -7233,8 +7233,8 @@ mod creation_check_tests {
     /// - a "link-slot" slot containing a link element
     /// - a "summary" slot containing two paragraphs
     /// - a body paragraph
-    fn make_conductor_with_doc() -> (Conductor, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn make_conductor_with_doc() -> (Conductor, crate::test_site::TestSite) {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
@@ -7345,7 +7345,7 @@ mod creation_check_tests {
         }
     }
 
-    fn no_suggestions_persisted(conductor: &Conductor, tmp: &tempfile::TempDir) {
+    fn no_suggestions_persisted(conductor: &Conductor, tmp: &crate::test_site::TestSite) {
         assert!(conductor.ned_suggestions.read().unwrap().is_empty());
         let dir = tmp.path().join(".presemble/suggestions/ned");
         // The `MODEL` marker (written at startup) is not a suggestion.
@@ -7539,8 +7539,8 @@ mod ned_suggestion_handler_tests {
     /// - "title" slot with a heading "Test Title" (SingleText)
     /// - "link-slot" slot with a link (NonText)
     /// - one body paragraph "Body text"
-    fn make_conductor_with_doc() -> (Conductor, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn make_conductor_with_doc() -> (Conductor, crate::test_site::TestSite) {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
@@ -7706,7 +7706,7 @@ mod ned_suggestion_handler_tests {
     }
 
     /// The `sug-*.json` files in the site's NED suggestion directory.
-    fn suggestion_files(tmp: &tempfile::TempDir) -> usize {
+    fn suggestion_files(tmp: &crate::test_site::TestSite) -> usize {
         let dir = tmp.path().join(".presemble/suggestions/ned");
         std::fs::read_dir(&dir)
             .map(|d| {
@@ -8500,8 +8500,8 @@ mod suggestion_accept_tests {
         r#"(ned/text-containing (ned/body (ned/doc-by-path "content/post/first.md")) "Alpha")"#;
     const CODE_TEXT: &str = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "code-block" 0))"#;
 
-    fn build_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("schemas/post")).unwrap();
         std::fs::create_dir_all(root.join("templates/post")).unwrap();
@@ -8512,7 +8512,7 @@ mod suggestion_accept_tests {
         tmp
     }
 
-    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -9015,7 +9015,7 @@ mod suggestion_accept_tests {
     /// A and B on disk; unsaved edits in both ("Edited A", "Edited B"); then
     /// both files are overwritten from outside and the watcher reports it.
     /// With `both == false` only A is edited and overwritten.
-    fn conflicted(both: bool) -> (Conductor, tempfile::TempDir) {
+    fn conflicted(both: bool) -> (Conductor, crate::test_site::TestSite) {
         let tmp = build_site();
         std::fs::write(
             tmp.path().join(OTHER_FILE),
@@ -9046,7 +9046,7 @@ mod suggestion_accept_tests {
         editorial_types::ConflictConsent::Overwrite(files.iter().map(|f| f.to_string()).collect())
     }
 
-    fn disk(tmp: &tempfile::TempDir, file: &str) -> String {
+    fn disk(tmp: &crate::test_site::TestSite, file: &str) -> String {
         std::fs::read_to_string(tmp.path().join(file)).unwrap()
     }
 
@@ -10208,8 +10208,8 @@ mod block_edit_tests {
     const FIRST_PARAGRAPH: &str = r#"(ned/nth-of-kind (ned/children (ned/body (ned/doc-by-path "content/post/first.md"))) "paragraph" 0)"#;
     const TITLE_HEADING: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "title")) "heading" 0)"#;
 
-    fn build_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("schemas/post")).unwrap();
         std::fs::create_dir_all(root.join("templates/post")).unwrap();
@@ -10220,7 +10220,7 @@ mod block_edit_tests {
         tmp
     }
 
-    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -10407,7 +10407,7 @@ mod block_edit_tests {
     }
 
     /// The `sug-*.json` files in the site's NED suggestion directory.
-    fn suggestion_files(tmp: &tempfile::TempDir) -> usize {
+    fn suggestion_files(tmp: &crate::test_site::TestSite) -> usize {
         let dir = tmp.path().join(".presemble/suggestions/ned");
         std::fs::read_dir(&dir)
             .map(|d| {
@@ -10471,7 +10471,7 @@ mod block_edit_tests {
     }
 
     /// A site whose title is `# Hello *World*`.
-    fn formatted_title_site() -> tempfile::TempDir {
+    fn formatted_title_site() -> crate::test_site::TestSite {
         let tmp = build_site();
         std::fs::write(
             tmp.path().join(FILE),
@@ -10481,7 +10481,7 @@ mod block_edit_tests {
         tmp
     }
 
-    fn saved_file(tmp: &tempfile::TempDir, conductor: &Conductor) -> String {
+    fn saved_file(tmp: &crate::test_site::TestSite, conductor: &Conductor) -> String {
         let result = conductor.handle_command(Command::SaveBuffer {
             path: editorial_types::SitePath::parse(FILE).expect("valid"),
             consent: Default::default(),
@@ -10554,7 +10554,7 @@ mod block_edit_tests {
     }
 
     /// A site whose first body paragraph is `See ![c](c.png) *here*.`.
-    fn formatted_paragraph_site() -> tempfile::TempDir {
+    fn formatted_paragraph_site() -> crate::test_site::TestSite {
         let tmp = build_site();
         std::fs::write(
             tmp.path().join(FILE),
@@ -10684,7 +10684,7 @@ mod block_edit_tests {
     }
 
     /// `build_site` plus a root page that lists the post by link.
-    fn site_with_listing() -> tempfile::TempDir {
+    fn site_with_listing() -> crate::test_site::TestSite {
         let tmp = build_site();
         let root = tmp.path();
         std::fs::write(
@@ -10866,7 +10866,7 @@ mod block_edit_tests {
             req.proposed = BlockText::Edn("[:paragraph \"Alpha paragraph.\"]".to_string());
             req
         };
-        let saved = |tmp: &tempfile::TempDir, conductor: &Conductor| {
+        let saved = |tmp: &crate::test_site::TestSite, conductor: &Conductor| {
             let result = conductor.handle_command(Command::SaveBuffer {
                 path: editorial_types::SitePath::parse(FILE).expect("valid"),
                 consent: Default::default(),
@@ -11035,7 +11035,7 @@ mod block_edit_tests {
     #[test]
     fn block_edit_fills_an_empty_body_and_the_save_writes_the_separator() {
         const POST: &str = "content/post/p.md";
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -11620,8 +11620,8 @@ mod apply_ned_program_diagnostic_tests {
     /// Build a minimal conductor with a document loaded into the NodeStore.
     ///
     /// Document at `content/test/doc.md` has a "title" slot with a heading.
-    fn make_conductor_with_doc() -> (Conductor, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn make_conductor_with_doc() -> (Conductor, crate::test_site::TestSite) {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
@@ -11778,8 +11778,8 @@ mod ned_program_plan_tests {
 
     /// `content/test/doc.md`: title "Test Title"; summary "One", "Two"; body
     /// "Alpha and Alpha", "Beta". `content/test/other.md`: title "Other Title".
-    fn make_conductor() -> (Conductor, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn make_conductor() -> (Conductor, crate::test_site::TestSite) {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
         std::fs::create_dir_all(root.join("templates/test")).expect("templates");
@@ -12272,8 +12272,8 @@ mod body_structural_bsave_tests {
     /// Conductor with `content/test/doc.md` whose body is:
     /// H2 "Intro", P "Intro para one", P "Intro para two", H2 "Why Presemble", P "Why para".
     /// Returns the conductor, its tempdir, and the document root NodeId.
-    fn make_conductor_with_doc() -> (Conductor, tempfile::TempDir, node_store::NodeId) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn make_conductor_with_doc() -> (Conductor, crate::test_site::TestSite, node_store::NodeId) {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/test")).expect("schemas");
@@ -12657,8 +12657,8 @@ mod schema_url_routing_tests {
     ///   - Root index (`content/index.md`, stem="", page-kind="collection", url="/")
     ///   - Post collection (`content/post/index.md`, stem="post", page-kind="collection", url="/post/")
     ///   - Two post items (`content/post/foo.md` url="/post/foo", `content/post/bar.md` url="/post/bar")
-    fn build_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn build_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         // schemas
@@ -12689,7 +12689,7 @@ mod schema_url_routing_tests {
         tmp
     }
 
-    fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -12825,7 +12825,7 @@ mod schema_url_routing_tests {
     #[test]
     fn page_url_for_schema_item_falls_back_to_first_item_when_no_collection() {
         // Build a site WITHOUT a collection index page for "post"
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
 
         std::fs::create_dir_all(root.join("schemas/post")).expect("schemas/post");
@@ -13034,8 +13034,8 @@ mod link_expression_pipeline_tests {
         [Latest posts](->> :post (sort-by :published :desc) (take 2)) {#latest}\n\n\
         [In the news](->> :post (filter :category \"news\")) {#news}\n\n----\n\nWelcome.\n";
 
-    pub(super) fn build_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    pub(super) fn build_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for stem in ["post", "author", "page"] {
             std::fs::create_dir_all(root.join(format!("schemas/{stem}"))).unwrap();
@@ -13067,7 +13067,7 @@ mod link_expression_pipeline_tests {
         tmp
     }
 
-    pub(super) fn make_conductor(tmp: &tempfile::TempDir) -> Conductor {
+    pub(super) fn make_conductor(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -13344,7 +13344,7 @@ mod link_expression_pipeline_tests {
 
     use std::collections::BTreeSet;
 
-    fn write(tmp: &tempfile::TempDir, rel: &str, text: &str) {
+    fn write(tmp: &crate::test_site::TestSite, rel: &str, text: &str) {
         std::fs::write(tmp.path().join(rel), text).unwrap();
     }
 
@@ -13375,7 +13375,7 @@ mod link_expression_pipeline_tests {
     /// rebuild these tests pin.
     fn document_changed(
         conductor: &Conductor,
-        _tmp: &tempfile::TempDir,
+        _tmp: &crate::test_site::TestSite,
         rel: &str,
         text: &str,
     ) -> BTreeSet<String> {
@@ -14097,8 +14097,8 @@ mod model_migration_tests {
     const CODE_BLOCK: &str = r#"(ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "code-block" 0)"#;
     const CODE_TEXT: &str = r#"(ned/text-in (ned/nth-of-kind (ned/children (ned/slot (ned/doc-by-path "content/post/first.md") "body")) "code-block" 0))"#;
 
-    fn site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -14109,13 +14109,13 @@ mod model_migration_tests {
         tmp
     }
 
-    fn dir(tmp: &tempfile::TempDir) -> PathBuf {
+    fn dir(tmp: &crate::test_site::TestSite) -> PathBuf {
         tmp.path().join(".presemble/suggestions/ned")
     }
 
     /// Write a suggestion record as an older conductor would have.
     fn write_suggestion(
-        tmp: &tempfile::TempDir,
+        tmp: &crate::test_site::TestSite,
         id: &str,
         selection: &str,
         mutation: NedMutation,
@@ -14141,7 +14141,7 @@ mod model_migration_tests {
         .unwrap();
     }
 
-    fn start(tmp: &tempfile::TempDir) -> Conductor {
+    fn start(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -14160,11 +14160,11 @@ mod model_migration_tests {
         ids
     }
 
-    fn file_exists(tmp: &tempfile::TempDir, id: &str) -> bool {
+    fn file_exists(tmp: &crate::test_site::TestSite, id: &str) -> bool {
         dir(tmp).join(format!("{id}.json")).exists()
     }
 
-    fn marker(tmp: &tempfile::TempDir) -> Option<String> {
+    fn marker(tmp: &crate::test_site::TestSite) -> Option<String> {
         std::fs::read_to_string(dir(tmp).join("MODEL")).ok()
     }
 
@@ -14303,7 +14303,7 @@ mod model_migration_tests {
     /// start.
     #[test]
     fn migration_runs_each_step_once_in_order() {
-        let both = |tmp: &tempfile::TempDir| {
+        let both = |tmp: &crate::test_site::TestSite| {
             write_suggestion(
                 tmp,
                 "sug-heading",
@@ -14919,7 +14919,9 @@ mod model_migration_tests {
     }
 
     /// Every file under `.presemble` with its bytes, by path.
-    fn presemble_snapshot(tmp: &tempfile::TempDir) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn presemble_snapshot(
+        tmp: &crate::test_site::TestSite,
+    ) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
         fn walk(dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
@@ -15018,8 +15020,8 @@ mod empty_slot_tests {
     /// A site whose posts are: `empty` (an empty file, as a new file is),
     /// `partial` (a title and a body, no summary or author), `bare` (a separator
     /// and nothing else) and `full`.
-    fn site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in [
             "schemas/post",
@@ -15051,7 +15053,7 @@ mod empty_slot_tests {
         tmp
     }
 
-    fn start(tmp: &tempfile::TempDir) -> Conductor {
+    fn start(tmp: &crate::test_site::TestSite) -> Conductor {
         let repo = site_repository::SiteRepository::builder()
             .from_dir(tmp.path())
             .build();
@@ -15366,8 +15368,8 @@ mod emitted_address_tests {
     }
 
     /// A copy of the example site (`site/`): content, schemas, templates.
-    fn example_site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn example_site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../site");
         for dir in ["content", "schemas", "templates"] {
             copy_dir(&source.join(dir), &tmp.path().join(dir));
@@ -15390,8 +15392,8 @@ mod emitted_address_tests {
     }
 
     /// A site in a tempdir from `(path, text)` files, and its conductor.
-    fn site_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Conductor) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn site_with(files: &[(&str, &str)]) -> (crate::test_site::TestSite, Conductor) {
+        let tmp = crate::test_site::TestSite::new();
         for (rel, text) in files {
             let path = tmp.path().join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -15444,7 +15446,7 @@ mod emitted_address_tests {
     const AUTHOR_JO: &str = "# Joakim Ohlrogge\n\n----\n\nWrites code.\n";
 
     /// A post whose byline is its author's name, editable (`:as`).
-    fn post_with_author_site() -> (tempfile::TempDir, Conductor) {
+    fn post_with_author_site() -> (crate::test_site::TestSite, Conductor) {
         site_with(&[
             ("schemas/author/item.md", AUTHOR_SCHEMA),
             ("templates/author/item.hiccup", AUTHOR_TEMPLATE),
@@ -15608,7 +15610,7 @@ mod emitted_address_tests {
     /// (The guide had to avoid it: the emitted addresses did not resolve.)
     #[test]
     fn a_link_alone_in_a_table_cell_has_an_address_that_resolves() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/guide", "templates/guide", "content/guide"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -15872,7 +15874,7 @@ mod path_boundary_tests {
     const BUFFER: &str = "# Overwritten\n\n----\n\nThis must never reach the file.\n";
 
     struct World {
-        tmp: tempfile::TempDir,
+        tmp: crate::test_site::TestSite,
         conductor: Conductor,
     }
 
@@ -15892,7 +15894,7 @@ mod path_boundary_tests {
     }
 
     fn world() -> World {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let site = tmp.path().join("site");
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(site.join(dir)).unwrap();

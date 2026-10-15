@@ -29,14 +29,14 @@ impl Clock for TestClock {
 }
 
 struct World {
-    tmp: tempfile::TempDir,
+    tmp: crate::test_site::TestSite,
     clock: Arc<TestClock>,
     conductor: Conductor,
 }
 
 impl World {
     fn new() -> World {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();

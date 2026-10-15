@@ -422,8 +422,8 @@ mod tests {
         "# Post title {#title}\noccurs\n: exactly once\ncontent\n: capitalized\n\n----\nBody.\n";
     const TEMPLATE: &str = r#"<html><body><presemble:insert data="(ref input.title)" as="h1"></presemble:insert><div><presemble:insert data="(ref input.body)"></presemble:insert></div></body></html>"#;
 
-    fn conductor_with(content: &str) -> (tempfile::TempDir, Conductor) {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn conductor_with(content: &str) -> (crate::test_site::TestSite, Conductor) {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -493,7 +493,7 @@ mod tests {
     /// page lists its items above its own heading.
     #[test]
     fn the_page_script_names_the_pages_own_file() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -850,7 +850,7 @@ mod tests {
 
     /// The editor has `mine` unsaved, and the file then changes to `disk`
     /// outside Presemble.
-    fn conflicted(conductor: &Conductor, tmp: &tempfile::TempDir, mine: &str, disk: &str) {
+    fn conflicted(conductor: &Conductor, tmp: &crate::test_site::TestSite, mine: &str, disk: &str) {
         conductor.handle_command(Command::EditorChanged {
             path: x_path(),
             text: mine.to_string(),

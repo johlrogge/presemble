@@ -2184,7 +2184,7 @@ mod tests {
     const CONTENT: &str = "# First Post\n\n----\n\nAlpha para.\n\nBeta para.\n\n- one\n- two\n- three\n\n> quoted a\n>\n> quoted b\n\nGamma para.\n";
 
     struct World {
-        tmp: tempfile::TempDir,
+        tmp: crate::test_site::TestSite,
         conductor: Conductor,
     }
 
@@ -2193,7 +2193,7 @@ mod tests {
     }
 
     fn world_with(content: &str) -> World {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -3277,7 +3277,7 @@ mod tests {
             samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
             samples[((samples.len() as f64 - 1.0) * p).round() as usize]
         }
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
