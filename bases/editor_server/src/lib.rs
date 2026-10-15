@@ -746,6 +746,9 @@ pub fn serve() -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod test_site;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use nrepl::NreplHandler;
@@ -756,8 +759,8 @@ mod tests {
     const FILE: &str = "content/post/first.md";
     const OTHER: &str = "content/post/second.md";
 
-    fn site() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().expect("tempdir");
+    fn site() -> crate::test_site::TestSite {
+        let tmp = crate::test_site::TestSite::new();
         let root = tmp.path();
         for dir in ["schemas/post", "templates/post", "content/post"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -777,7 +780,7 @@ mod tests {
         published: Arc<Mutex<Vec<ConductorEvent>>>,
         status: WriterStatus,
         writer: Option<std::thread::JoinHandle<()>>,
-        _site: tempfile::TempDir,
+        _site: crate::test_site::TestSite,
     }
 
     impl Harness {
