@@ -469,8 +469,67 @@ fn resolve_editorial_mode(
     Ok(select_editorial_mode(key, dev_label))
 }
 
-/// Startup text describing the editorial mode. Each line ends with `\n`.
-fn editorial_banner(mode: &EditorialMode, login_token: Option<&str>, port: u16) -> String {
+/// The session store for the editorial mode, and the login token minted for
+/// it (a dev session only).
+fn session_store_for(
+    mode: &EditorialMode,
+) -> (Arc<dyn SessionStore>, Option<accounts::SessionToken>) {
+    match mode {
+        EditorialMode::Hosted { key, .. } => (
+            Arc::new(MagicLinkSessionStore::with_key(key.clone())) as Arc<dyn SessionStore>,
+            None,
+        ),
+        EditorialMode::DevLogin { label } => {
+            let ds = DevSessionStore::new_random();
+            let token = ds.mint(label);
+            (Arc::new(ds) as Arc<dyn SessionStore>, Some(token))
+        }
+        EditorialMode::Closed => (Arc::new(ClosedSessionStore) as Arc<dyn SessionStore>, None),
+    }
+}
+
+/// What serve holds once it is listening: the listener, the address it got,
+/// the session store and the startup banner for that address.
+struct Bound {
+    listener: TcpListener,
+    addr: std::net::SocketAddr,
+    session_store: Arc<dyn SessionStore>,
+    banner: String,
+}
+
+/// Listen on `127.0.0.1:port`, then build the session store (`sessions`
+/// mints the dev login token) and the banner for the address actually bound.
+async fn bind_then_banner(
+    mode: &EditorialMode,
+    port: u16,
+    sessions: impl FnOnce(&EditorialMode) -> (Arc<dyn SessionStore>, Option<accounts::SessionToken>),
+) -> Result<Bound, CliError> {
+    // Bind first: a login URL may only name a port this process holds (a
+    // token printed for a port another serve holds is "Invalid or expired").
+    let requested = format!("127.0.0.1:{port}");
+    let listener = TcpListener::bind(&requested)
+        .await
+        .map_err(|e| CliError::Render(format!("failed to bind {requested}: {e}")))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| CliError::Render(format!("failed to read the bound address: {e}")))?;
+    let (session_store, login_token) = sessions(mode);
+    let banner = editorial_banner(mode, login_token.as_ref().map(|t| t.as_str()), addr);
+    Ok(Bound {
+        listener,
+        addr,
+        session_store,
+        banner,
+    })
+}
+
+/// Startup text describing the editorial mode, for a serve listening on
+/// `addr` (the bound address). Each line ends with `\n`.
+fn editorial_banner(
+    mode: &EditorialMode,
+    login_token: Option<&str>,
+    addr: std::net::SocketAddr,
+) -> String {
     let mut out = String::new();
     match mode {
         EditorialMode::Hosted {
@@ -491,7 +550,7 @@ fn editorial_banner(mode: &EditorialMode, login_token: Option<&str>, port: u16) 
                 out.push_str("  --dev-session active\n");
                 out.push_str(&format!("  Cookie value: presemble_session={tok}\n"));
                 out.push_str(&format!(
-                    "  Login URL:    http://127.0.0.1:{port}/_presemble/login?token={tok}\n"
+                    "  Login URL:    http://{addr}/_presemble/login?token={tok}\n"
                 ));
                 out.push('\n');
             }
@@ -910,24 +969,13 @@ async fn serve_async(
         });
     }
 
-    // Build session store from the selected editorial mode.
-    let (session_store, login_token): (Arc<dyn SessionStore>, Option<accounts::SessionToken>) =
-        match &mode {
-            EditorialMode::Hosted { key, .. } => (
-                Arc::new(MagicLinkSessionStore::with_key(key.clone())) as Arc<dyn SessionStore>,
-                None,
-            ),
-            EditorialMode::DevLogin { label } => {
-                let ds = DevSessionStore::new_random();
-                let token = ds.mint(label);
-                (Arc::new(ds) as Arc<dyn SessionStore>, Some(token))
-            }
-            EditorialMode::Closed => (Arc::new(ClosedSessionStore) as Arc<dyn SessionStore>, None),
-        };
-    print!(
-        "{}",
-        editorial_banner(&mode, login_token.as_ref().map(|t| t.as_str()), port)
-    );
+    let Bound {
+        listener,
+        addr,
+        session_store,
+        banner,
+    } = bind_then_banner(&mode, port, session_store_for).await?;
+    print!("{banner}");
 
     let state = AppState {
         editorial_dir: out_dir.clone(),
@@ -940,14 +988,10 @@ async fn serve_async(
 
     let app = app_router(state);
 
-    let addr = format!("127.0.0.1:{port}");
+    let addr = addr.to_string();
     println!("Serving at http://{addr}");
     println!("Press Ctrl-C to stop.");
     print_available_pages(&out_dir, &addr);
-
-    let listener = TcpListener::bind(&addr)
-        .await
-        .map_err(|e| CliError::Render(format!("failed to bind {addr}: {e}")))?;
 
     axum::serve(listener, app)
         .await
@@ -7211,9 +7255,14 @@ mod tests {
         ));
     }
 
+    /// The address a banner test describes.
+    fn bound_3000() -> std::net::SocketAddr {
+        "127.0.0.1:3000".parse().unwrap()
+    }
+
     #[test]
     fn closed_banner_explains_how_to_enable_editing() {
-        let banner = editorial_banner(&EditorialMode::Closed, None, 3000);
+        let banner = editorial_banner(&EditorialMode::Closed, None, bound_3000());
         assert!(banner.contains("--dev-session"), "banner: {banner}");
         assert!(banner.contains("PRESEMBLE_SESSION_KEY"), "banner: {banner}");
         assert!(
@@ -7227,7 +7276,7 @@ mod tests {
         let mode = EditorialMode::DevLogin {
             label: "dev".to_string(),
         };
-        let banner = editorial_banner(&mode, Some("TOK"), 3000);
+        let banner = editorial_banner(&mode, Some("TOK"), bound_3000());
         assert!(
             banner.contains("Login URL:    http://127.0.0.1:3000/_presemble/login?token="),
             "banner: {banner}"
@@ -7242,6 +7291,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn banner_names_the_port_actually_bound() {
+        let mode = EditorialMode::DevLogin {
+            label: "dev".to_string(),
+        };
+
+        let bound = bind_then_banner(&mode, 0, session_store_for)
+            .await
+            .expect("binds a free port");
+
+        let port = bound.addr.port();
+        assert_ne!(port, 0);
+        assert!(
+            bound.banner.contains(&format!(
+                "Login URL:    http://127.0.0.1:{port}/_presemble/login?token="
+            )),
+            "banner: {}",
+            bound.banner
+        );
+    }
+
+    #[tokio::test]
+    async fn a_port_already_held_fails_before_a_token_is_minted() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("hold a port");
+        let port = held.local_addr().unwrap().port();
+        let mode = EditorialMode::DevLogin {
+            label: "dev".to_string(),
+        };
+        let minted = std::cell::Cell::new(false);
+
+        let result = bind_then_banner(&mode, port, |mode| {
+            minted.set(true);
+            session_store_for(mode)
+        })
+        .await;
+
+        assert!(result.is_err(), "binding a held port must fail");
+        assert!(
+            !minted.get(),
+            "no login token is minted before the port is bound"
+        );
+    }
+
     #[test]
     fn hosted_banner_warns_when_dev_session_ignored() {
         let warned = editorial_banner(
@@ -7250,7 +7342,7 @@ mod tests {
                 dev_session_ignored: true,
             },
             None,
-            3000,
+            bound_3000(),
         );
         assert!(warned.contains("is ignored"), "banner: {warned}");
         let plain = editorial_banner(
@@ -7259,7 +7351,7 @@ mod tests {
                 dev_session_ignored: false,
             },
             None,
-            3000,
+            bound_3000(),
         );
         assert!(!plain.contains("is ignored"), "banner: {plain}");
     }
