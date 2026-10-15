@@ -11,8 +11,30 @@ pub struct BenchSiteConfig {
     pub body_bytes: usize,
 }
 
-pub fn generate_site(config: &BenchSiteConfig) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+/// A generated bench site: the site lives at `<work>/site`, so what a build
+/// writes beside it (`<work>/output/site`, `<work>/output-editorial/site`) is
+/// inside the work dir, and dropping this removes all of it.
+pub struct BenchSite {
+    work: PathBuf,
+    site: PathBuf,
+}
+
+impl std::ops::Deref for BenchSite {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.site
+    }
+}
+
+impl Drop for BenchSite {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.work);
+    }
+}
+
+pub fn generate_site(config: &BenchSiteConfig) -> BenchSite {
+    let work = std::env::temp_dir().join(format!(
         "presemble-bench-{}-{}-{}-{}-{}",
         config.pages,
         config.schemas,
@@ -20,9 +42,9 @@ pub fn generate_site(config: &BenchSiteConfig) -> PathBuf {
         config.link_expressions,
         config.body_bytes
     ));
-
-    // Clean up from previous runs
-    let _ = fs::remove_dir_all(&dir);
+    // Clean up from a previous run that did not get to drop its site.
+    let _ = fs::remove_dir_all(&work);
+    let dir = work.join("site");
 
     let items_per_schema = config.pages / config.schemas.max(1);
     let remainder = config.pages % config.schemas.max(1);
@@ -55,7 +77,7 @@ pub fn generate_site(config: &BenchSiteConfig) -> PathBuf {
     )
     .unwrap();
 
-    dir
+    BenchSite { work, site: dir }
 }
 
 fn stem_name(s: usize) -> String {

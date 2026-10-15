@@ -6189,6 +6189,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn start_up_removes_the_staging_dirs_a_killed_serve_left_for_its_site() {
+        let work = tempfile::tempdir().expect("tempdir");
+        let site = work.path().join("site");
+        std::fs::create_dir_all(&site).unwrap();
+        // What a killed serve leaves beside the output: versions 0 and 7.
+        let stale_zero = version_dir(&site, 0);
+        std::fs::create_dir_all(&stale_zero).unwrap();
+        std::fs::write(stale_zero.join("stale.html"), "stale").unwrap();
+        let stale_seven = version_dir(&site, 7);
+        std::fs::create_dir_all(&stale_seven).unwrap();
+        // Another site's staging dir in the same output dir is not this serve's.
+        let other = work.path().join("output").join("other.publishing-0");
+        std::fs::create_dir_all(&other).unwrap();
+
+        let published = initial_publish(&site);
+
+        assert!(
+            !stale_zero.join("stale.html").exists(),
+            "version 0 is published afresh"
+        );
+        assert!(!stale_seven.exists(), "a stale version is removed");
+        assert!(other.exists(), "another site's staging dir is left alone");
+        drop(published);
+    }
+
     const TITLE_TEMPLATE: &str = "[:main [:presemble/insert {:data input.title :as \"h1\"}]]";
 
     /// The quiet time the tests give the published-build worker.

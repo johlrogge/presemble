@@ -18,6 +18,7 @@ PROFILE="${1:-dev}"
 # The port serve listens on; PRESEMBLE_SMOKE_PORT runs beside a serve on 3000.
 PORT=${PRESEMBLE_SMOKE_PORT:-3000}
 SITE_DIR=""
+WORK=""
 COOKIE_JAR=""
 WS_ERR=""
 PID=""
@@ -50,8 +51,10 @@ cleanup() {
     [ -n "$KEY_CHECK_DIR" ] && rm -rf "$KEY_CHECK_DIR"
     [ -n "$REPRO_A" ] && rm -rf "$REPRO_A"
     [ -n "$REPRO_B" ] && rm -rf "$REPRO_B"
-    # Clean up nrepl port file
-    rm -f "$(dirname "${SITE_DIR:-/tmp/x}")/.nrepl-port" 2>/dev/null || true
+    # The work dir: the site's output, serve's staging dirs, the nREPL port
+    # file, the cookie jar.
+    [ -n "$WORK" ] && rm -rf "$WORK"
+    return 0
 }
 trap cleanup EXIT
 
@@ -64,7 +67,7 @@ fail() { FAIL=$((FAIL + 1)); ERRORS="${ERRORS}\n  ✗ $1"; echo -e "  ${RED}✗$
 # a user's own `presemble serve` is never killed.
 if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
     log "Port $PORT is busy — killing leaked smoketest processes..."
-    pkill -f "presemble (serve|conductor) /tmp/presemble-smoke-" 2>/dev/null || true
+    pkill -f "presemble (serve|conductor) [^ ]*/presemble-smoke-[^/ ]*/site" 2>/dev/null || true
     sleep 2
     if curl -s "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
         echo -e "${RED}Port $PORT is in use by something other than a smoketest run (your own 'presemble serve'?). Stop it and re-run.${NC}" >&2
@@ -362,9 +365,15 @@ else
     head -n 40 <<< "$REPRO_DIFF"
 fi
 
-SITE_DIR=$(mktemp -d /tmp/presemble-smoke-XXXXXX)
+# The run's work dir holds the site at $WORK/site, so everything written beside
+# the site (its output/, output-editorial/ and serve's output.publishing-*) is
+# inside $WORK too, and the cleanup removes it all.
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/presemble-smoke-XXXXXX")
+SITE_DIR="$WORK/site"
+mkdir -p "$SITE_DIR"
 # Cookie jar lives outside $SITE_DIR so the file watcher never sees it.
-COOKIE_JAR=$(mktemp /tmp/presemble-smoke-cookies-XXXXXX)
+COOKIE_JAR="$WORK/cookies"
+: > "$COOKIE_JAR"
 log "Site directory: $SITE_DIR"
 
 # Seed legacy (pre-ADR-056) NED suggestions BEFORE serve starts — the
@@ -386,7 +395,8 @@ JSON
 
 # ── Test: invalid PRESEMBLE_SESSION_KEY refuses to start (ADR-055 amendment) ──
 log "Checking that an empty/short PRESEMBLE_SESSION_KEY fails fast..."
-KEY_CHECK_DIR=$(mktemp -d /tmp/presemble-keycheck-XXXXXX)
+KEY_CHECK_DIR="$WORK/keycheck"
+mkdir -p "$KEY_CHECK_DIR"
 check_bad_key() {  # $1 = key value, $2 = expected message fragment, $3 = label
     local out rc=0
     out=$(PRESEMBLE_SESSION_KEY="$1" timeout 300 cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- serve "$KEY_CHECK_DIR/" --port 3999 2>&1) || rc=$?
@@ -951,7 +961,7 @@ log "Testing WebSocket broadcasts..."
 # curl writes HttpOnly cookies as "#HttpOnly_<domain>", so '#' lines must NOT
 # be filtered out here.
 C=$(awk '$6=="presemble_session"{print $7}' "$COOKIE_JAR")
-WS_ERR=$(mktemp /tmp/presemble-smoke-wserr-XXXXXX)
+WS_ERR="$WORK/ws-err"
 WS_RC=0
 # The conflict step rewrites hello-world.md from outside, like an editor would.
 WS_OUT=$(PRESEMBLE_SMOKE_BASE="http://127.0.0.1:$PORT" PRESEMBLE_SMOKE_COOKIE="$C" PRESEMBLE_SMOKE_SITE="$SITE_DIR" deno run --no-prompt --allow-net=127.0.0.1:$PORT --allow-env=PRESEMBLE_SMOKE_BASE,PRESEMBLE_SMOKE_COOKIE,PRESEMBLE_SMOKE_SITE --allow-read="$SITE_DIR/content/post",resources/serve/inject.js --allow-write="$SITE_DIR/content/post" tools/ws-smoke.ts 2>"$WS_ERR") || WS_RC=$?
@@ -1182,6 +1192,27 @@ else
         B=$(curl -s "http://127.0.0.1:$PORT/post/hello-world" 2>&1 || true)
         assert_not_contains "closed: anonymous page has no editorial socket" "$B" "editorial-ws"
     fi
+fi
+
+# ── This run's output stays inside its work dir ──────────────────────────
+# A site's output goes beside it: <parent>/output/<name>,
+# <parent>/output-editorial/<name> and serve's <parent>/output/<name>.publishing-*.
+# All of it must be inside $WORK, which the cleanup removes.
+SITE_PARENT=$(dirname "$SITE_DIR")
+SITE_NAME=$(basename "$SITE_DIR")
+LEAKS=""
+for p in "$SITE_PARENT/output/$SITE_NAME" "$SITE_PARENT/output-editorial/$SITE_NAME" \
+         "$SITE_PARENT/output/$SITE_NAME".publishing-*; do
+    [ -e "$p" ] || continue
+    case "$p" in
+        "$WORK"/*) ;;
+        *) LEAKS="$LEAKS $p" ;;
+    esac
+done
+if [ -z "$LEAKS" ]; then
+    pass "the site's output is inside the work dir the cleanup removes"
+else
+    fail "the site's output is left outside the work dir:$LEAKS"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────
