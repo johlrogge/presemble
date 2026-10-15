@@ -1030,6 +1030,9 @@ fn format_ned_suggestion(s: &editorial_types::NedSuggestion) -> String {
 }
 
 #[cfg(test)]
+mod test_site;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1865,7 +1868,7 @@ mod tests {
     ///   schemas/post/item.md  — a single-slot "title" schema
     ///   templates/post/item.hiccup
     ///   content/post/first-post.md
-    fn build_e2e_site(tmp: &tempfile::TempDir) {
+    fn build_e2e_site(tmp: &crate::test_site::TestSite) {
         // `suggest_body_edit` addresses body text only (ADR-056), so the
         // fixture has a real body after the separator.
         build_e2e_site_with(
@@ -1884,7 +1887,7 @@ mod tests {
 
     /// Build a site in `tmp` with `schema` as `schemas/post/item.md` and
     /// `content` as `content/post/first-post.md`.
-    fn build_e2e_site_with(tmp: &tempfile::TempDir, schema: &str, content: &str) {
+    fn build_e2e_site_with(tmp: &crate::test_site::TestSite, schema: &str, content: &str) {
         use std::fs;
         let root = tmp.path();
         fs::create_dir_all(root.join("schemas/post")).expect("schemas dir");
@@ -1968,7 +1971,7 @@ mod tests {
 
     #[test]
     fn e2e_suggest_ned_creates_pending_suggestion() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site(&tmp);
         let _server_url = start_conductor_server(tmp.path());
 
@@ -2027,7 +2030,7 @@ mod tests {
 
     #[test]
     fn e2e_suggest_ned_no_op_is_not_an_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site(&tmp);
         let _server_url = start_conductor_server(tmp.path());
 
@@ -2063,7 +2066,7 @@ mod tests {
 
     #[test]
     fn e2e_legacy_suggest_routes_through_ned() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site(&tmp);
         let _server_url = start_conductor_server(tmp.path());
 
@@ -2114,7 +2117,7 @@ mod tests {
 
     #[test]
     fn e2e_legacy_suggest_body_edit_routes_through_ned() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site(&tmp);
         let _server_url = start_conductor_server(tmp.path());
 
@@ -2199,7 +2202,7 @@ mod tests {
 
     #[test]
     fn suggest_ned_with_a_traversal_file_is_an_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site(&tmp);
         let _url = start_conductor_server(tmp.path());
 
@@ -2230,7 +2233,7 @@ mod tests {
 
     #[test]
     fn get_content_with_a_traversal_file_is_an_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site(&tmp);
         std::fs::write(tmp.path().join("outside-marker.md"), "SECRET").expect("write");
         let _url = start_conductor_server(tmp.path());
@@ -2302,7 +2305,7 @@ mod tests {
 
     #[test]
     fn e2e_suggest_on_single_heading_title_changes_only_the_title() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site(&tmp);
         let url = start_conductor_server(tmp.path());
 
@@ -2337,7 +2340,7 @@ mod tests {
 
     #[test]
     fn e2e_suggest_on_multi_block_slot_is_error_pointing_at_suggest_ned() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site_with(
             &tmp,
             TITLE_SUMMARY_SCHEMA,
@@ -2373,7 +2376,7 @@ mod tests {
 
     #[test]
     fn e2e_suggest_body_edit_ignores_title_occurrence() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site_with(
             &tmp,
             TITLE_ONLY_SCHEMA,
@@ -2401,7 +2404,7 @@ mod tests {
 
     #[test]
     fn e2e_suggest_body_edit_search_repeated_in_one_block_is_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site_with(
             &tmp,
             TITLE_ONLY_SCHEMA,
@@ -2424,7 +2427,7 @@ mod tests {
 
     #[test]
     fn e2e_suggest_body_edit_search_in_two_blocks_is_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site_with(
             &tmp,
             TITLE_ONLY_SCHEMA,
@@ -2450,7 +2453,7 @@ mod tests {
 
     #[test]
     fn e2e_suggest_body_edit_rejects_empty_and_cr_search() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = crate::test_site::TestSite::new();
         build_e2e_site(&tmp);
         let url = start_conductor_server(tmp.path());
 
