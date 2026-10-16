@@ -25,6 +25,8 @@ PID=""
 KEY_CHECK_DIR=""
 REPRO_A=""
 REPRO_B=""
+IDLE_ON=""
+IDLE_OFF=""
 PASS=0
 FAIL=0
 ERRORS=""
@@ -51,6 +53,9 @@ cleanup() {
     [ -n "$KEY_CHECK_DIR" ] && rm -rf "$KEY_CHECK_DIR"
     [ -n "$REPRO_A" ] && rm -rf "$REPRO_A"
     [ -n "$REPRO_B" ] && rm -rf "$REPRO_B"
+    # The idle-exit test's conductors, if a check left one running.
+    [ -n "$IDLE_ON" ] && { pkill -f "presemble conductor $IDLE_ON" 2>/dev/null || true; }
+    [ -n "$IDLE_OFF" ] && { pkill -f "presemble conductor $IDLE_OFF" 2>/dev/null || true; }
     # The work dir: the site's output, serve's staging dirs, the nREPL port
     # file, the cookie jar.
     [ -n "$WORK" ] && rm -rf "$WORK"
@@ -1216,6 +1221,58 @@ else
         assert_not_contains "closed: anonymous page has no editorial socket" "$B" "editorial-ws"
     fi
 fi
+
+# ── Test: the idle exit (ADR-072) ─────────────────────────────────────────
+# A conductor nothing connects to exits after its idle period; one with the
+# idle exit off keeps running. (The conductor above has clients throughout
+# and keeps the default period.)
+
+log "Testing the conductor's idle exit..."
+IDLE_ON="$WORK/idle/on"
+IDLE_OFF="$WORK/idle/off"
+mkdir -p "$IDLE_ON/schemas" "$IDLE_ON/.presemble" "$IDLE_OFF/schemas" "$IDLE_OFF/.presemble"
+echo '{"conductor":{"idle-ms":1500}}' > "$IDLE_ON/.presemble/config.json"
+echo '{"conductor":{"idle-ms":0}}' > "$IDLE_OFF/.presemble/config.json"
+cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- conductor "$IDLE_ON" > "$WORK/idle/on.log" 2>&1 &
+cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- conductor "$IDLE_OFF" > "$WORK/idle/off.log" 2>&1 &
+IDLE_READY=0
+for i in $(seq 1 50); do
+    if grep -q "Conductor ready" "$WORK/idle/on.log" 2>/dev/null \
+        && grep -q "Conductor ready" "$WORK/idle/off.log" 2>/dev/null; then
+        IDLE_READY=1
+        break
+    fi
+    sleep 0.2
+done
+if [ "$IDLE_READY" -eq 1 ]; then
+    pass "idle: both scratch conductors start"
+else
+    fail "idle: the scratch conductors did not start within 10 s ($(cat "$WORK/idle/on.log" "$WORK/idle/off.log"))"
+fi
+IDLE_SOCKET=$(sed -n 's|^Socket: ipc://||p' "$WORK/idle/on.log")
+IDLE_GONE=0
+for i in $(seq 1 25); do
+    if ! pgrep -f "presemble conductor $IDLE_ON" > /dev/null 2>&1 \
+        && [ -n "$IDLE_SOCKET" ] && [ ! -e "$IDLE_SOCKET" ]; then
+        IDLE_GONE=1
+        break
+    fi
+    sleep 0.2
+done
+if [ "$IDLE_GONE" -eq 1 ]; then
+    pass "idle: a conductor with no client exits and removes its socket"
+else
+    fail "idle: the conductor with no client is still there after 5 s (socket: $IDLE_SOCKET)"
+fi
+assert_contains "idle: it says why it shut down" "$(cat "$WORK/idle/on.log")" "no client for 1500 ms; shutting down"
+sleep 3
+if pgrep -f "presemble conductor $IDLE_OFF" > /dev/null 2>&1; then
+    pass "idle: a conductor with the idle exit off keeps running"
+else
+    fail "idle: the conductor with idle-ms 0 exited ($(cat "$WORK/idle/off.log"))"
+fi
+IDLE_STOP=$(cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- stop "$IDLE_OFF" 2>&1 || true)
+assert_contains "idle: presemble stop stops it" "$IDLE_STOP" "stopped the conductor for"
 
 # ── This run's output stays inside its work dir ──────────────────────────
 # A site's output goes beside it: <parent>/output/<name>,

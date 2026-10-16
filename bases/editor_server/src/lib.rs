@@ -10,6 +10,7 @@ use conductor::{
     socket_url,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -443,6 +444,9 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
     println!("Starting conductor for: {}", site_dir.display());
     println!("Socket: {url}");
 
+    // The idle exit (ADR-072), as the site says; a bad value refuses to start.
+    let idle = idle_limit(site_dir)?;
+
     // Create conductor with full site build, auto-save as the site says.
     let conductor = Arc::new(open_conductor(site_dir)?);
 
@@ -473,7 +477,11 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
         doc_registry,
         jobs: Mutex::new(jobs.clone()),
     });
-    let nrepl_server = nrepl::NreplServer::new(nrepl_handler);
+    // The clients connected: on the command and event sockets, and the nREPL.
+    let socket_clients = Arc::new(AtomicUsize::new(0));
+    let nrepl_clients = Arc::new(AtomicUsize::new(0));
+    let nrepl_server =
+        nrepl::NreplServer::new(nrepl_handler).with_connection_counter(Arc::clone(&nrepl_clients));
     // Write .nrepl-port to the workspace root (site_dir's parent), not the site dir.
     // Tools like rep and Calva search upward from the current directory.
     let nrepl_project_dir = site_dir.parent().unwrap_or(site_dir).to_path_buf();
@@ -486,6 +494,7 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
     // Create REP socket for commands
     let rep_socket = nng::Socket::new(nng::Protocol::Rep0)
         .map_err(|e| format!("failed to create REP socket: {e}"))?;
+    count_clients(&rep_socket, &socket_clients)?;
     rep_socket
         .listen(&url)
         .map_err(|e| format!("failed to listen on {url}: {e}"))?;
@@ -494,6 +503,7 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
     let pub_url = format!("{url}-pub");
     let pub_socket = nng::Socket::new(nng::Protocol::Pub0)
         .map_err(|e| format!("failed to create PUB socket: {e}"))?;
+    count_clients(&pub_socket, &socket_clients)?;
     pub_socket
         .listen(&pub_url)
         .map_err(|e| format!("failed to listen on {pub_url}: {e}"))?;
@@ -502,9 +512,34 @@ pub fn run_daemon(site_dir: &Path) -> Result<(), String> {
     start_ticker(jobs.clone(), TICK_EVERY);
     // What the writer is doing, so a shutdown that it does not answer can say.
     let status = WriterStatus::default();
+    // Ending the process: close the sockets first, so their files go with it.
+    let exit: Exit = {
+        let (rep_socket, pub_socket) = (rep_socket.clone(), pub_socket.clone());
+        Arc::new(move |code| {
+            rep_socket.close();
+            pub_socket.close();
+            std::process::exit(code)
+        })
+    };
     // Ctrl-C and SIGTERM shut down through the writer, so unsaved documents
     // are flushed first.
-    handle_signals(jobs.clone(), status.clone())?;
+    handle_signals(jobs.clone(), status.clone(), Arc::clone(&exit))?;
+    // No client for the idle period: shut down the same way (ADR-072).
+    match idle {
+        Some(limit) => println!("Idle exit after {} with no client.", human_duration(limit)),
+        None => println!("Idle exit off."),
+    }
+    {
+        let watch = IdleWatch {
+            jobs: jobs.clone(),
+            status: status.clone(),
+            clients: vec![socket_clients, nrepl_clients],
+            limit: idle,
+            every: TICK_EVERY,
+        };
+        let exit = Arc::clone(&exit);
+        std::thread::spawn(move || watch.run(&*exit, &mut say_to_stderr));
+    }
 
     println!("Conductor ready. Waiting for commands...");
 
@@ -585,14 +620,10 @@ const TICK_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 /// their URL configuration from). Without the file or the key, auto-save is
 /// on, after 2000 ms.
 fn autosave_config(site_dir: &Path) -> Result<conductor::AutoSaveConfig, String> {
-    let path = site_dir.join(".presemble").join("config.json");
     let mut config = conductor::AutoSaveConfig::default();
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Some((json, invalid)) = site_config(site_dir)? else {
         return Ok(config);
     };
-    let invalid = |what: &str| format!("config error in {}: {what}", path.display());
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| invalid(&e.to_string()))?;
     let Some(autosave) = json.get("autosave") else {
         return Ok(config);
     };
@@ -611,6 +642,22 @@ fn autosave_config(site_dir: &Path) -> Result<conductor::AutoSaveConfig, String>
         config.idle = std::time::Duration::from_millis(ms);
     }
     Ok(config)
+}
+
+/// A configuration error naming the file it is in.
+type ConfigError = Box<dyn Fn(&str) -> String>;
+
+/// The site's `.presemble/config.json`, parsed, with how to report an error
+/// in it; `None` without the file.
+fn site_config(site_dir: &Path) -> Result<Option<(serde_json::Value, ConfigError)>, String> {
+    let path = site_dir.join(".presemble").join("config.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let invalid: ConfigError =
+        Box::new(move |what: &str| format!("config error in {}: {what}", path.display()));
+    let json = serde_json::from_str(&text).map_err(|e| invalid(&e.to_string()))?;
+    Ok(Some((json, invalid)))
 }
 
 /// The conductor of a site, with auto-save configured from the site's config.
@@ -701,7 +748,7 @@ fn request_shutdown_within(
 /// are flushed, and those that cannot be are named), then exit: 0 when it
 /// stopped, 1 when the writer did not answer within `SHUTDOWN_WAIT`. A second
 /// signal while that runs exits at once (130).
-fn handle_signals(jobs: Sender<Job>, status: WriterStatus) -> Result<(), String> {
+fn handle_signals(jobs: Sender<Job>, status: WriterStatus, exit: Exit) -> Result<(), String> {
     use signal_hook::consts::{SIGINT, SIGTERM};
     let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM])
         .map_err(|e| format!("cannot handle signals: {e}"))?;
@@ -712,19 +759,23 @@ fn handle_signals(jobs: Sender<Job>, status: WriterStatus) -> Result<(), String>
                 std::process::exit(130);
             }
             shutting_down = true;
-            eprintln!("conductor: shutting down (again to stop at once)");
-            let (jobs, status) = (jobs.clone(), status.clone());
-            std::thread::spawn(move || match request_shutdown(&jobs, &status) {
-                Shutdown::Done(_) => std::process::exit(0),
-                Shutdown::TimedOut { busy } => {
-                    eprintln!("conductor: {}", timed_out_message(busy.as_ref()));
-                    std::process::exit(1);
-                }
+            let (jobs, status, exit) = (jobs.clone(), status.clone(), Arc::clone(&exit));
+            std::thread::spawn(move || {
+                shutdown_and_exit(
+                    &jobs,
+                    &status,
+                    "shutting down (again to stop at once)",
+                    &*exit,
+                    &mut say_to_stderr,
+                )
             });
         }
     });
     Ok(())
 }
+
+/// How the daemon ends the process with a code.
+type Exit = Arc<dyn Fn(i32) + Send + Sync>;
 
 /// What a shutdown the writer did not answer says.
 fn timed_out_message(busy: Option<&(String, std::time::Duration)>) -> String {
@@ -738,6 +789,225 @@ fn timed_out_message(busy: Option<&(String, std::time::Duration)>) -> String {
     format!(
         "shutting down timed out: {doing}; exiting without saving (unsaved documents cannot be listed)"
     )
+}
+
+// ── The idle exit (ADR-072) ──────────────────────────────────────────────
+
+/// What the idle watcher does at a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleAction {
+    /// Keep running.
+    Stay,
+    /// Flush (before a flush), or shut down (after one that left nothing
+    /// unsaved).
+    TryExit,
+    /// The flush left something unsaved: keep running, and say so.
+    StayAndWarn,
+}
+
+/// The idle policy: `clients` connected now, none for `idle_for`, with the
+/// idle exit after `limit` (`None`: off), and what a flush left unsaved
+/// (`None`: no flush yet).
+fn idle_decision(
+    clients: usize,
+    idle_for: std::time::Duration,
+    limit: Option<std::time::Duration>,
+    unsaved_after_flush: Option<bool>,
+) -> IdleAction {
+    let Some(limit) = limit else {
+        return IdleAction::Stay; // the idle exit is off
+    };
+    if clients > 0 || idle_for < limit {
+        return IdleAction::Stay;
+    }
+    match unsaved_after_flush {
+        None | Some(false) => IdleAction::TryExit,
+        Some(true) => IdleAction::StayAndWarn,
+    }
+}
+
+/// Count the pipes of `socket` (its connected clients) in `clients`: one
+/// more when a pipe is added, one less when it is removed. Set before the
+/// socket listens, so no pipe is missed.
+fn count_clients(socket: &nng::Socket, clients: &Arc<AtomicUsize>) -> Result<(), String> {
+    let clients = Arc::clone(clients);
+    socket
+        .pipe_notify(move |_pipe, event| match event {
+            nng::PipeEvent::AddPost => {
+                clients.fetch_add(1, Ordering::SeqCst);
+            }
+            nng::PipeEvent::RemovePost => {
+                // Never below 0, whatever the library reports.
+                let _ =
+                    clients.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+            }
+            _ => {}
+        })
+        .map_err(|e| format!("cannot count the clients of a socket: {e}"))
+}
+
+/// The idle period when the site says nothing: 2 minutes.
+const DEFAULT_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The site's idle period: `conductor: { idle-ms }` in
+/// `.presemble/config.json`; `None` when `0` turns the idle exit off.
+fn idle_limit(site_dir: &Path) -> Result<Option<std::time::Duration>, String> {
+    let Some((json, invalid)) = site_config(site_dir)? else {
+        return Ok(Some(DEFAULT_IDLE));
+    };
+    let Some(conductor) = json.get("conductor") else {
+        return Ok(Some(DEFAULT_IDLE));
+    };
+    let conductor = conductor
+        .as_object()
+        .ok_or_else(|| invalid("`conductor` must be an object"))?;
+    let Some(idle) = conductor.get("idle-ms") else {
+        return Ok(Some(DEFAULT_IDLE));
+    };
+    let ms = idle
+        .as_u64()
+        .ok_or_else(|| invalid("`conductor.idle-ms` must be a whole number of milliseconds"))?;
+    Ok((ms > 0).then(|| std::time::Duration::from_millis(ms)))
+}
+
+/// Watches the conductor's clients and ends it when none has been connected
+/// for the idle period.
+struct IdleWatch {
+    jobs: Sender<Job>,
+    status: WriterStatus,
+    /// The connection counts to add up: the sockets', the nREPL's.
+    clients: Vec<Arc<AtomicUsize>>,
+    limit: Option<std::time::Duration>,
+    /// How often it checks.
+    every: std::time::Duration,
+}
+
+impl IdleWatch {
+    /// Check every `every` until the conductor shuts down (`exit` is called)
+    /// or the writer is gone. What it has to say goes to `say`.
+    fn run(self, exit: &dyn Fn(i32), say: &mut dyn FnMut(String)) {
+        let Some(limit) = self.limit else {
+            return; // the idle exit is off
+        };
+        let period = human_duration(limit);
+        // When the last client went, and whether this idle spell has warned.
+        let mut idle_since: Option<std::time::Instant> = None;
+        let mut warned = false;
+        loop {
+            std::thread::sleep(self.every);
+            let clients = self.clients();
+            if clients > 0 {
+                idle_since = None;
+                warned = false;
+                continue;
+            }
+            let since = *idle_since.get_or_insert_with(std::time::Instant::now);
+            if idle_decision(clients, since.elapsed(), Some(limit), None) != IdleAction::TryExit {
+                continue;
+            }
+            let Some(unsaved) = self.unsaved_after_flush() else {
+                if self.writer_gone() {
+                    return;
+                }
+                continue; // the writer did not answer in time: try again later
+            };
+            match idle_decision(
+                self.clients(),
+                since.elapsed(),
+                Some(limit),
+                Some(!unsaved.is_empty()),
+            ) {
+                IdleAction::TryExit => {
+                    let reason = format!("no client for {period}; shutting down");
+                    shutdown_and_exit(&self.jobs, &self.status, &reason, exit, say);
+                    return;
+                }
+                IdleAction::StayAndWarn => {
+                    if !warned {
+                        say(format!(
+                            "no client for {period}, but {} have unsaved edits; staying up",
+                            unsaved.join(", ")
+                        ));
+                        warned = true;
+                    }
+                    // Checked again after the next period.
+                    idle_since = Some(std::time::Instant::now());
+                }
+                IdleAction::Stay => {} // a client came while flushing
+            }
+        }
+    }
+
+    /// The clients connected now, on every counter.
+    fn clients(&self) -> usize {
+        self.clients.iter().map(|c| c.load(Ordering::SeqCst)).sum()
+    }
+
+    /// Flush through the writer, then the documents still unsaved; `None`
+    /// when the writer did not answer within `SHUTDOWN_WAIT` or is gone.
+    fn unsaved_after_flush(&self) -> Option<Vec<String>> {
+        ask_writer(
+            &self.jobs,
+            Command::FlushDirty { file: None },
+            SHUTDOWN_WAIT,
+        )?;
+        match ask_writer(&self.jobs, Command::GetDirtyBuffers, SHUTDOWN_WAIT)? {
+            Response::DirtyBuffers(files) => Some(files),
+            _ => None,
+        }
+    }
+
+    /// Whether the writer has ended (its queue is closed).
+    fn writer_gone(&self) -> bool {
+        let (reply, _answer) = mpsc::channel();
+        self.jobs
+            .send(Job::Ipc(Command::GetDirtyBuffers, reply))
+            .is_err()
+    }
+}
+
+/// Run `cmd` on the writer and wait at most `wait` for its answer.
+fn ask_writer(jobs: &Sender<Job>, cmd: Command, wait: std::time::Duration) -> Option<Response> {
+    let (reply, result) = mpsc::channel();
+    jobs.send(Job::Ipc(cmd, reply)).ok()?;
+    result.recv_timeout(wait).ok().map(|answer| answer.response)
+}
+
+/// A duration as a person says it: "2 min", "30 s", "1500 ms".
+fn human_duration(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms.is_multiple_of(60_000) {
+        format!("{} min", ms / 60_000)
+    } else if ms.is_multiple_of(1000) {
+        format!("{} s", ms / 1000)
+    } else {
+        format!("{ms} ms")
+    }
+}
+
+/// Shut the conductor down through the writer, saying `reason` first, then
+/// `exit`: 0 when it stopped, 1 when the writer did not answer within
+/// `SHUTDOWN_WAIT`. The signal path and the idle exit both end here.
+fn shutdown_and_exit(
+    jobs: &Sender<Job>,
+    status: &WriterStatus,
+    reason: &str,
+    exit: &dyn Fn(i32),
+    say: &mut dyn FnMut(String),
+) {
+    say(reason.to_string());
+    match request_shutdown(jobs, status) {
+        Shutdown::Done(_) => exit(0),
+        Shutdown::TimedOut { busy } => {
+            say(timed_out_message(busy.as_ref()));
+            exit(1);
+        }
+    }
+}
+
+/// What the conductor says, on stderr.
+fn say_to_stderr(line: String) {
+    eprintln!("conductor: {line}");
 }
 
 /// Legacy stub — kept so existing callers continue to compile.
@@ -1241,6 +1511,221 @@ mod tests {
             "the writer ended on the shutdown"
         );
         assert!(on_disk(&harness).starts_with("# Saved At Shutdown"));
+    }
+
+    // ── The idle exit (ADR-072) ─────────────────────────────────────────────
+
+    #[test]
+    fn the_idle_policy() {
+        use std::time::Duration;
+        let limit = Some(Duration::from_millis(100));
+        let at_limit = Duration::from_millis(100);
+        let below = Duration::from_millis(99);
+
+        assert_eq!(
+            idle_decision(1, at_limit, limit, None),
+            IdleAction::Stay,
+            "a client is connected"
+        );
+        assert_eq!(
+            idle_decision(0, below, limit, None),
+            IdleAction::Stay,
+            "not idle long enough"
+        );
+        assert_eq!(
+            idle_decision(0, at_limit, limit, None),
+            IdleAction::TryExit,
+            "at the limit: flush first"
+        );
+        assert_eq!(
+            idle_decision(0, at_limit, limit, Some(true)),
+            IdleAction::StayAndWarn,
+            "the flush left something unsaved"
+        );
+        assert_eq!(
+            idle_decision(0, at_limit, limit, Some(false)),
+            IdleAction::TryExit,
+            "the flush left nothing unsaved: shut down"
+        );
+        assert_eq!(
+            idle_decision(0, Duration::from_secs(3600), None, None),
+            IdleAction::Stay,
+            "the idle exit is off"
+        );
+    }
+
+    /// Wait until `done` holds, polling for at most 1 s.
+    fn within_a_second(done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        done()
+    }
+
+    /// A listener of `protocol` that counts its clients, and a client of
+    /// `client` dialled to it: the count is 1 while the client is connected,
+    /// 0 once it is gone.
+    fn counts_its_client(protocol: nng::Protocol, client: nng::Protocol) {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("ipc://{}", dir.path().join("socket").display());
+        let clients = Arc::new(AtomicUsize::new(0));
+        let listener = nng::Socket::new(protocol).unwrap();
+        count_clients(&listener, &clients).unwrap();
+        listener.listen(&url).unwrap();
+
+        let dialler = nng::Socket::new(client).unwrap();
+        dialler.dial(&url).unwrap();
+        assert!(
+            within_a_second(|| clients.load(Ordering::SeqCst) == 1),
+            "{protocol:?}: one client: {}",
+            clients.load(Ordering::SeqCst)
+        );
+        dialler.close();
+        assert!(
+            within_a_second(|| clients.load(Ordering::SeqCst) == 0),
+            "{protocol:?}: no client once it is gone: {}",
+            clients.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn the_command_socket_counts_its_clients() {
+        counts_its_client(nng::Protocol::Rep0, nng::Protocol::Req0);
+    }
+
+    #[test]
+    fn the_event_socket_counts_its_subscribers() {
+        counts_its_client(nng::Protocol::Pub0, nng::Protocol::Sub0);
+    }
+
+    #[test]
+    fn the_idle_period_defaults_turns_off_and_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |config: &str| {
+            std::fs::create_dir_all(dir.path().join(".presemble")).unwrap();
+            std::fs::write(dir.path().join(".presemble/config.json"), config).unwrap();
+        };
+
+        assert_eq!(idle_limit(dir.path()), Ok(Some(DEFAULT_IDLE)), "no file");
+        assert_eq!(DEFAULT_IDLE, std::time::Duration::from_secs(120));
+        write(r#"{"autosave": {"enabled": true}}"#);
+        assert_eq!(idle_limit(dir.path()), Ok(Some(DEFAULT_IDLE)), "no key");
+        write(r#"{"conductor": {"idle-ms": 1500}}"#);
+        assert_eq!(
+            idle_limit(dir.path()),
+            Ok(Some(std::time::Duration::from_millis(1500)))
+        );
+        write(r#"{"conductor": {"idle-ms": 0}}"#);
+        assert_eq!(idle_limit(dir.path()), Ok(None), "0 turns it off");
+        for bad in [
+            r#"{"conductor": {"idle-ms": "two"}}"#,
+            r#"{"conductor": {"idle-ms": -1}}"#,
+            r#"{"conductor": 5}"#,
+        ] {
+            write(bad);
+            let error = idle_limit(dir.path()).expect_err(bad);
+            assert!(error.contains("config.json"), "{bad}: {error}");
+        }
+    }
+
+    /// What a watcher run in a test has recorded so far.
+    type Recorded<T> = Arc<Mutex<Vec<T>>>;
+
+    /// An idle watcher over the harness's writer, with no clients and a
+    /// 100 ms limit, run on its own thread: the exit codes it would have
+    /// exited with, and what it said.
+    fn watch(harness: &Harness) -> (Recorded<i32>, Recorded<String>) {
+        let watch = IdleWatch {
+            jobs: harness.jobs.clone(),
+            status: harness.status.clone(),
+            clients: vec![Arc::new(AtomicUsize::new(0))],
+            limit: Some(std::time::Duration::from_millis(100)),
+            every: FAST,
+        };
+        let exits = Arc::new(Mutex::new(Vec::new()));
+        let said = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (exits, said) = (Arc::clone(&exits), Arc::clone(&said));
+            std::thread::spawn(move || {
+                watch.run(&|code| exits.lock().unwrap().push(code), &mut |line| {
+                    said.lock().unwrap().push(line)
+                })
+            });
+        }
+        (exits, said)
+    }
+
+    #[test]
+    fn an_idle_conductor_flushes_and_shuts_down() {
+        let mut harness = Harness::start();
+        harness
+            .handler()
+            .eval("s", &set_title("Flushed When Idle"))
+            .expect("evals");
+
+        let (exits, said) = watch(&harness);
+
+        assert!(
+            wait_for(|| !exits.lock().unwrap().is_empty()),
+            "it exits; it said {:?}",
+            said.lock().unwrap()
+        );
+        assert_eq!(*exits.lock().unwrap(), vec![0]);
+        assert!(writer_ends(&mut harness), "it shut down through the writer");
+        assert!(
+            on_disk(&harness).starts_with("# Flushed When Idle"),
+            "it flushed first: {}",
+            on_disk(&harness)
+        );
+        assert!(
+            said.lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("no client for 100 ms; shutting down")),
+            "{:?}",
+            said.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn an_idle_conductor_with_an_unsaved_conflict_stays_and_warns_once() {
+        let harness = Harness::start();
+        harness
+            .handler()
+            .eval("s", &set_title("Edited Here"))
+            .expect("evals");
+        std::fs::write(
+            harness._site.path().join(FILE),
+            "# Edited Outside\n\n----\n\nAlpha.\n",
+        )
+        .unwrap();
+        harness.ipc(Command::FileChanged {
+            paths: vec![editorial_types::SitePath::parse(FILE).expect("valid")],
+        });
+
+        let (exits, said) = watch(&harness);
+        // More than two idle periods.
+        std::thread::sleep(std::time::Duration::from_millis(450));
+
+        assert!(exits.lock().unwrap().is_empty(), "it stays up");
+        let warnings: Vec<String> = said
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.contains("staying up"))
+            .cloned()
+            .collect();
+        assert_eq!(warnings.len(), 1, "warned once: {warnings:?}");
+        assert!(warnings[0].contains(FILE), "{warnings:?}");
+        assert!(
+            warnings[0].contains("no client for 100 ms, but"),
+            "{warnings:?}"
+        );
+        harness.finish();
     }
 
     #[test]

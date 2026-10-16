@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 pub mod client;
@@ -76,9 +77,28 @@ impl SessionStore {
     }
 }
 
+/// One open connection in a counter, for as long as it lives.
+struct OpenConnection<'a>(&'a AtomicUsize);
+
+impl<'a> OpenConnection<'a> {
+    fn count(counter: &'a Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        OpenConnection(counter)
+    }
+}
+
+impl Drop for OpenConnection<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 pub struct NreplServer {
     handler: Arc<dyn NreplHandler>,
     sessions: SessionStore,
+    /// How many connections are open, for whoever needs to know (the
+    /// conductor's idle exit, ADR-072).
+    connections: Option<Arc<AtomicUsize>>,
 }
 
 impl NreplServer {
@@ -86,7 +106,15 @@ impl NreplServer {
         Self {
             handler,
             sessions: SessionStore::new(),
+            connections: None,
         }
+    }
+
+    /// Count the open connections in `counter`: one more when a connection
+    /// is accepted, one less when it closes.
+    pub fn with_connection_counter(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.connections = Some(counter);
+        self
     }
 
     /// Start listening on a random port. Writes port to `.nrepl-port` in project_dir.
@@ -103,6 +131,7 @@ impl NreplServer {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    let _open = self.connections.as_ref().map(OpenConnection::count);
                     if let Err(e) = self.handle_connection(stream) {
                         eprintln!("nREPL connection error: {e}");
                     }
@@ -606,6 +635,53 @@ mod tests {
         assert_eq!(arglists.len(), 1);
         let status = resp.get("status").and_then(|v| v.as_list()).unwrap();
         assert_eq!(status, &[bencode::Value::string("done")]);
+    }
+
+    // --- connection counter (ADR-072) ---
+
+    /// Wait until `done` holds, polling for at most 1 s.
+    fn within_a_second(done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        done()
+    }
+
+    #[test]
+    fn an_open_connection_is_counted_until_it_closes() {
+        use std::sync::atomic::Ordering;
+        let project = tempfile::tempdir().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let server = make_server().with_connection_counter(Arc::clone(&counter));
+        let dir = project.path().to_path_buf();
+        std::thread::spawn(move || server.listen(&dir));
+        let port_file = project.path().join(".nrepl-port");
+        assert!(
+            within_a_second(|| std::fs::read_to_string(&port_file).is_ok_and(|p| !p.is_empty())),
+            "the server writes its port"
+        );
+        let port: u16 = std::fs::read_to_string(&port_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        let client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        assert!(
+            within_a_second(|| counter.load(Ordering::SeqCst) == 1),
+            "one connection open: {}",
+            counter.load(Ordering::SeqCst)
+        );
+        drop(client);
+        assert!(
+            within_a_second(|| counter.load(Ordering::SeqCst) == 0),
+            "none open once it closed: {}",
+            counter.load(Ordering::SeqCst)
+        );
     }
 
     // --- describe includes new ops ---

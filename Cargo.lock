@@ -1698,6 +1698,7 @@ name = "nrepl"
 version = "0.35.0"
 dependencies = [
  "bencode",
+ "tempfile",
 ]
 
 [[package]]
