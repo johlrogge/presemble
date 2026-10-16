@@ -32,6 +32,12 @@ pub struct ConductorClient {
 impl ConductorClient {
     /// Connect to an existing conductor at the given IPC URL.
     pub fn connect(url: &str) -> Result<Self, String> {
+        Self::connect_with_wait(url, std::time::Duration::from_secs(5))
+    }
+
+    /// Connect to an existing conductor at the given IPC URL, waiting at most
+    /// `wait` for each reply.
+    pub fn connect_with_wait(url: &str, wait: std::time::Duration) -> Result<Self, String> {
         let socket = nng::Socket::new(nng::Protocol::Req0)
             .map_err(|e| format!("failed to create REQ socket: {e}"))?;
         // Set timeouts so blocking send/recv don't hang the LSP on shutdown.
@@ -39,7 +45,7 @@ impl ConductorClient {
             .set_opt::<nng::options::SendTimeout>(Some(std::time::Duration::from_secs(2)))
             .map_err(|e| format!("failed to set send timeout: {e}"))?;
         socket
-            .set_opt::<nng::options::RecvTimeout>(Some(std::time::Duration::from_secs(5)))
+            .set_opt::<nng::options::RecvTimeout>(Some(wait))
             .map_err(|e| format!("failed to set recv timeout: {e}"))?;
         socket
             .dial(url)
@@ -306,11 +312,58 @@ fn existing_conductor(
 
 fn other_build_message(site_dir: &std::path::Path, version: Option<String>) -> String {
     let version = version.unwrap_or_else(|| "an older version".to_string());
+    let site = site_dir.display();
     format!(
-        "the running conductor for {} is a different presemble build ({version}); \
-         stop it with `just serve-stop` / `pkill -f \"presemble conductor\"` and retry",
-        site_dir.display()
+        "the running conductor for {site} is a different presemble build ({version}); \
+         stop it with `presemble stop {site}` and retry"
     )
+}
+
+/// What asking a site's conductor to shut down came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// It answered `Ok`, or `Error` with the warnings of its last flush.
+    Stopped { warnings: Vec<String> },
+    /// It answered, but the reply did not decode: a different build.
+    StoppedOtherBuild,
+    /// Nothing listens on the site's socket.
+    NotRunning,
+    /// It took the request but did not answer within the wait.
+    NoAnswer,
+}
+
+/// How long `presemble stop` waits for the conductor's answer: longer than the
+/// daemon's own 5 s shutdown bound, so a slow but healthy flush is not
+/// reported as no answer.
+pub const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Ask the conductor of `site_dir` to shut down. Never starts one.
+pub fn stop_conductor(site_dir: &std::path::Path) -> StopOutcome {
+    stop_conductor_at(&socket_url(site_dir), STOP_WAIT)
+}
+
+/// Ask the conductor at `url` to shut down; wait at most `wait` for its answer.
+///
+/// It sends `Shutdown` with no handshake first: a conductor of another build
+/// is stopped as well. Unlike `ensure_conductor` it never starts one.
+pub fn stop_conductor_at(url: &str, wait: std::time::Duration) -> StopOutcome {
+    let Ok(client) = ConductorClient::connect_with_wait(url, wait) else {
+        return StopOutcome::NotRunning;
+    };
+    let Ok(reply) = client.exchange(&Command::Shutdown) else {
+        return StopOutcome::NoAnswer;
+    };
+    match serde_json::from_slice::<Response>(&reply) {
+        Ok(Response::Error(warnings)) => StopOutcome::Stopped {
+            warnings: warnings
+                .split("; ")
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect(),
+        },
+        Ok(_) => StopOutcome::Stopped { warnings: vec![] },
+        Err(_) => StopOutcome::StoppedOtherBuild,
+    }
 }
 
 fn cleanup_stale_socket(site_dir: &std::path::Path) {
@@ -376,17 +429,7 @@ mod tests {
     /// Spin up an in-process Rep0 server that answers every request with
     /// `reply`, verbatim. Returns the URL the client should connect to.
     fn spawn_server_replying(reply: Vec<u8>) -> String {
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        // Tests run in parallel: the counter keeps two servers started in the
-        // same clock tick from colliding on one address.
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let url = format!("ipc:///tmp/presemble-test-{pid}-{nanos}-{n}");
-
+        let url = test_url();
         let url_for_server = url.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         thread::spawn(move || {
@@ -459,12 +502,8 @@ mod tests {
         assert!(err.contains(&site_name), "names the site: {err}");
         assert!(err.contains("0.0.1-other"), "names its version: {err}");
         assert!(
-            err.contains("just serve-stop"),
+            err.contains(&format!("`presemble stop {site_name}`")),
             "says how to stop it: {err}"
-        );
-        assert!(
-            err.contains("pkill -f \"presemble conductor\""),
-            "says how to stop it without just: {err}"
         );
     }
 
@@ -484,8 +523,125 @@ mod tests {
         let site_name = site.path().display().to_string();
         assert!(err.contains(&site_name), "names the site: {err}");
         assert!(
-            err.contains("just serve-stop"),
+            err.contains(&format!("`presemble stop {site_name}`")),
             "says how to stop it: {err}"
+        );
+    }
+
+    /// A socket address no other test uses.
+    fn test_url() -> String {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // Tests run in parallel: the counter keeps two servers started in the
+        // same clock tick from colliding on one address.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("ipc:///tmp/presemble-test-{pid}-{nanos}-{n}")
+    }
+
+    /// Spin up an in-process Rep0 server that hands every request it receives
+    /// to the returned channel and answers it with `reply`, or never answers
+    /// when `reply` is `None`.
+    fn spawn_server_recording(
+        reply: Option<Vec<u8>>,
+    ) -> (String, std::sync::mpsc::Receiver<Vec<u8>>) {
+        let url = test_url();
+        let url_for_server = url.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (request_tx, request_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            let server = nng::Socket::new(nng::Protocol::Rep0).unwrap();
+            server.listen(&url_for_server).unwrap();
+            ready_tx.send(()).unwrap();
+            while let Ok(msg) = server.recv() {
+                let _ = request_tx.send(msg.as_slice().to_vec());
+                let Some(reply) = &reply else {
+                    // Never answer; keep the socket open so the client waits.
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    break;
+                };
+                if server.send(nng::Message::from(reply.as_slice())).is_err() {
+                    break;
+                }
+            }
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("test server did not start listening within 5 seconds");
+        (url, request_rx)
+    }
+
+    const TEST_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    #[test]
+    fn stop_sends_shutdown_without_a_handshake() {
+        let (url, requests) =
+            spawn_server_recording(Some(serde_json::to_vec(&Response::Ok).unwrap()));
+        stop_conductor_at(&url, TEST_STOP_WAIT);
+        let first = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the conductor received a request");
+        let command: Command = serde_json::from_slice(&first).expect("a command");
+        assert!(
+            matches!(command, Command::Shutdown),
+            "the first request is Shutdown, not a ping: {command:?}"
+        );
+    }
+
+    #[test]
+    fn stop_reports_a_stopped_conductor_and_its_warnings() {
+        let warned = Response::Error("a.md could not be saved; b.md is in conflict".to_string());
+        let (url, _requests) = spawn_server_recording(Some(serde_json::to_vec(&warned).unwrap()));
+        assert_eq!(
+            stop_conductor_at(&url, TEST_STOP_WAIT),
+            StopOutcome::Stopped {
+                warnings: vec![
+                    "a.md could not be saved".to_string(),
+                    "b.md is in conflict".to_string()
+                ]
+            }
+        );
+
+        let (url, _requests) =
+            spawn_server_recording(Some(serde_json::to_vec(&Response::Ok).unwrap()));
+        assert_eq!(
+            stop_conductor_at(&url, TEST_STOP_WAIT),
+            StopOutcome::Stopped { warnings: vec![] }
+        );
+    }
+
+    #[test]
+    fn stop_reports_an_unreadable_reply_as_another_build() {
+        // What a conductor from before the handshake answers.
+        let (url, _requests) = spawn_server_recording(Some(b"\"Pong\"".to_vec()));
+        assert_eq!(
+            stop_conductor_at(&url, TEST_STOP_WAIT),
+            StopOutcome::StoppedOtherBuild
+        );
+    }
+
+    #[test]
+    fn stop_reports_no_conductor_when_nothing_listens() {
+        // Nothing listens here, and stop must not start anything.
+        assert_eq!(
+            stop_conductor_at(&test_url(), TEST_STOP_WAIT),
+            StopOutcome::NotRunning
+        );
+    }
+
+    #[test]
+    fn stop_reports_no_answer_within_the_wait() {
+        let (url, _requests) = spawn_server_recording(None);
+        let started = std::time::Instant::now();
+        let outcome = stop_conductor_at(&url, std::time::Duration::from_millis(200));
+        assert_eq!(outcome, StopOutcome::NoAnswer);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "gave up within about the wait, took {:?}",
+            started.elapsed()
         );
     }
 

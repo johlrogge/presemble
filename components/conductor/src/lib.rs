@@ -11,7 +11,8 @@ mod test_site;
 
 pub use autosave::{AutoSaveConfig, Clock, SystemClock};
 pub use client::{
-    ConductorClient, ConductorSubscriber, Handshake, SubscriberError, ensure_conductor, socket_url,
+    ConductorClient, ConductorSubscriber, Handshake, STOP_WAIT, StopOutcome, SubscriberError,
+    ensure_conductor, socket_url, stop_conductor, stop_conductor_at,
 };
 pub use conductor::{CommandResult, Conductor, ProgramError, ProgramOutcome};
 pub use content_store::edit::Plan;

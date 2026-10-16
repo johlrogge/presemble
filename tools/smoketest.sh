@@ -1103,6 +1103,29 @@ log "Testing duplicate prevention..."
 assert_curl "duplicate author rejected" "/_presemble/create-content" POST '{"stem":"author","slug":"alice"}' "already exists"
 assert_curl "duplicate post rejected" "/_presemble/create-content" POST '{"stem":"post","slug":"first-post"}' "already exists"
 
+# ── Test: presemble stop (ADR-072) ────────────────────────────────────────
+# The site's conductor shuts down when asked, and a second stop finds none.
+# (The closed-plane restart below starts a new one.)
+
+log "Testing presemble stop..."
+STOP_OUT=$(cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- stop "$SITE_DIR/" 2>&1 || true)
+assert_contains "stop: the conductor is stopped" "$STOP_OUT" "stopped the conductor for"
+CONDUCTOR_GONE=0
+for i in $(seq 1 30); do
+    if ! pgrep -f "presemble conductor $SITE_DIR" > /dev/null 2>&1; then
+        CONDUCTOR_GONE=1
+        break
+    fi
+    sleep 0.2
+done
+if [ "$CONDUCTOR_GONE" -eq 1 ]; then
+    pass "stop: no conductor process is left"
+else
+    fail "stop: the conductor process is still running 6 s after the stop"
+fi
+STOP_AGAIN=$(cargo polylith cargo --profile "$PROFILE" run --quiet --bin presemble -- stop "$SITE_DIR/" 2>&1 || true)
+assert_contains "stop: a second stop finds no conductor" "$STOP_AGAIN" "no conductor running for"
+
 # ── Test: Closed editorial plane ──────────────────────────────────────────
 # MUST stay the last section: it restarts serve on the same port with no
 # --dev-session and no PRESEMBLE_SESSION_KEY, so editing is disabled. The

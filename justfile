@@ -50,6 +50,11 @@ serve-release dir="site" session="manual":
 serve-stop:
     -pkill -f "presemble serve"
 
+# Stop serve, then the site's conductor (it saves what it can first).
+[group('develop')]
+stop dir="site": serve-stop
+    cargo polylith cargo --profile dev run -q --bin presemble -- stop {{ dir }}
+
 # Output lands in <parent-of-dir>/output/<dir-name>/. The site is validated
 # first (publish gate, ADR-061): on validation errors every diagnostic is
 # printed on stderr as `path:line:col: error: …`, nothing is written, and the

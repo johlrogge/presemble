@@ -411,6 +411,12 @@ enum Command {
         /// The content file, relative to the site directory (e.g. content/post/x.md)
         file: String,
     },
+    /// Ask the site's conductor to shut down (it saves what it can first).
+    /// Never starts one.
+    Stop {
+        /// Path to the site directory
+        site_dir: String,
+    },
     /// Write every file that has a canonical form (content, today) as a save
     /// would. Exits 1 when --check finds changes, 2 when a file cannot be
     /// formatted.
@@ -506,6 +512,14 @@ pub fn run() -> Result<(), CliError> {
         }
         Some(Command::Init { site_dir }) => init_site(Path::new(&site_dir)),
         Some(Command::Reload { site_dir, file }) => reload_document(Path::new(&site_dir), &file),
+        Some(Command::Stop { site_dir }) => {
+            let (outcome, warnings) = stop_site(Path::new(&site_dir))?;
+            println!("{outcome}");
+            for warning in warnings {
+                eprintln!("{warning}");
+            }
+            Ok(())
+        }
         Some(Command::Fmt { site_dir, check }) => fmt::run_fmt(Path::new(&site_dir), check),
         Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
         Some(Command::Conductor { site_dir }) => {
@@ -547,6 +561,45 @@ pub fn run() -> Result<(), CliError> {
             Ok(())
         }
     }
+}
+
+/// What `presemble stop` tells the user: the outcome line (stdout) and one
+/// line per warning of the conductor's last flush (stderr). A conductor that
+/// did not answer is an error, which `main` prints once.
+fn stop_result(
+    site: &Path,
+    outcome: &conductor::StopOutcome,
+) -> Result<(String, Vec<String>), CliError> {
+    use conductor::StopOutcome;
+    let site = site.display();
+    match outcome {
+        StopOutcome::Stopped { warnings } => Ok((
+            format!("stopped the conductor for {site}"),
+            warnings.iter().map(|w| format!("conductor: {w}")).collect(),
+        )),
+        StopOutcome::StoppedOtherBuild => Ok((
+            format!(
+                "stopped the conductor for {site} (a different presemble build; \
+                 its reply could not be read)"
+            ),
+            vec![],
+        )),
+        StopOutcome::NotRunning => Ok((format!("no conductor running for {site}"), vec![])),
+        StopOutcome::NoAnswer => Err(CliError::ConductorNoAnswer(format!(
+            "the conductor for {site} did not answer within {} s; stop it with \
+             SIGTERM (pkill -f \"presemble conductor {site}\"): it then exits \
+             within 5 s, saying what it was busy with",
+            conductor::STOP_WAIT.as_secs()
+        ))),
+    }
+}
+
+/// Ask the conductor of an existing site directory to shut down. A missing
+/// directory is refused before any conductor is asked.
+fn stop_site(site_dir: &Path) -> Result<(String, Vec<String>), CliError> {
+    let site = site_dir::SiteDir::existing(site_dir)?;
+    let outcome = conductor::stop_conductor(site.path());
+    stop_result(site.path(), &outcome)
 }
 
 /// What `presemble reload` tells the user.
@@ -956,6 +1009,87 @@ mod tests {
             }
             _ => panic!("expected the reload subcommand"),
         }
+    }
+
+    #[test]
+    fn cli_parses_stop() {
+        let cli = Cli::try_parse_from(["presemble", "stop", "site/"])
+            .expect("`presemble stop <site-dir>` parses");
+        match cli.command {
+            Some(Command::Stop { site_dir }) => assert_eq!(site_dir, "site/"),
+            _ => panic!("expected the stop subcommand"),
+        }
+    }
+
+    #[test]
+    fn stop_result_says_what_became_of_the_conductor() {
+        let site = Path::new("demo/site");
+        use conductor::StopOutcome;
+        let report = |outcome: &StopOutcome| {
+            stop_result(site, outcome).expect("a conductor that answered, or none, is not an error")
+        };
+
+        assert_eq!(
+            report(&StopOutcome::Stopped { warnings: vec![] }),
+            ("stopped the conductor for demo/site".to_string(), vec![])
+        );
+        assert_eq!(
+            report(&StopOutcome::Stopped {
+                warnings: vec![
+                    "a.md could not be saved".to_string(),
+                    "b.md is in conflict".to_string()
+                ]
+            }),
+            (
+                "stopped the conductor for demo/site".to_string(),
+                vec![
+                    "conductor: a.md could not be saved".to_string(),
+                    "conductor: b.md is in conflict".to_string()
+                ]
+            )
+        );
+        assert_eq!(
+            report(&StopOutcome::StoppedOtherBuild),
+            (
+                "stopped the conductor for demo/site (a different presemble build; \
+                 its reply could not be read)"
+                    .to_string(),
+                vec![]
+            )
+        );
+        assert_eq!(
+            report(&StopOutcome::NotRunning),
+            ("no conductor running for demo/site".to_string(), vec![])
+        );
+    }
+
+    #[test]
+    fn stop_without_an_answer_is_an_error_printed_once() {
+        match stop_result(Path::new("demo/site"), &conductor::StopOutcome::NoAnswer) {
+            Err(CliError::ConductorNoAnswer(message)) => assert_eq!(
+                message,
+                "the conductor for demo/site did not answer within 10 s; stop it with \
+                 SIGTERM (pkill -f \"presemble conductor demo/site\"): it then exits \
+                 within 5 s, saying what it was busy with"
+            ),
+            other => panic!("expected ConductorNoAnswer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_of_a_missing_site_directory_is_an_error_that_names_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("demo");
+        let started = std::time::Instant::now();
+        let error = stop_site(&missing)
+            .expect_err("a missing site directory is refused")
+            .to_string();
+        assert!(error.contains(&missing.display().to_string()), "{error}");
+        assert!(error.contains("does not exist"), "{error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "at once, without asking any conductor"
+        );
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub enum CliError {
     /// The site directory given is not one (missing, not a directory, or
     /// without `schemas/`); the message names the path.
     SiteDir(String),
+    /// `presemble stop`: the conductor took the request but did not answer
+    /// in time; the message says how to stop it.
+    ConductorNoAnswer(String),
 }
 
 impl CliError {
@@ -56,6 +59,7 @@ impl fmt::Display for CliError {
             CliError::NotFormatted(n) => write!(f, "{n} file(s) would be reformatted"),
             CliError::FormatFailed(n) => write!(f, "{n} file(s) could not be formatted"),
             CliError::SiteDir(msg) => write!(f, "{msg}"),
+            CliError::ConductorNoAnswer(msg) => write!(f, "{msg}"),
         }
     }
 }
