@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. Decided: `presemble stop`, and serve not stopping the conductor. Open: D-a and D-b below; the idle exit (decision 3) is implemented once D-a is decided.
+Proposed (decided; implemented once the idle exit lands; accepted once the manual checks pass)
 
 ## Context
 
@@ -15,13 +15,18 @@ Proposed. Decided: `presemble stop`, and serve not stopping the conductor. Open:
 ## Decision
 
 1. **An explicit stop.** `presemble stop <site-dir>` asks the site's conductor to shut down: it sends `Shutdown` (the same flush and warnings as a signal), with no protocol check first, so it also stops a conductor of another build. It waits a bounded time for the answer. It reports one of: stopped (with any warnings about unsaved edits), no conductor running, or no answer (then SIGTERM stops it, within 5 s). `just stop` stops serve and then the conductor.
-2. **serve stops only itself.** `just serve-stop` stops serve, never the conductor (pending D-b). A conductor shared with an editor survives serve restarts.
-3. **The conductor exits when no client has been connected for a while** (pending D-a). It counts the connections on its command and event sockets. When there have been none for the idle period, it shuts down as for a signal. With unsaved edits and auto-save off, it stays up and warns instead, since exiting would lose them. The period is `conductor: { idle-ms }` in `.presemble/config.json`. A client that needs it later starts a new one.
+2. **serve stops only itself.** `just serve-stop` stops serve, never the conductor (D-b). A conductor shared with an editor survives serve restarts.
+3. **The conductor exits when no client has been connected for a while** (D-a).
+   - **Idle** means no connection on the command socket, the event socket or the nREPL, for the whole idle period.
+   - **The period** is `conductor: { idle-ms }` in `.presemble/config.json`: 120000 (2 minutes) by default; `0` turns the idle exit off.
+   - **Before exiting**, it flushes, as for a signal.
+   - **If anything is still unsaved after the flush** (auto-save off, a conflict, a held or drifted region, a buffer not yet canonical), it stays up and warns, once per idle spell. It never exits on its own while that would lose an edit.
+   - A client that needs it later starts a new one.
 
-## Open decisions
+## Choices made by the user
 
-- **D-a: the idle period.** Recommendation: 2 minutes. Long enough that moving between Helix, the browser and MCP never restarts it; short enough that a forgotten conductor goes away.
-- **D-b: should `just serve-stop` also stop the conductor?** Recommendation: no. `just stop` is for stopping everything.
+- **D-a: the idle period is 2 minutes** (`conductor: { idle-ms: 120000 }` by default; `0` turns the idle exit off). Long enough that moving between Helix, the browser and MCP never restarts it; short enough that a forgotten conductor goes away.
+- **D-b: `just serve-stop` stops serve only;** `just stop` stops everything.
 
 ## Alternatives considered
 
