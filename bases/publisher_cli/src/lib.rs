@@ -429,8 +429,9 @@ enum Command {
     },
     /// Start the Presemble LSP server (reads JSON-RPC from stdin, writes to stdout)
     Lsp {
-        /// Path to the site directory
-        site_dir: String,
+        /// Path to the site directory. Without it, the workspace root the
+        /// editor sends, or the first file opened, chooses the site.
+        site_dir: Option<String>,
     },
     /// Start the conductor daemon for a site
     Conductor {
@@ -521,7 +522,7 @@ pub fn run() -> Result<(), CliError> {
             Ok(())
         }
         Some(Command::Fmt { site_dir, check }) => fmt::run_fmt(Path::new(&site_dir), check),
-        Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(Path::new(&site_dir)),
+        Some(Command::Lsp { site_dir }) => lsp::run_lsp_stdio(site_dir.as_deref().map(Path::new)),
         Some(Command::Conductor { site_dir }) => {
             let site = site_dir::SiteDir::existing(Path::new(&site_dir))?;
             editor_server::run_daemon(site.path()).map_err(CliError::Render)
@@ -1009,6 +1010,21 @@ mod tests {
             }
             _ => panic!("expected the reload subcommand"),
         }
+    }
+
+    #[test]
+    fn cli_parses_lsp_without_a_site() {
+        let cli = Cli::try_parse_from(["presemble", "lsp"])
+            .expect("`presemble lsp` parses: the editor's files choose the site");
+        match cli.command {
+            Some(Command::Lsp { site_dir }) => assert_eq!(site_dir, None),
+            _ => panic!("expected the lsp subcommand"),
+        }
+        let with = Cli::try_parse_from(["presemble", "lsp", "site/"]).expect("parses");
+        assert!(matches!(
+            with.command,
+            Some(Command::Lsp { site_dir: Some(dir) }) if dir == "site/"
+        ));
     }
 
     #[test]

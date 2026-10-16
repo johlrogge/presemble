@@ -845,6 +845,8 @@ args = ["lsp", "site/"]
 
 Replace `site/` with the path to your site directory.
 
+A language server serves one site. A file from another site gets one diagnostic on its first line, naming both sites, and is not checked. To give it a language server for its own site, save it, close it and open it again: `:w`, `:bc`, then `:o <file>`. `:lsp-restart` also works, but it restarts the language server of every site.
+
 ### Typing in the editor
 
 What you type in a content file reaches the site as you type it.

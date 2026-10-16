@@ -1,4 +1,7 @@
 use crate::buffer::{self, Synced};
+use crate::site_choice::{
+    FilePlace, SiteChoice, choose_site, file_in_session, other_site_diagnostic,
+};
 use lsp_capabilities::{
     Severity, SlotAction, SlotCompletion, TemplateDefinitionTarget, build_transform,
     content_completions, definition_for_position, hover_for_line, link_completions,
@@ -84,16 +87,29 @@ pub enum ConductorLink {
     Unavailable(String),
 }
 
-/// The Presemble language server. Without a conductor it still runs: it
-/// tells the editor why (`window/showMessage`) and answers every request
-/// empty, rather than exiting and leaving the editor to guess.
+/// The Presemble language server, for one site (D-S1). It may start before it
+/// knows the site: the command-line argument, the workspace root or the first
+/// file opened chooses it, and it connects to that site's conductor then.
+/// Without a conductor it still runs: it tells the editor why
+/// (`window/showMessage`) and answers every request empty, rather than
+/// exiting and leaving the editor to guess.
 pub struct PresembleLsp {
-    inner: Inner,
+    client: Client,
+    link: Mutex<Link>,
+    connect: Connector,
 }
 
-enum Inner {
-    Connected(Box<Session>),
-    Unavailable { client: Client, reason: String },
+/// Where the server stands with its site's conductor.
+enum Link {
+    /// The site is not known yet; `arg` is the command-line one, if given.
+    Waiting {
+        arg: Option<std::path::PathBuf>,
+    },
+    /// Shared so a handler can work on it without holding the link.
+    Connected(Arc<Session>),
+    Unavailable {
+        reason: String,
+    },
 }
 
 /// What the editor is told when there is no conductor: an error naming the
@@ -107,15 +123,170 @@ pub fn unavailable_message(reason: &str) -> (MessageType, String) {
     )
 }
 
+/// How the language server reaches the conductor of a site:
+/// `conductor::ensure_conductor` outside the tests.
+pub type Connector =
+    Arc<dyn Fn(&std::path::Path) -> Result<conductor::ConductorClient, String> + Send + Sync>;
+
 impl PresembleLsp {
+    /// A server that does not know its site yet. `arg` is the site given on
+    /// the command line, if any; otherwise the workspace root or the first
+    /// file opened chooses it, and `connect` reaches its conductor then.
+    pub fn waiting(client: Client, arg: Option<std::path::PathBuf>, connect: Connector) -> Self {
+        Self {
+            client,
+            link: Mutex::new(Link::Waiting { arg }),
+            connect,
+        }
+    }
+
+    /// A server that cannot serve, for `reason` (told to the editor).
+    pub fn unavailable(client: Client, reason: String) -> Self {
+        Self {
+            client,
+            link: Mutex::new(Link::Unavailable { reason }),
+            connect: Arc::new(conductor::ensure_conductor),
+        }
+    }
+
+    /// A server for `site_dir`, its line to the conductor already set up.
     pub fn new(client: Client, site_dir: std::path::PathBuf, link: ConductorLink) -> Self {
-        let inner = match link {
+        let link = match link {
             ConductorLink::Connected(conductor) => {
-                Inner::Connected(Box::new(Session::new(client, site_dir, conductor)))
+                Link::Connected(Arc::new(Session::new(client.clone(), site_dir, conductor)))
             }
-            ConductorLink::Unavailable(reason) => Inner::Unavailable { client, reason },
+            ConductorLink::Unavailable(reason) => Link::Unavailable { reason },
         };
-        Self { inner }
+        Self {
+            client,
+            link: Mutex::new(link),
+            connect: Arc::new(conductor::ensure_conductor),
+        }
+    }
+
+    /// Reach the conductor of `site` (absolute), off the async threads: it
+    /// may start one and wait for it.
+    async fn connect_to(&self, site: std::path::PathBuf) -> Link {
+        let connect = self.connect.clone();
+        let target = site.clone();
+        let reached = tokio::task::spawn_blocking(move || connect(&target))
+            .await
+            .unwrap_or_else(|e| Err(format!("connecting failed: {e}")));
+        match reached {
+            Ok(conductor) => {
+                Link::Connected(Arc::new(Session::new(self.client.clone(), site, conductor)))
+            }
+            Err(e) => Link::Unavailable {
+                reason: format!("no conductor for {}: {e}", site.display()),
+            },
+        }
+    }
+
+    /// While still waiting, choose the site from what is known now (the
+    /// workspace root, or a file just opened) and connect to it. True when it
+    /// did.
+    async fn choose_and_connect(
+        &self,
+        link: &mut Link,
+        root: Option<&std::path::Path>,
+        opened: Option<&std::path::Path>,
+    ) -> bool {
+        if let Link::Waiting { arg } = &*link
+            && let SiteChoice::Chosen(site) = choose_site(arg.as_deref(), root, opened)
+        {
+            *link = self.connect_to(site).await;
+            return true;
+        }
+        false
+    }
+
+    /// The session that answers for the file behind `uri`: only a file of the
+    /// served site gets one.
+    async fn session_for(&self, uri: &Url) -> Option<Arc<Session>> {
+        let session = self.session().await?;
+        let file = uri.to_file_path().ok()?;
+        (file_in_session(&session.site_dir, &file) == FilePlace::Belongs).then_some(session)
+    }
+
+    /// The session, if connected.
+    async fn session(&self) -> Option<Arc<Session>> {
+        match &*self.link.lock().await {
+            Link::Connected(session) => Some(session.clone()),
+            _ => None,
+        }
+    }
+
+    /// The session for a server that may still be waiting: `opened`, the
+    /// file just opened, chooses the site if nothing has yet.
+    async fn session_for_opened(&self, opened: &std::path::Path) -> Option<Arc<Session>> {
+        let mut link = self.link.lock().await;
+        if self.choose_and_connect(&mut link, None, Some(opened)).await
+            && let Link::Unavailable { reason } = &*link
+        {
+            let (kind, message) = unavailable_message(reason);
+            self.client.show_message(kind, message).await;
+        }
+        match &*link {
+            Link::Connected(session) => Some(session.clone()),
+            _ => None,
+        }
+    }
+
+    /// Tell a file of another site where it belongs; nothing goes to the
+    /// conductor for it.
+    async fn tell_other_site(&self, uri: Url, own: &std::path::Path, served: &std::path::Path) {
+        self.client
+            .publish_diagnostics(uri, vec![other_site_diagnostic(own, served)], None)
+            .await;
+    }
+}
+
+/// The workspace root the editor sent, as a path: the first workspace
+/// folder, else `rootUri`.
+fn workspace_root(params: &InitializeParams) -> Option<std::path::PathBuf> {
+    // `rootUri` is deprecated in LSP in favour of workspace folders, but an
+    // editor that sends no folders may still send it.
+    #[allow(deprecated)]
+    let root_uri = params.root_uri.as_ref();
+    params
+        .workspace_folders
+        .as_ref()
+        .and_then(|folders| folders.first())
+        .map(|folder| &folder.uri)
+        .or(root_uri)
+        .and_then(|uri| uri.to_file_path().ok())
+}
+
+/// What the server can do, advertised whether or not it has a site yet.
+fn capabilities() -> ServerCapabilities {
+    ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![
+                "#".into(),
+                "[".into(),
+                "!".into(),
+                ".".into(),
+                "\"".into(),
+            ]),
+            ..Default::default()
+        }),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![
+                "presemble.acceptSuggestion".to_string(),
+                "presemble.rejectSuggestion".to_string(),
+                buffer::KEEP_MINE.to_string(),
+                buffer::RELOAD_DOCUMENT.to_string(),
+                buffer::OVERWRITE_FILE.to_string(),
+                buffer::RESOLVE_CONFLICT.to_string(),
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
     }
 }
 
@@ -1065,37 +1236,7 @@ impl LanguageServer for Session {
         _: InitializeParams,
     ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
         Ok(InitializeResult {
-            capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
-                )),
-                completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![
-                        "#".into(),
-                        "[".into(),
-                        "!".into(),
-                        ".".into(),
-                        "\"".into(),
-                    ]),
-                    ..Default::default()
-                }),
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
-                definition_provider: Some(OneOf::Left(true)),
-                document_formatting_provider: Some(OneOf::Left(true)),
-                execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec![
-                        "presemble.acceptSuggestion".to_string(),
-                        "presemble.rejectSuggestion".to_string(),
-                        buffer::KEEP_MINE.to_string(),
-                        buffer::RELOAD_DOCUMENT.to_string(),
-                        buffer::OVERWRITE_FILE.to_string(),
-                        buffer::RESOLVE_CONFLICT.to_string(),
-                    ],
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
+            capabilities: capabilities(),
             ..Default::default()
         })
     }
@@ -1858,57 +1999,114 @@ fn separator_line(src: &str) -> Option<u32> {
         .map(|(i, _)| i as u32)
 }
 
-/// Every request goes to the session; without a conductor, the editor is
-/// told why once (on `initialized`) and every request is answered empty.
+/// A file's notifications go to the session when the file belongs to its
+/// site; a file of another site is told so, and a file in no site is left
+/// alone. Requests go to the session; without one (still waiting, or no
+/// conductor) every request is answered empty, and without a conductor the
+/// editor is told why.
 #[async_trait]
 impl LanguageServer for PresembleLsp {
     async fn initialize(
         &self,
         params: InitializeParams,
     ) -> tower_lsp::jsonrpc::Result<InitializeResult> {
-        match &self.inner {
-            Inner::Connected(session) => session.initialize(params).await,
-            Inner::Unavailable { .. } => Ok(InitializeResult::default()),
-        }
+        let root = workspace_root(&params);
+        let mut link = self.link.lock().await;
+        // Not told yet if it fails: the editor hears why on `initialized`.
+        self.choose_and_connect(&mut link, root.as_deref(), None)
+            .await;
+        Ok(InitializeResult {
+            capabilities: capabilities(),
+            ..Default::default()
+        })
     }
 
     async fn initialized(&self, params: InitializedParams) {
-        match &self.inner {
-            Inner::Connected(session) => session.initialized(params).await,
-            Inner::Unavailable { client, reason } => {
-                let (kind, message) = unavailable_message(reason);
-                client.show_message(kind, message).await;
+        let session = {
+            let link = self.link.lock().await;
+            match &*link {
+                Link::Connected(session) => session.clone(),
+                Link::Unavailable { reason } => {
+                    let (kind, message) = unavailable_message(reason);
+                    self.client.show_message(kind, message).await;
+                    return;
+                }
+                Link::Waiting { .. } => {
+                    self.client
+                        .log_message(
+                            MessageType::INFO,
+                            "Presemble LSP ready; it serves the site of the first file opened",
+                        )
+                        .await;
+                    return;
+                }
             }
-        }
+        };
+        session.initialized(params).await;
     }
 
     async fn shutdown(&self) -> tower_lsp::jsonrpc::Result<()> {
-        match &self.inner {
-            Inner::Connected(session) => session.shutdown().await,
-            Inner::Unavailable { .. } => Ok(()),
+        match self.session().await {
+            Some(session) => session.shutdown().await,
+            None => Ok(()),
         }
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        if let Inner::Connected(session) = &self.inner {
-            session.did_open(params).await;
+        let Ok(file) = params.text_document.uri.to_file_path() else {
+            return;
+        };
+        let Some(session) = self.session_for_opened(&file).await else {
+            return;
+        };
+        match file_in_session(&session.site_dir, &file) {
+            FilePlace::Belongs => session.did_open(params).await,
+            FilePlace::OtherSite(own) => {
+                self.tell_other_site(params.text_document.uri, &own, &session.site_dir)
+                    .await
+            }
+            FilePlace::NoSite => {}
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        if let Inner::Connected(session) = &self.inner {
-            session.did_close(params).await;
+        let Some(session) = self.session().await else {
+            return;
+        };
+        let Ok(file) = params.text_document.uri.to_file_path() else {
+            return;
+        };
+        match file_in_session(&session.site_dir, &file) {
+            FilePlace::Belongs => session.did_close(params).await,
+            // What it was told goes with it.
+            FilePlace::OtherSite(_) => {
+                self.client
+                    .publish_diagnostics(params.text_document.uri, vec![], None)
+                    .await
+            }
+            FilePlace::NoSite => {}
         }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        if let Inner::Connected(session) = &self.inner {
-            session.did_change(params).await;
+        let Some(session) = self.session().await else {
+            return;
+        };
+        let Ok(file) = params.text_document.uri.to_file_path() else {
+            return;
+        };
+        match file_in_session(&session.site_dir, &file) {
+            FilePlace::Belongs => session.did_change(params).await,
+            FilePlace::OtherSite(own) => {
+                self.tell_other_site(params.text_document.uri, &own, &session.site_dir)
+                    .await
+            }
+            FilePlace::NoSite => {}
         }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        if let Inner::Connected(session) = &self.inner {
+        if let Some(session) = self.session_for(&params.text_document.uri).await {
             session.did_save(params).await;
         }
     }
@@ -1917,16 +2115,18 @@ impl LanguageServer for PresembleLsp {
         &self,
         params: CompletionParams,
     ) -> tower_lsp::jsonrpc::Result<Option<CompletionResponse>> {
-        match &self.inner {
-            Inner::Connected(session) => session.completion(params).await,
-            Inner::Unavailable { .. } => Ok(None),
+        let uri = &params.text_document_position.text_document.uri;
+        match self.session_for(uri).await {
+            Some(session) => session.completion(params).await,
+            None => Ok(None),
         }
     }
 
     async fn hover(&self, params: HoverParams) -> tower_lsp::jsonrpc::Result<Option<Hover>> {
-        match &self.inner {
-            Inner::Connected(session) => session.hover(params).await,
-            Inner::Unavailable { .. } => Ok(None),
+        let uri = &params.text_document_position_params.text_document.uri;
+        match self.session_for(uri).await {
+            Some(session) => session.hover(params).await,
+            None => Ok(None),
         }
     }
 
@@ -1934,9 +2134,9 @@ impl LanguageServer for PresembleLsp {
         &self,
         params: CodeActionParams,
     ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
-        match &self.inner {
-            Inner::Connected(session) => session.code_action(params).await,
-            Inner::Unavailable { .. } => Ok(None),
+        match self.session_for(&params.text_document.uri).await {
+            Some(session) => session.code_action(params).await,
+            None => Ok(None),
         }
     }
 
@@ -1944,9 +2144,9 @@ impl LanguageServer for PresembleLsp {
         &self,
         params: DocumentFormattingParams,
     ) -> tower_lsp::jsonrpc::Result<Option<Vec<TextEdit>>> {
-        match &self.inner {
-            Inner::Connected(session) => session.formatting(params).await,
-            Inner::Unavailable { .. } => Ok(None),
+        match self.session_for(&params.text_document.uri).await {
+            Some(session) => session.formatting(params).await,
+            None => Ok(None),
         }
     }
 
@@ -1954,19 +2154,23 @@ impl LanguageServer for PresembleLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> tower_lsp::jsonrpc::Result<Option<GotoDefinitionResponse>> {
-        match &self.inner {
-            Inner::Connected(session) => session.goto_definition(params).await,
-            Inner::Unavailable { .. } => Ok(None),
+        let uri = &params.text_document_position_params.text_document.uri;
+        match self.session_for(uri).await {
+            Some(session) => session.goto_definition(params).await,
+            None => Ok(None),
         }
     }
 
+    /// A command names no document: its arguments are site-relative paths
+    /// and ids from the session's own code actions, which only a file of the
+    /// served site gets.
     async fn execute_command(
         &self,
         params: ExecuteCommandParams,
     ) -> tower_lsp::jsonrpc::Result<Option<serde_json::Value>> {
-        match &self.inner {
-            Inner::Connected(session) => session.execute_command(params).await,
-            Inner::Unavailable { .. } => Ok(None),
+        match self.session().await {
+            Some(session) => session.execute_command(params).await,
+            None => Ok(None),
         }
     }
 }
@@ -1996,6 +2200,190 @@ mod tests {
         let site = Path::new("/srv/site");
         let sent = site_path_for(site, Path::new("/srv/site/content/post/a.md")).expect("inside");
         assert_eq!(sent.as_str(), "content/post/a.md");
+    }
+
+    /// A site `name` inside `tmp`, with one content file; its canonical root.
+    fn site_in(tmp: &Path, name: &str) -> std::path::PathBuf {
+        let site = tmp.join(name);
+        std::fs::create_dir_all(site.join("schemas")).unwrap();
+        std::fs::create_dir_all(site.join("content/post")).unwrap();
+        std::fs::write(site.join("content/post/a.md"), "# A\n").unwrap();
+        site.canonicalize().unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_a_file_of_the_served_site_gets_the_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let site_a = site_in(tmp.path(), "a");
+        let site_b = site_in(tmp.path(), "b");
+        // Something to dial: creating the session sends nothing to it.
+        let url = format!("ipc://{}", tmp.path().join("conductor").display());
+        let listener = nng::Socket::new(nng::Protocol::Rep0).unwrap();
+        listener.listen(&url).unwrap();
+        let connect: Connector =
+            Arc::new(move |_: &Path| conductor::ConductorClient::connect(&url));
+        let service = waiting_server(Some(site_a.clone()), connect);
+        service
+            .inner()
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+
+        let of_a = Url::from_file_path(site_a.join("content/post/a.md")).unwrap();
+        let of_b = Url::from_file_path(site_b.join("content/post/a.md")).unwrap();
+        assert!(
+            service.inner().session_for(&of_a).await.is_some(),
+            "connected to site A: a file of A is answered"
+        );
+        assert!(
+            service.inner().session_for(&of_b).await.is_none(),
+            "a file of site B is not answered by A's session"
+        );
+    }
+
+    #[test]
+    fn the_first_workspace_folder_is_preferred_to_root_uri() {
+        let folder = Url::from_file_path("/work/folder").unwrap();
+        let root = Url::from_file_path("/work/root").unwrap();
+        // `root_uri` is deprecated in LSP; editors still send it.
+        #[allow(deprecated)]
+        let params = InitializeParams {
+            root_uri: Some(root.clone()),
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: folder,
+                name: "folder".to_string(),
+            }]),
+            ..InitializeParams::default()
+        };
+        assert_eq!(
+            workspace_root(&params),
+            Some(std::path::PathBuf::from("/work/folder"))
+        );
+        #[allow(deprecated)]
+        let only_root = InitializeParams {
+            root_uri: Some(root),
+            ..InitializeParams::default()
+        };
+        assert_eq!(
+            workspace_root(&only_root),
+            Some(std::path::PathBuf::from("/work/root")),
+            "rootUri is the fallback"
+        );
+    }
+
+    /// A connector that records each site it is asked for and reaches no
+    /// conductor: the tests never start one.
+    fn recording_connector() -> (Connector, Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>) {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = asked.clone();
+        let connect: Connector = Arc::new(move |site: &Path| {
+            record.lock().unwrap().push(site.to_path_buf());
+            Err("no conductor in this test".to_string())
+        });
+        (connect, asked)
+    }
+
+    /// A server driven through `LspService` (its client's messages dropped).
+    fn waiting_server(arg: Option<std::path::PathBuf>, connect: Connector) -> LspServiceOf {
+        let (service, socket) =
+            tower_lsp::LspService::new(|client| PresembleLsp::waiting(client, arg, connect));
+        drop(socket);
+        service
+    }
+
+    type LspServiceOf = tower_lsp::LspService<PresembleLsp>;
+
+    fn opened(path: &Path) -> DidOpenTextDocumentParams {
+        DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: Url::from_file_path(path).unwrap(),
+                language_id: "markdown".to_string(),
+                version: 1,
+                text: "# A\n".to_string(),
+            },
+        }
+    }
+
+    /// A temp dir with a site one level inside it.
+    fn temp_site() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let site = tmp.path().join("site");
+        std::fs::create_dir_all(site.join("schemas")).unwrap();
+        std::fs::create_dir_all(site.join("content/post")).unwrap();
+        std::fs::write(site.join("content/post/a.md"), "# A\n").unwrap();
+        (tmp, site)
+    }
+
+    #[tokio::test]
+    async fn the_first_file_opened_chooses_the_site_and_its_conductor() {
+        let (_tmp, site) = temp_site();
+        let (connect, asked) = recording_connector();
+        let service = waiting_server(None, connect);
+
+        let init = service
+            .inner()
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        assert!(
+            init.capabilities.text_document_sync.is_some(),
+            "the capabilities are advertised before the site is known"
+        );
+        assert!(asked.lock().unwrap().is_empty(), "no site known yet");
+
+        service
+            .inner()
+            .did_open(opened(&site.join("content/post/a.md")))
+            .await;
+
+        let asked = asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "one conductor asked for: {asked:?}");
+        assert!(asked[0].is_absolute(), "{}", asked[0].display());
+        assert_eq!(
+            conductor::socket_url(&asked[0]),
+            conductor::socket_url(&site),
+            "the conductor of the file's site"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_in_no_site_starts_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let readme = tmp.path().join("README.md");
+        std::fs::write(&readme, "# Readme\n").unwrap();
+        let (connect, asked) = recording_connector();
+        let service = waiting_server(None, connect);
+
+        service
+            .inner()
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+        service.inner().did_open(opened(&readme)).await;
+
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "no conductor for a README"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_site_argument_is_connected_at_initialize() {
+        let (_tmp, site) = temp_site();
+        let (connect, asked) = recording_connector();
+        let service = waiting_server(Some(site.clone()), connect);
+
+        service
+            .inner()
+            .initialize(InitializeParams::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![site.canonicalize().unwrap()],
+            "the argument's conductor, as an absolute path"
+        );
     }
 
     /// A conductor that never says anything: every receive times out (fast).

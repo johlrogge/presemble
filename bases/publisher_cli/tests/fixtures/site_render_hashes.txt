@@ -17,7 +17,7 @@ site/feature/the-presemble-repl/index.html 4387f7ba25a97cb7
 site/feature/validated-at-every-level/index.html 21f8bdf4a48ec816
 site/guide/getting-started/index.html d9181b06024d1315
 site/guide/the-presemble-model/index.html af893e184a4612fa
-site/guide/user-guide/index.html 326123cbb0215236
+site/guide/user-guide/index.html 6cd791f379d48512
 site/index.html f306becd559e5ab4
 site/post/building-presemble/index.html d9706ff4c5a260ee
 site/post/index.html a1265113dda27dfd

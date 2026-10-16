@@ -1518,9 +1518,11 @@ dependencies = [
  "editorial_types",
  "lsp_capabilities",
  "mem_site_repository",
+ "nng",
  "schema",
  "serde_json",
  "site_index",
+ "tempfile",
  "tokio",
  "tower-lsp",
 ]
