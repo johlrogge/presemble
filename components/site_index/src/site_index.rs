@@ -548,6 +548,106 @@ pub fn content_file_path(stem: &str, slug: &str) -> String {
     }
 }
 
+/// The site `path` belongs to: the nearest ancestor directory (`path` itself
+/// when it is a directory) holding a `schemas/` directory. Canonical when it
+/// can be, so it matches what the conductor's socket is keyed on.
+/// Give an absolute path: a relative path's last ancestor is the working
+/// directory.
+pub fn site_of(path: &Path) -> Option<PathBuf> {
+    let site = path
+        .ancestors()
+        .find(|dir| dir.join(DIR_SCHEMAS).is_dir())?;
+    Some(site.canonicalize().unwrap_or_else(|_| site.to_path_buf()))
+}
+
+#[cfg(test)]
+mod site_of_tests {
+    use super::*;
+
+    /// A temp dir with a site one level inside it, so nothing the test makes
+    /// lands outside the temp dir.
+    struct Tree {
+        tmp: tempfile::TempDir,
+    }
+
+    impl Tree {
+        fn new() -> Self {
+            let tree = Tree {
+                tmp: tempfile::tempdir().unwrap(),
+            };
+            tree.site_at("site");
+            tree
+        }
+
+        /// Make a site (a directory with `schemas/`) at `rel`; return its root.
+        fn site_at(&self, rel: &str) -> PathBuf {
+            let root = self.tmp.path().join(rel);
+            std::fs::create_dir_all(root.join(DIR_SCHEMAS)).unwrap();
+            root
+        }
+
+        fn site(&self) -> PathBuf {
+            self.tmp.path().join("site")
+        }
+
+        fn file(&self, rel: &str) -> PathBuf {
+            let path = self.tmp.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "x\n").unwrap();
+            path
+        }
+    }
+
+    fn canonical(path: &Path) -> Option<PathBuf> {
+        Some(path.canonicalize().unwrap())
+    }
+
+    #[test]
+    fn a_content_file_belongs_to_its_site() {
+        let tree = Tree::new();
+        let file = tree.file("site/content/post/a.md");
+        assert_eq!(site_of(&file), canonical(&tree.site()));
+    }
+
+    #[test]
+    fn the_site_root_belongs_to_itself() {
+        let tree = Tree::new();
+        assert_eq!(site_of(&tree.site()), canonical(&tree.site()));
+    }
+
+    #[test]
+    fn a_template_belongs_to_its_site() {
+        let tree = Tree::new();
+        let file = tree.file("site/templates/post/item.hiccup");
+        assert_eq!(site_of(&file), canonical(&tree.site()));
+    }
+
+    #[test]
+    fn a_file_outside_any_site_belongs_to_none() {
+        let tree = Tree::new();
+        let file = tree.file("elsewhere/notes.md");
+        assert_eq!(site_of(&file), None);
+    }
+
+    #[test]
+    fn a_nested_site_is_the_nearest_one() {
+        let tree = Tree::new();
+        let inner = tree.site_at("site/content/inner");
+        let file = tree.file("site/content/inner/content/post/a.md");
+        assert_eq!(site_of(&file), canonical(&inner));
+    }
+
+    #[test]
+    fn a_file_named_schemas_does_not_make_a_site() {
+        let tree = Tree::new();
+        tree.file("site/content/schemas");
+        let file = tree.file("site/content/post/a.md");
+        assert_eq!(site_of(&file), canonical(&tree.site()));
+        let lone = tree.file("lone/schemas");
+        assert_eq!(site_of(&lone.with_file_name("x.md")), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
