@@ -822,10 +822,12 @@ See [deployment URL rewriting](/feature/deployment-url-rewriting) for full detai
 ## Editor support (LSP)
 
 ```
-presemble lsp <site-dir>
+presemble lsp [<site-dir>]
 ```
 
 Starts an LSP server over stdio. A single server process handles content, template, and schema files, dispatching by path. Point any LSP-capable editor at the `presemble lsp` binary.
+
+Without a site, the server serves the site of the first file you open (the nearest directory with `schemas/`), or the editor's workspace root if that is a site. Give a site only for an editor that should always serve that one.
 
 The LSP requires a conductor daemon. If `presemble serve` is already running for the site, the LSP connects to its conductor automatically. If no conductor is running, the LSP starts one on the first incoming request. There is no standalone mode — all classify, grammar, completions, and document-text operations go through the conductor.
 
@@ -837,13 +839,19 @@ Add to `~/.config/helix/languages.toml`:
 [[language]]
 name = "markdown"
 language-servers = ["presemble-lsp"]
+roots = ["schemas"]
+
+[[language]]
+name = "html"
+language-servers = ["presemble-lsp"]
+roots = ["schemas"]
 
 [language-server.presemble-lsp]
 command = "presemble"
-args = ["lsp", "site/"]
+args = ["lsp"]
 ```
 
-Replace `site/` with the path to your site directory.
+No site is named: the language server serves the site of the files it is given. Helix's workspace root for a file is the nearest directory holding `schemas/`, so each site gets its own language server. Give both languages the same `roots`. The site argument (`presemble lsp <site-dir>`) is optional, and still works for editors that start one server for a fixed site.
 
 A language server serves one site. A file from another site gets one diagnostic on its first line, naming both sites, and is not checked. To give it a language server for its own site, save it, close it and open it again: `:w`, `:bc`, then `:o <file>`. `:lsp-restart` also works, but it restarts the language server of every site.
 

@@ -2,16 +2,21 @@
 [[language]]
 name = "markdown"
 language-servers = ["presemble-lsp", "marksman"]
+roots = ["schemas"]
 
 # Presemble LSP for template files
 [[language]]
 name = "html"
 language-servers = ["presemble-lsp"]
+roots = ["schemas"]
 
-# Paths are relative to the repo root: start hx there. target/debug is refreshed by just serve/test/smoketest.
+# Paths are still relative to the repo root: start hx there. target/debug is
+# refreshed by just serve/test/smoketest. No site is named: Helix's workspace
+# root for a file is the nearest ancestor holding schemas/ (the `roots` above,
+# the same for both languages), so each site gets its own server.
 [language-server.presemble-lsp]
 command = "target/debug/presemble"
-args = ["lsp", "site/"]
+args = ["lsp"]
 
 [language-server.rust-analyzer]
 config.cargo.buildScripts.enable = true

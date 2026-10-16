@@ -1,7 +1,8 @@
 //! The repo's Helix configuration runs the language server that this
-//! checkout builds, against a site that exists. A wrong site directory (it
-//! once said `demo/`) or a binary from PATH (a stale build) gives an editor
-//! without Presemble.
+//! checkout builds, one per site: it names no site (the server finds it), and
+//! Helix's workspace root for a file is the nearest directory holding
+//! `schemas/`. A fixed site directory (it once said `demo/`, then `site/`) or
+//! a binary from PATH (a stale build) gives an editor without Presemble.
 
 use std::path::{Path, PathBuf};
 
@@ -39,19 +40,38 @@ fn quoted_values(section: &str, key: &str) -> Vec<String> {
 }
 
 #[test]
-fn helix_runs_the_lsp_on_a_site_directory_that_exists() {
+fn helix_runs_the_lsp_without_naming_a_site() {
     let section = presemble_lsp_section();
-    let args = quoted_values(&section, "args");
-    assert_eq!(args.first().map(String::as_str), Some("lsp"), "{section}");
-    let site = args
-        .get(1)
-        .unwrap_or_else(|| panic!("a site argument in {section}"));
-    let dir = repo_root().join(site);
-    assert!(
-        dir.join("schemas").is_dir(),
-        "the site directory {site} must exist and have schemas/: {}",
-        dir.display()
+    assert_eq!(
+        quoted_values(&section, "args"),
+        ["lsp"],
+        "the server finds the site of the files it is given: {section}"
     );
+}
+
+/// The `[[language]]` entry of `.helix/languages.toml` named `name`.
+fn language_section(name: &str) -> String {
+    let text = std::fs::read_to_string(repo_root().join(".helix/languages.toml"))
+        .expect(".helix/languages.toml is readable");
+    text.split("[[language]]")
+        .skip(1)
+        .map(|entry| entry.split("\n[").next().unwrap_or(entry))
+        .find(|entry| quoted_values(entry, "name") == [name])
+        .unwrap_or_else(|| panic!("a [[language]] entry named {name}"))
+        .to_string()
+}
+
+#[test]
+fn helix_gives_each_site_its_own_workspace_root() {
+    // The same roots for both, or a site's content and templates would get
+    // different servers.
+    for name in ["markdown", "html"] {
+        let entry = language_section(name);
+        assert!(
+            quoted_values(&entry, "roots").contains(&"schemas".to_string()),
+            "{name}: the nearest directory holding schemas/ is the root: {entry}"
+        );
+    }
 }
 
 #[test]
